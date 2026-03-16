@@ -83,7 +83,7 @@ function createChunk(chunkIndex: number, blocks: readonly PdfLayoutBlock[]): Pdf
   const citations = blocks.map((block, blockIndex) => createCitation(chunkIndex, blockIndex, block));
   return {
     id: `chunk-${chunkIndex}`,
-    text: blocks.map((block) => block.text).join("\n").trim(),
+    text: serializeChunkBlocks(blocks),
     role: summarizeChunkRole(blocks),
     pageNumbers: dedupeNumbers(blocks.map((block) => block.pageNumber)),
     blockIds: blocks.map((block) => block.id),
@@ -118,4 +118,15 @@ function dedupeNumbers(values: readonly number[]): readonly number[] {
 
 function dedupeKnownLimits(values: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {
   return Array.from(new Set(values));
+}
+
+function serializeChunkBlocks(blocks: readonly PdfLayoutBlock[]): string {
+  let text = "";
+
+  for (const [blockIndex, block] of blocks.entries()) {
+    const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : "\n");
+    text += `${separator}${block.text}`;
+  }
+
+  return text.trim();
 }

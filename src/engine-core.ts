@@ -1,6 +1,6 @@
 import { decodePdfHexTextWithUnicodeCMap, parsePdfUnicodeCMap } from "./cmap.ts";
 import { buildKnowledgeDocument } from "./knowledge.ts";
-import { buildLayoutDocument } from "./layout.ts";
+import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts";
 import {
   analyzePdfShell,
   decodePdfLiteral,
@@ -484,7 +484,13 @@ function buildObservationStage(
   const diagnostics = createObservationDiagnostics(inspection);
   const observedPageResult = buildObservedPages(inspection, diagnostics);
   const pages = observedPageResult.pages;
-  const extractedText = pages.flatMap((page) => page.runs.map((run) => run.text)).join("\n");
+  const extractedText = buildObservationParagraphText({
+    kind: "shell",
+    strategy: "decoded-text-operators",
+    extractedText: "",
+    pages,
+    knownLimits: [],
+  });
 
   if (extractedText.length === 0) {
     if (observedPageResult.hasFontMappingGap) {
@@ -509,7 +515,7 @@ function buildObservationStage(
     strategy: "decoded-text-operators",
     extractedText,
     pages,
-    knownLimits: collectObservationKnownLimits(inspection, observedPageResult.hasFontMappingGap),
+    knownLimits: collectObservationKnownLimits(inspection, observedPageResult.hasFontMappingGap, extractedText.length > 0),
   };
 
   return stageResult(
@@ -853,10 +859,14 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
 function collectObservationKnownLimits(
   inspection: PdfShellInspection,
   hasFontMappingGap: boolean,
+  hasParagraphText: boolean,
 ): readonly PdfKnownLimitCode[] {
   const knownLimits: PdfKnownLimitCode[] = [...collectIrKnownLimits(inspection)];
   if (inspection.analysis.indirectObjects.some((objectShell) => typeof objectShell.streamText === "string")) {
     knownLimits.push("text-decoding-heuristic");
+  }
+  if (hasParagraphText) {
+    knownLimits.push("paragraph-break-heuristic");
   }
   if (hasFontMappingGap) {
     knownLimits.push("font-unicode-mapping-not-implemented");
