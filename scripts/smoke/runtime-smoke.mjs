@@ -743,6 +743,13 @@ const repeatedBoundaryResult = await engine.toLayout({
     mediaType: "application/pdf",
   },
 });
+const repeatedBoundaryKnowledgeResult = await engine.toKnowledge({
+  source: {
+    bytes: encodeText(repeatedBoundaryPdf),
+    fileName: "repeated-boundary.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const observationWithoutPassword = await engine.observe({
   source: {
     bytes: encodeText(encryptedPdf),
@@ -765,6 +772,7 @@ assert(engine.identity.supportedStages.includes("admission"), "Engine identity d
 assert(engine.identity.supportedStages.includes("ir"), "Engine identity does not claim IR support.");
 assert(engine.identity.supportedStages.includes("observation"), "Engine identity does not claim observation support.");
 assert(engine.identity.supportedStages.includes("layout"), "Engine identity does not claim layout support.");
+assert(engine.identity.supportedStages.includes("knowledge"), "Engine identity does not claim knowledge support.");
 assert(result.admission.status === "completed", `Admission status was ${result.admission.status}.`);
 assert(result.ir.status === "completed", `IR status was ${result.ir.status}.`);
 assert(result.observation.status === "completed", `Observation status was ${result.observation.status}.`);
@@ -822,6 +830,20 @@ assert(
   layoutResult.layout.value?.knownLimits.includes("layout-reading-order-heuristic"),
   "Layout known limits did not include layout-reading-order-heuristic.",
 );
+assert(layoutResult.knowledge.status === "partial", `Knowledge status was ${layoutResult.knowledge.status}.`);
+assert(layoutResult.knowledge.value?.strategy === "layout-chunks", "Knowledge strategy was not preserved.");
+assert(
+  layoutResult.knowledge.value?.chunks[0]?.citations[0]?.blockId === layoutResult.layout.value?.pages[0]?.blocks[0]?.id,
+  "Knowledge citations did not preserve the source block id.",
+);
+assert(
+  layoutResult.knowledge.value?.tables.length === 0,
+  `Knowledge stage emitted ${String(layoutResult.knowledge.value?.tables.length ?? "missing")} tables for the synthetic layout case.`,
+);
+assert(
+  layoutResult.knowledge.value?.knownLimits.includes("table-projection-not-implemented"),
+  "Knowledge known limits did not include table-projection-not-implemented.",
+);
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(
   repeatedBoundaryResult.value?.pages[0]?.blocks[0]?.role === "header" &&
@@ -832,6 +854,15 @@ assert(
   repeatedBoundaryResult.value?.pages[0]?.blocks.at(-1)?.role === "footer" &&
     repeatedBoundaryResult.value?.pages[1]?.blocks.at(-1)?.role === "footer",
   "Repeated footer text was not classified as footer on both pages.",
+);
+assert(repeatedBoundaryKnowledgeResult.status === "partial", `Repeated-boundary knowledge status was ${repeatedBoundaryKnowledgeResult.status}.`);
+assert(
+  !repeatedBoundaryKnowledgeResult.value?.extractedText.includes("Quarterly Report"),
+  "Repeated-boundary knowledge output still included the repeated header text.",
+);
+assert(
+  !repeatedBoundaryKnowledgeResult.value?.extractedText.includes("Confidential"),
+  "Repeated-boundary knowledge output still included the repeated footer text.",
 );
 assert(flateResult.ir.value?.decodedStreams === true, "Flate stream did not mark decodedStreams.");
 assert(flateResult.ir.value?.indirectObjects[3]?.streamDecodeState === "decoded", "Flate stream was not marked as decoded.");
@@ -1026,6 +1057,9 @@ console.log(
       observationStrategy: result.observation.value?.strategy ?? null,
       layout: result.layout.status,
       layoutStrategy: result.layout.value?.strategy ?? null,
+      knowledge: result.knowledge.status,
+      knowledgeStrategy: result.knowledge.value?.strategy ?? null,
+      knowledgeChunkCount: result.knowledge.value?.chunks.length ?? null,
       text: result.observation.value?.extractedText ?? null,
     },
     null,
