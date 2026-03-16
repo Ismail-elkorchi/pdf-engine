@@ -58,10 +58,46 @@ const syntheticPdfTemplate = [
   "",
 ].join("\n");
 
+const encryptedPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  "<< /Length 22 >>",
+  "stream",
+  "BT",
+  "(Encrypted Shell) Tj",
+  "ET",
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  "<< /Filter /Standard /V 4 >>",
+  "endobj",
+  "xref",
+  "0 6",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 6 /Encrypt 5 0 R >>",
+  "startxref",
+  "__ENCRYPTED_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
+
 const startXrefOffset = syntheticPdfTemplate.indexOf("xref\n0 5");
 assert(startXrefOffset >= 0, "Synthetic PDF did not contain an xref section.");
+const encryptedStartXrefOffset = encryptedPdfTemplate.indexOf("xref\n0 6");
+assert(encryptedStartXrefOffset >= 0, "Encrypted synthetic PDF did not contain an xref section.");
 
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
+const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
 const malformedPdf = [
   "%PDF-1.4",
   "1 0 obj",
@@ -83,6 +119,7 @@ const malformedPdf = [
 ].join("\n");
 
 const engine = moduleNamespace.createPdfEngine();
+assert(typeof engine.dispose === "function", "Engine does not expose dispose().");
 const result = await engine.run({
   source: {
     bytes: new TextEncoder().encode(syntheticPdf),
@@ -107,20 +144,47 @@ const blockedRecoveryResult = await engine.run({
     repairMode: "never",
   },
 });
+const observationWithoutPassword = await engine.observe({
+  source: {
+    bytes: new TextEncoder().encode(encryptedPdf),
+    fileName: "encrypted.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const observationWithPassword = await engine.observe({
+  source: {
+    bytes: new TextEncoder().encode(encryptedPdf),
+    fileName: "encrypted.pdf",
+    mediaType: "application/pdf",
+  },
+  passwordProvider: () => "secret",
+});
 
 assert(result.runtime.kind === expectedRuntime, `Expected runtime ${expectedRuntime} but received ${result.runtime.kind}.`);
+assert(engine.identity.supportedRuntimes.includes(expectedRuntime), `Engine identity does not claim support for runtime ${expectedRuntime}.`);
+assert(engine.identity.supportedStages.includes("admission"), "Engine identity does not claim admission support.");
+assert(engine.identity.supportedStages.includes("ir"), "Engine identity does not claim IR support.");
+assert(engine.identity.supportedStages.includes("observation"), "Engine identity does not claim observation support.");
 assert(result.admission.status === "completed", `Admission status was ${result.admission.status}.`);
 assert(result.ir.status === "completed", `IR status was ${result.ir.status}.`);
 assert(result.observation.status === "completed", `Observation status was ${result.observation.status}.`);
 assert(result.admission.value?.repairState === "clean", `Repair state was ${result.admission.value?.repairState ?? "missing"}.`);
+assert(result.admission.value?.knownLimits.includes("streams-not-decoded"), "Admission known limits did not include streams-not-decoded.");
 assert(result.admission.value?.parseCoverage.startXref === true, "The shell did not recover startxref coverage.");
 assert(result.admission.value?.parseCoverage.trailer === true, "The shell did not recover trailer coverage.");
 assert(result.ir.value?.indirectObjects.length === 4, `Unexpected indirect-object count: ${result.ir.value?.indirectObjects.length ?? 0}.`);
+assert(result.ir.value?.decodedStreams === false, "IR incorrectly claimed decoded streams.");
+assert(result.ir.value?.resolvedInheritedPageState === false, "IR incorrectly claimed inherited page resolution.");
 assert(result.ir.value?.trailer?.rootRef?.objectNumber === 1, "Trailer root ref was not recovered.");
 assert(result.ir.value?.pages[0]?.pageRef?.objectNumber === 3, "Page object ref was not recovered.");
 assert(result.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4, "Content stream ref was not recovered.");
 assert(result.observation.value?.pages[0]?.pageRef?.objectNumber === 3, "Observation page ref was not preserved.");
 assert(result.observation.value?.pages[0]?.runs[0]?.objectRef?.objectNumber === 4, "Observation run object ref was not preserved.");
+assert(result.observation.value?.strategy === "heuristic-literal-scan", "Observation strategy was not preserved.");
+assert(
+  result.observation.value?.knownLimits.includes("text-decoding-heuristic"),
+  "Observation known limits did not include text-decoding-heuristic.",
+);
 assert(
   result.observation.value?.extractedText === "Hello PDF Engine",
   `Unexpected extracted text: ${JSON.stringify(result.observation.value?.extractedText ?? null)}.`,
@@ -137,17 +201,32 @@ assert(
   blockedRecoveryResult.admission.value?.decision === "unsupported",
   `Repair-blocked decision was ${blockedRecoveryResult.admission.value?.decision ?? "missing"}.`,
 );
+assert(observationWithoutPassword.status === "blocked", `Encrypted observe status without password was ${observationWithoutPassword.status}.`);
+assert(
+  observationWithoutPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-required"),
+  "Encrypted observe without password did not surface password-required.",
+);
+assert(observationWithPassword.status === "blocked", `Encrypted observe status with password was ${observationWithPassword.status}.`);
+assert(
+  observationWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
+  "Encrypted observe with password did not surface decryption-not-implemented.",
+);
+await engine.dispose();
 
 console.log(
   JSON.stringify(
     {
       runtime: result.runtime.kind,
       admission: result.admission.status,
+      supportedRuntimes: engine.identity.supportedRuntimes,
       repairState: result.admission.value?.repairState ?? null,
       recoveredAdmission: recoveredResult.admission.status,
       recoveredRepairState: recoveredResult.admission.value?.repairState ?? null,
+      encryptedObservationWithoutPassword: observationWithoutPassword.status,
+      encryptedObservationWithPassword: observationWithPassword.status,
       ir: result.ir.status,
       observation: result.observation.status,
+      observationStrategy: result.observation.value?.strategy ?? null,
       text: result.observation.value?.extractedText ?? null,
     },
     null,

@@ -78,6 +78,22 @@ export type PdfCrossReferenceKind = "classic" | "xref-stream" | "hybrid" | "unkn
 export type PdfRepairState = "clean" | "recovered" | "recovery-required";
 
 /**
+ * Stable implementation-limit codes that the current shell engine can expose without hiding known gaps.
+ */
+export type PdfKnownLimitCode =
+  | "decryption-not-implemented"
+  | "streams-not-decoded"
+  | "xref-stream-entries-not-decoded"
+  | "object-streams-not-expanded"
+  | "resource-inheritance-unresolved"
+  | "text-decoding-heuristic";
+
+/**
+ * Observation strategy used to produce the current text evidence.
+ */
+export type PdfObservationStrategy = "heuristic-literal-scan";
+
+/**
  * Caller-provided resource limits for one request.
  */
 export interface PdfResourceBudget {
@@ -295,6 +311,10 @@ export interface PdfEngineIdentity {
   readonly version: string;
   /** Implementation mode for the current engine. */
   readonly mode: "shell";
+  /** Runtimes that the public package currently claims to support. */
+  readonly supportedRuntimes: readonly PdfRuntimeKind[];
+  /** Stages that the current implementation actually exposes. */
+  readonly supportedStages: readonly PdfStageKind[];
 }
 
 /**
@@ -380,6 +400,8 @@ export interface PdfAdmissionArtifact {
   readonly featureSignals: readonly PdfFeatureSignal[];
   /** Fully normalized policy used for the request. */
   readonly policy: PdfNormalizedAdmissionPolicy;
+  /** Known implementation limits that materially affect this admission result. */
+  readonly knownLimits: readonly PdfKnownLimitCode[];
 }
 
 /**
@@ -438,6 +460,16 @@ export interface PdfIrDocument {
   readonly featureKinds: readonly PdfFeatureKind[];
   /** Per-page shell summaries. */
   readonly pages: readonly PdfIrPageShell[];
+  /** Whether stream bytes were decoded into operator-ready content. */
+  readonly decodedStreams: false;
+  /** Whether object streams were expanded into member objects. */
+  readonly expandedObjectStreams: false;
+  /** Whether xref stream entries were decoded into a full index. */
+  readonly decodedXrefStreamEntries: false;
+  /** Whether inherited page resources and defaults were resolved. */
+  readonly resolvedInheritedPageState: false;
+  /** Known implementation limits that materially affect this IR. */
+  readonly knownLimits: readonly PdfKnownLimitCode[];
 }
 
 /**
@@ -508,10 +540,14 @@ export interface PdfObservedPage {
 export interface PdfObservedDocument {
   /** Observation implementation kind. */
   readonly kind: "shell";
+  /** Observation strategy used to recover the current text evidence. */
+  readonly strategy: PdfObservationStrategy;
   /** Flattened extracted text emitted by the shell. */
   readonly extractedText: string;
   /** Observed pages in source order. */
   readonly pages: readonly PdfObservedPage[];
+  /** Known implementation limits that materially affect this observation result. */
+  readonly knownLimits: readonly PdfKnownLimitCode[];
 }
 
 /**
@@ -552,6 +588,8 @@ export interface PdfIrRequest {
   readonly source: PdfDocumentSource;
   /** Optional request-specific policy overrides. */
   readonly policy?: PdfAdmissionPolicy;
+  /** Optional password provider for encrypted documents. */
+  readonly passwordProvider?: PdfPasswordProvider;
 }
 
 /**
@@ -562,6 +600,8 @@ export interface PdfObservationRequest {
   readonly source: PdfDocumentSource;
   /** Optional request-specific policy overrides. */
   readonly policy?: PdfAdmissionPolicy;
+  /** Optional password provider for encrypted documents. */
+  readonly passwordProvider?: PdfPasswordProvider;
 }
 
 /**
@@ -632,6 +672,13 @@ export interface PdfEngine {
   readonly capabilities: PdfRuntimeCapabilities;
   /** Normalized default policy used by the engine instance. */
   readonly defaultPolicy: PdfNormalizedAdmissionPolicy;
+  /**
+   * Releases engine-owned resources.
+   *
+   * The current shell implementation is a no-op, but future backends may own workers,
+   * WASM instances, caches, or native bridges that require explicit cleanup.
+   */
+  dispose(): Promise<void>;
   /**
    * Runs the admission stage for one document.
    *
