@@ -45,8 +45,8 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
-    "lint": "eslint . --max-warnings=0",
-    "lint:fix": "eslint . --fix --max-warnings=0",
+    "lint": "eslint src jsr scripts eslint.config.mjs --max-warnings=0",
+    "lint:fix": "eslint src jsr scripts eslint.config.mjs --fix --max-warnings=0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "verify:runtimes": "node scripts/verify-runtime-versions.mjs",
     "verify:runtimes:pinned": "node scripts/verify-runtime-versions.mjs --mode=pinned",

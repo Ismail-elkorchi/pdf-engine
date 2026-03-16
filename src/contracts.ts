@@ -83,11 +83,18 @@ export type PdfRepairState = "clean" | "recovered" | "recovery-required";
 export type PdfKnownLimitCode =
   | "decryption-not-implemented"
   | "streams-not-decoded"
+  | "unsupported-stream-filters"
+  | "stream-decoding-failed"
   | "xref-stream-entries-not-decoded"
   | "object-streams-not-expanded"
   | "resource-inheritance-unresolved"
   | "text-decoding-heuristic"
   | "page-order-heuristic";
+
+/**
+ * Decode state for one recovered stream object.
+ */
+export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter" | "failed";
 
 /**
  * Observation strategy used to produce the current text evidence.
@@ -281,6 +288,12 @@ export interface PdfIndirectObjectShell {
   readonly dictionaryKeys: readonly string[];
   /** Stream byte length within the scanned shell input when known. */
   readonly streamByteLength?: number;
+  /** Declared stream filters in decode order when present. */
+  readonly streamFilterNames?: readonly string[];
+  /** Stream decode state for the current shell implementation. */
+  readonly streamDecodeState?: PdfStreamDecodeState;
+  /** Decoded stream byte length when operator-ready bytes are available. */
+  readonly decodedStreamByteLength?: number;
 }
 
 /**
@@ -468,8 +481,8 @@ export interface PdfIrDocument {
   readonly featureKinds: readonly PdfFeatureKind[];
   /** Per-page shell summaries. */
   readonly pages: readonly PdfIrPageShell[];
-  /** Whether stream bytes were decoded into operator-ready content. */
-  readonly decodedStreams: false;
+  /** Whether the shell recovered at least one operator-ready stream body. */
+  readonly decodedStreams: boolean;
   /** Whether object streams were expanded into member objects. */
   readonly expandedObjectStreams: false;
   /** Whether xref stream entries were decoded into a full index. */
