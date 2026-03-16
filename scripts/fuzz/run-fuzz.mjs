@@ -1,5 +1,6 @@
-import fc from "fast-check";
 import { performance } from "node:perf_hooks";
+
+import fc from "fast-check";
 
 import { createPdfEngine } from "../../dist/index.js";
 

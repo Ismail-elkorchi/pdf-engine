@@ -1,3 +1,5 @@
+import { analyzePdfShell, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
+
 import type {
   PdfAdmissionArtifact,
   PdfAdmissionDecision,
@@ -21,12 +23,10 @@ import type {
   PdfObservationRequest,
   PdfPipelineRequest,
   PdfPipelineResult,
-  PdfPolicyAction,
   PdfRuntimeCapabilities,
   PdfRuntimeDescriptor,
   PdfStageResult,
 } from "./contracts.ts";
-import { analyzePdfShell, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
 
 const DEFAULT_POLICY: PdfNormalizedAdmissionPolicy = {
   javascriptActions: "deny",
@@ -724,7 +724,7 @@ function detectRuntimeCapabilities(runtime: PdfRuntimeDescriptor): PdfRuntimeCap
     streams: typeof value.ReadableStream !== "undefined",
     fileSystem: runtime.kind === "node" || runtime.kind === "bun" || runtime.kind === "deno",
     webWorker: typeof value.Worker !== "undefined",
-    highResolutionTime: typeof value.performance?.now === "function",
+    highResolutionTime: typeof value.performance.now === "function",
   };
 }
 
