@@ -43,6 +43,9 @@ jobs:
       - name: Check
         run: npm run check
 
+      - name: Runtime staleness policy
+        run: npm run runtime:staleness
+
       - name: Runtime smoke matrix
         run: npm run smoke:all
 
