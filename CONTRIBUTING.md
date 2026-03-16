@@ -17,6 +17,7 @@ Run before opening a pull request:
 - `npm run smoke:all`
 
 `npm run check` includes the JSR documentation gates, so full local verification requires Deno as well as Node.js.
+Runtime floors and CI-pinned versions are governed by [`tools/runtime-versions.json`](tools/runtime-versions.json).
 
 ## Constraints
 
