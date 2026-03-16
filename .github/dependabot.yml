@@ -1,5 +1,7 @@
 version: 2
 updates:
+  # Version updates are controlled by groups and open-pull-requests-limit.
+  # Security updates are a separate channel managed by GitHub.
   - package-ecosystem: npm
     directory: "/"
     schedule:
@@ -12,6 +14,10 @@ updates:
     labels:
       - dependencies
       - security
+    cooldown:
+      semver-major-days: 30
+      semver-minor-days: 7
+      semver-patch-days: 7
     groups:
       npm-minor-patch:
         patterns:
