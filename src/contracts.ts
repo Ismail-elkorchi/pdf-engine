@@ -103,6 +103,11 @@ export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter
 export type PdfObservationStrategy = "decoded-text-operators" | "heuristic-literal-scan";
 
 /**
+ * Structural role for one recovered stream object.
+ */
+export type PdfStreamRole = "content" | "tounicode" | "cmap" | "xref" | "object-stream" | "unknown";
+
+/**
  * How page ordering for the current page shell or observation page was resolved.
  */
 export type PdfPageResolutionMethod = "page-tree" | "recovered-page-order" | "stream-fallback";
@@ -300,6 +305,8 @@ export interface PdfIndirectObjectShell {
   readonly streamDecodeState?: PdfStreamDecodeState;
   /** Decoded stream byte length when operator-ready bytes are available. */
   readonly decodedStreamByteLength?: number;
+  /** Structural role inferred for the stream when the shell can classify it. */
+  readonly streamRole?: PdfStreamRole;
 }
 
 /**

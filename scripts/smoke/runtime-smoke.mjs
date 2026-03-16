@@ -45,6 +45,50 @@ function joinBytes(parts) {
   return joined;
 }
 
+function buildPdfWithFontResourceStream({
+  contentStreamText,
+  fontDictionaryLines,
+  resourceStreamObject,
+}) {
+  const contentLength = encodeText(contentStreamText).byteLength;
+  const prefix = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+    "endobj",
+    "4 0 obj",
+    `<< /Length ${String(contentLength)} >>`,
+    "stream",
+    contentStreamText,
+    "endstream",
+    "endobj",
+    "5 0 obj",
+    ...fontDictionaryLines,
+    "endobj",
+    "6 0 obj",
+  ].join("\n") + "\n";
+  const xrefOffset = encodeText(prefix).byteLength + resourceStreamObject.byteLength;
+  const suffix = [
+    "xref",
+    "0 7",
+    "0000000000 65535 f",
+    "trailer",
+    "<< /Root 1 0 R /Size 7 >>",
+    "startxref",
+    String(xrefOffset),
+    "%%EOF",
+    "",
+  ].join("\n");
+
+  return joinBytes([encodeText(prefix), resourceStreamObject, encodeText(suffix)]);
+}
+
 const [moduleSpecifier, expectedRuntime] = getArgs();
 
 assert(typeof moduleSpecifier === "string" && moduleSpecifier.length > 0, "Missing module specifier.");
@@ -224,6 +268,26 @@ const encodedTextPdfTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+const toUnicodeCMapFlateBytes = decodeBase64(
+  "eJxdkM1qxCAQx+8+xRy3h0UT2qUHCZSUQA79oGkfwOgkFRoVYw55+0502UIPOr9h5j9fvO2fe2cT8Pfo9YAJJutMxNVvUSOMOFvHqhqM1enq5V8vKjBO4mFfEy69mzxICfyDgmuKO5yejB/xDvhbNBitm+H01Q7kD1sIP7igSyCgacDgRIVeVHhVCwLPsnNvKG7TfibNX8bnHhDq7FdlGO0NrkFpjMrNyKQQDciuaxg68y92KYpx0t8qMnn/SJlCkGHy8pCZDHFbuD24K0z1ZC0ykyGuCle5z7Xi0fE4ym0VvcVIW+TL5fGPwa3D23GDD4cqv18KDXoH",
+);
+const malformedToUnicodeBytes = encodeText("not-deflate");
+const unsupportedToUnicodeBytes = encodeText("BT /F1 12 Tf <48656C6C6F21> Tj ET");
+const toUnicodeFlateStreamObject = joinBytes([
+  encodeText(`<< /Length ${String(toUnicodeCMapFlateBytes.byteLength)} /Filter /FlateDecode >>\nstream\n`),
+  toUnicodeCMapFlateBytes,
+  encodeText("\nendstream\nendobj\n"),
+]);
+const toUnicodeUnsupportedStreamObject = joinBytes([
+  encodeText(`<< /Length ${String(unsupportedToUnicodeBytes.byteLength)} /Filter /ASCII85Decode >>\nstream\n`),
+  unsupportedToUnicodeBytes,
+  encodeText("\nendstream\nendobj\n"),
+]);
+const toUnicodeMalformedStreamObject = joinBytes([
+  encodeText(`<< /Length ${String(malformedToUnicodeBytes.byteLength)} /Filter /FlateDecode >>\nstream\n`),
+  malformedToUnicodeBytes,
+  encodeText("\nendstream\nendobj\n"),
+]);
 
 const startXrefOffset = syntheticPdfTemplate.indexOf("xref\n0 5");
 assert(startXrefOffset >= 0, "Synthetic PDF did not contain an xref section.");
@@ -323,6 +387,27 @@ const inheritedResourcePdfBytes = joinBytes([
   encodeText(inheritedResourcePdfResourcesObject),
   encodeText(inheritedResourcePdfSuffix),
 ]);
+const toUnicodeFlatePdfBytes = buildPdfWithFontResourceStream({
+  contentStreamText: "BT\n/F1 12 Tf\n<48656C6C6F21> Tj\nET",
+  fontDictionaryLines: [
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
+  ],
+  resourceStreamObject: toUnicodeFlateStreamObject,
+});
+const toUnicodeUnsupportedPdfBytes = buildPdfWithFontResourceStream({
+  contentStreamText: "BT\n/F1 12 Tf\n<48656C6C6F21> Tj\nET",
+  fontDictionaryLines: [
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
+  ],
+  resourceStreamObject: toUnicodeUnsupportedStreamObject,
+});
+const toUnicodeMalformedPdfBytes = buildPdfWithFontResourceStream({
+  contentStreamText: "BT\n/F1 12 Tf\n<48656C6C6F21> Tj\nET",
+  fontDictionaryLines: [
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
+  ],
+  resourceStreamObject: toUnicodeMalformedStreamObject,
+});
 const malformedPdf = [
   "%PDF-1.4",
   "1 0 obj",
@@ -377,6 +462,27 @@ const encodedTextResult = await engine.run({
   source: {
     bytes: encodeText(encodedTextPdf),
     fileName: "encoded-text.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const toUnicodeFlateResult = await engine.run({
+  source: {
+    bytes: toUnicodeFlatePdfBytes,
+    fileName: "tounicode-flate.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const toUnicodeUnsupportedResult = await engine.run({
+  source: {
+    bytes: toUnicodeUnsupportedPdfBytes,
+    fileName: "tounicode-unsupported.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const toUnicodeMalformedResult = await engine.run({
+  source: {
+    bytes: toUnicodeMalformedPdfBytes,
+    fileName: "tounicode-malformed.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -501,6 +607,42 @@ assert(
 assert(
   inheritedResourceResult.observation.value?.extractedText === "Inherited Resources",
   `Unexpected inherited resource extracted text: ${JSON.stringify(inheritedResourceResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  toUnicodeFlateResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
+  `ToUnicode flate stream role was ${toUnicodeFlateResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole ?? "missing"}.`,
+);
+assert(
+  toUnicodeFlateResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState === "decoded",
+  `ToUnicode flate stream decode state was ${toUnicodeFlateResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState ?? "missing"}.`,
+);
+assert(
+  !toUnicodeFlateResult.ir.value?.knownLimits.includes("stream-decoding-failed"),
+  "ToUnicode flate stream still reported stream-decoding-failed.",
+);
+assert(
+  toUnicodeUnsupportedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
+  "Unsupported ToUnicode stream role was not classified as tounicode.",
+);
+assert(
+  toUnicodeUnsupportedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState === "unsupported-filter",
+  `Unsupported ToUnicode stream decode state was ${toUnicodeUnsupportedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState ?? "missing"}.`,
+);
+assert(
+  toUnicodeUnsupportedResult.ir.diagnostics.some((diagnostic) => diagnostic.code === "stream-filter-unsupported"),
+  "Unsupported ToUnicode stream did not surface stream-filter-unsupported.",
+);
+assert(
+  toUnicodeMalformedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
+  "Malformed ToUnicode stream role was not classified as tounicode.",
+);
+assert(
+  toUnicodeMalformedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState === "failed",
+  `Malformed ToUnicode stream decode state was ${toUnicodeMalformedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState ?? "missing"}.`,
+);
+assert(
+  toUnicodeMalformedResult.ir.diagnostics.some((diagnostic) => diagnostic.code === "stream-decoding-failed"),
+  "Malformed ToUnicode stream did not surface stream-decoding-failed.",
 );
 assert(
   encodedTextResult.observation.status === "partial",
