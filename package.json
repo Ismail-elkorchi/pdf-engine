@@ -53,7 +53,7 @@
     "check:ci": "npm run check && npm run smoke:all"
   },
   "devDependencies": {
-    "@types/node": "^24.5.2",
+    "@types/node": "^25.5.0",
     "typescript": "^5.9.2"
   }
 }
