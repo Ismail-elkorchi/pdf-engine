@@ -6,6 +6,7 @@ import type {
   PdfNormalizedAdmissionPolicy,
   PdfObjectRef,
   PdfParseCoverage,
+  PdfPageValueOrigin,
   PdfRepairState,
   PdfTrailerShell,
 } from "./contracts.ts";
@@ -26,6 +27,7 @@ export interface ParsedPageEntry {
   readonly annotationRefs: readonly PdfObjectRef[];
   readonly resourceRef?: PdfObjectRef;
   readonly resourceCount: number;
+  readonly resourceOrigin?: PdfPageValueOrigin;
 }
 
 export interface PdfShellAnalysis {
@@ -43,6 +45,7 @@ export interface PdfShellAnalysis {
   readonly objectIndex: ReadonlyMap<string, ParsedIndirectObject>;
   readonly pageEntries: readonly ParsedPageEntry[];
   readonly pageTreeResolved: boolean;
+  readonly inheritedPageStateResolved: boolean;
   readonly pageCountEstimate?: number;
   readonly objectCountEstimate?: number;
   readonly parseCoverage: PdfParseCoverage;
@@ -96,6 +99,7 @@ export async function analyzePdfShell(
     objectIndex,
     pageEntries,
     pageTreeResolved: pageTree.resolved,
+    inheritedPageStateResolved: pageTree.inheritedStateResolved,
     ...(pageCountEstimate !== undefined ? { pageCountEstimate } : {}),
     ...(objectCountEstimate !== undefined ? { objectCountEstimate } : {}),
     parseCoverage,
@@ -574,12 +578,12 @@ function buildPageEntries(
   trailer: PdfTrailerShell | undefined,
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
   indirectObjects: readonly ParsedIndirectObject[],
-): { pages: ParsedPageEntry[]; resolved: boolean } {
+): { pages: ParsedPageEntry[]; resolved: boolean; inheritedStateResolved: boolean } {
   const rootRef = trailer?.rootRef;
   if (rootRef) {
     const treePages = traversePageTree(rootRef, objectIndex);
     if (treePages.length > 0) {
-      return { pages: treePages, resolved: true };
+      return { pages: treePages, resolved: true, inheritedStateResolved: true };
     }
   }
 
@@ -588,7 +592,7 @@ function buildPageEntries(
     .sort((leftObject, rightObject) => leftObject.offset - rightObject.offset)
     .map((objectShell, pageIndex) => toPageEntry(objectShell, pageIndex + 1));
 
-  return { pages: fallbackPages, resolved: false };
+  return { pages: fallbackPages, resolved: false, inheritedStateResolved: false };
 }
 
 function traversePageTree(
@@ -607,9 +611,21 @@ function traversePageTree(
 
   const orderedPages: ParsedPageEntry[] = [];
   const visited = new Set<string>();
-  appendPageTreeEntries(pagesRootRef, objectIndex, visited, orderedPages);
+  appendPageTreeEntries(pagesRootRef, objectIndex, visited, orderedPages, {});
 
   return orderedPages;
+}
+
+interface InheritedPageValue {
+  readonly rawValue: string;
+  readonly ref?: PdfObjectRef;
+}
+
+interface InheritedPageState {
+  readonly resources?: InheritedPageValue;
+  readonly mediaBox?: InheritedPageValue;
+  readonly cropBox?: InheritedPageValue;
+  readonly rotate?: InheritedPageValue;
 }
 
 function appendPageTreeEntries(
@@ -617,6 +633,7 @@ function appendPageTreeEntries(
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
   visited: Set<string>,
   orderedPages: ParsedPageEntry[],
+  inheritedState: InheritedPageState,
 ): void {
   const currentKey = keyOfObjectRef(currentRef);
   if (visited.has(currentKey)) {
@@ -629,8 +646,9 @@ function appendPageTreeEntries(
     return;
   }
 
+  const nextInheritedState = mergeInheritedPageState(inheritedState, currentObject);
   if (currentObject.typeName === "Page") {
-    orderedPages.push(toPageEntry(currentObject, orderedPages.length + 1));
+    orderedPages.push(toPageEntry(currentObject, orderedPages.length + 1, nextInheritedState));
     return;
   }
 
@@ -640,22 +658,64 @@ function appendPageTreeEntries(
 
   const kids = readObjectRefsValue(currentObject.dictionaryEntries.get("Kids"));
   for (const kidRef of kids) {
-    appendPageTreeEntries(kidRef, objectIndex, visited, orderedPages);
+    appendPageTreeEntries(kidRef, objectIndex, visited, orderedPages, nextInheritedState);
   }
 }
 
-function toPageEntry(objectShell: ParsedIndirectObject, pageNumber: number): ParsedPageEntry {
+function mergeInheritedPageState(
+  inheritedState: InheritedPageState,
+  objectShell: ParsedIndirectObject,
+): InheritedPageState {
+  const resources = readInheritedPageValue(objectShell, "Resources") ?? inheritedState.resources;
+  const mediaBox = readInheritedPageValue(objectShell, "MediaBox") ?? inheritedState.mediaBox;
+  const cropBox = readInheritedPageValue(objectShell, "CropBox") ?? inheritedState.cropBox;
+  const rotate = readInheritedPageValue(objectShell, "Rotate") ?? inheritedState.rotate;
+
+  return {
+    ...(resources !== undefined ? { resources } : {}),
+    ...(mediaBox !== undefined ? { mediaBox } : {}),
+    ...(cropBox !== undefined ? { cropBox } : {}),
+    ...(rotate !== undefined ? { rotate } : {}),
+  };
+}
+
+function readInheritedPageValue(
+  objectShell: ParsedIndirectObject,
+  key: "Resources" | "MediaBox" | "CropBox" | "Rotate",
+): InheritedPageValue | undefined {
+  const rawValue = objectShell.dictionaryEntries.get(key);
+  if (!rawValue) {
+    return undefined;
+  }
+
+  const ref = readObjectRefValue(rawValue);
+  return {
+    rawValue,
+    ...(ref !== undefined ? { ref } : {}),
+  };
+}
+
+function toPageEntry(
+  objectShell: ParsedIndirectObject,
+  pageNumber: number,
+  inheritedState: InheritedPageState = {},
+): ParsedPageEntry {
   const contentStreamRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Contents"));
   const annotationRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Annots"));
-  const resourceValue = objectShell.dictionaryEntries.get("Resources");
-  const resourceRef = readObjectRefValue(resourceValue);
+  const resourceValue = inheritedState.resources;
+  const resourceOrigin: PdfPageValueOrigin | undefined = objectShell.dictionaryEntries.has("Resources")
+    ? "direct"
+    : resourceValue
+      ? "inherited"
+      : undefined;
 
   return {
     pageNumber,
     pageRef: objectShell.ref,
     contentStreamRefs,
     annotationRefs,
-    ...(resourceRef !== undefined ? { resourceRef } : {}),
+    ...(resourceValue?.ref !== undefined ? { resourceRef: resourceValue.ref } : {}),
+    ...(resourceOrigin !== undefined ? { resourceOrigin } : {}),
     resourceCount: resourceValue ? 1 : 0,
   };
 }

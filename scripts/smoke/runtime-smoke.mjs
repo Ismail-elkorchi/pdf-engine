@@ -247,6 +247,50 @@ const indirectLengthFlatePdfBytes = joinBytes([
   encodeText(indirectLengthFlatePdfLengthObject),
   encodeText(indirectLengthFlatePdfSuffix),
 ]);
+const inheritedResourceStreamText = "BT\n(Inherited Resources) Tj\nET";
+const inheritedResourcePdfPrefix = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 /Resources 5 0 R >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(inheritedResourceStreamText).byteLength)} >>`,
+  "stream",
+].join("\n") + "\n";
+const inheritedResourcePdfMiddle = `\n${inheritedResourceStreamText}\nendstream\nendobj\n`;
+const inheritedResourcePdfResourcesObject = [
+  "5 0 obj",
+  "<< /ProcSet [/PDF /Text] >>",
+  "endobj",
+  "",
+].join("\n");
+const inheritedResourceXrefOffset =
+  encodeText(inheritedResourcePdfPrefix).byteLength +
+  encodeText(inheritedResourcePdfMiddle).byteLength +
+  encodeText(inheritedResourcePdfResourcesObject).byteLength;
+const inheritedResourcePdfSuffix = [
+  "xref",
+  "0 6",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 6 >>",
+  "startxref",
+  String(inheritedResourceXrefOffset),
+  "%%EOF",
+  "",
+].join("\n");
+const inheritedResourcePdfBytes = joinBytes([
+  encodeText(inheritedResourcePdfPrefix),
+  encodeText(inheritedResourcePdfMiddle),
+  encodeText(inheritedResourcePdfResourcesObject),
+  encodeText(inheritedResourcePdfSuffix),
+]);
 const malformedPdf = [
   "%PDF-1.4",
   "1 0 obj",
@@ -287,6 +331,13 @@ const indirectLengthFlateResult = await engine.run({
   source: {
     bytes: indirectLengthFlatePdfBytes,
     fileName: "flate-indirect-length.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const inheritedResourceResult = await engine.run({
+  source: {
+    bytes: inheritedResourcePdfBytes,
+    fileName: "inherited-resources.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -344,7 +395,7 @@ assert(result.admission.value?.parseCoverage.startXref === true, "The shell did 
 assert(result.admission.value?.parseCoverage.trailer === true, "The shell did not recover trailer coverage.");
 assert(result.ir.value?.indirectObjects.length === 4, `Unexpected indirect-object count: ${result.ir.value?.indirectObjects.length ?? 0}.`);
 assert(result.ir.value?.decodedStreams === true, "IR did not mark operator-ready streams as available.");
-assert(result.ir.value?.resolvedInheritedPageState === false, "IR incorrectly claimed inherited page resolution.");
+assert(result.ir.value?.resolvedInheritedPageState === true, "IR did not preserve inherited page resolution.");
 assert(result.ir.value?.trailer?.rootRef?.objectNumber === 1, "Trailer root ref was not recovered.");
 assert(result.ir.value?.pages[0]?.pageRef?.objectNumber === 3, "Page object ref was not recovered.");
 assert(result.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4, "Content stream ref was not recovered.");
@@ -391,6 +442,26 @@ assert(
 assert(
   indirectLengthFlateResult.observation.value?.extractedText === "Hello Flate",
   `Unexpected indirect-length flate extracted text: ${JSON.stringify(indirectLengthFlateResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  inheritedResourceResult.ir.value?.resolvedInheritedPageState === true,
+  "Inherited page state was not marked as resolved.",
+);
+assert(
+  inheritedResourceResult.ir.value?.pages[0]?.resourceOrigin === "inherited",
+  `Unexpected inherited resource origin: ${inheritedResourceResult.ir.value?.pages[0]?.resourceOrigin ?? "missing"}.`,
+);
+assert(
+  inheritedResourceResult.ir.value?.pages[0]?.resourceRef?.objectNumber === 5,
+  "Inherited resource reference was not preserved.",
+);
+assert(
+  !inheritedResourceResult.ir.value?.knownLimits.includes("resource-inheritance-unresolved"),
+  "Inherited resource resolution still reported resource-inheritance-unresolved.",
+);
+assert(
+  inheritedResourceResult.observation.value?.extractedText === "Inherited Resources",
+  `Unexpected inherited resource extracted text: ${JSON.stringify(inheritedResourceResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
