@@ -222,8 +222,6 @@ console.log(
       repairState: result.admission.value?.repairState ?? null,
       recoveredAdmission: recoveredResult.admission.status,
       recoveredRepairState: recoveredResult.admission.value?.repairState ?? null,
-      encryptedObservationWithoutPassword: observationWithoutPassword.status,
-      encryptedObservationWithPassword: observationWithPassword.status,
       ir: result.ir.status,
       observation: result.observation.status,
       observationStrategy: result.observation.value?.strategy ?? null,
