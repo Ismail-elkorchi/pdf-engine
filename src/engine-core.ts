@@ -113,13 +113,13 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = inspectSource(request.source, policy);
+    const inspection = await inspectSource(request.source, policy);
     return buildAdmissionStage(request, inspection);
   }
 
   async function toIr(request: PdfIrRequest): Promise<PdfStageResult<PdfIrDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = inspectSource(request.source, policy);
+    const inspection = await inspectSource(request.source, policy);
     const admission = await buildAdmissionStage(
       {
         source: request.source,
@@ -133,7 +133,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function observe(request: PdfObservationRequest): Promise<PdfStageResult<PdfObservedDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = inspectSource(request.source, policy);
+    const inspection = await inspectSource(request.source, policy);
     const admission = await buildAdmissionStage(
       {
         source: request.source,
@@ -147,7 +147,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = inspectSource(request.source, policy);
+    const inspection = await inspectSource(request.source, policy);
     const admission = await buildAdmissionStage(request, inspection);
     const ir = buildIrStage(inspection, admission);
     const observation = buildObservationStage(inspection, admission);
@@ -169,11 +169,11 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   }
 }
 
-function inspectSource(
+async function inspectSource(
   source: PdfAdmissionRequest["source"],
   policy: PdfNormalizedAdmissionPolicy,
-): PdfShellInspection {
-  const analysis = analyzePdfShell(source, policy);
+): Promise<PdfShellInspection> {
+  const analysis = await analyzePdfShell(source, policy);
   const featureSignals = detectFeatureSignals(analysis.scanText, policy);
   const isEncrypted = featureSignals.some((signal) => signal.kind === "encryption" && signal.detected);
 
@@ -411,7 +411,7 @@ function buildIrStage(
     indirectObjects: inspection.analysis.indirectObjects,
     featureKinds: inspection.featureSignals.filter((signal) => signal.detected).map((signal) => signal.kind),
     pages,
-    decodedStreams: false,
+    decodedStreams: hasDecodedStreams(inspection),
     expandedObjectStreams: false,
     decodedXrefStreamEntries: false,
     resolvedInheritedPageState: false,
@@ -564,8 +564,14 @@ function collectAdmissionKnownLimits(inspection: PdfShellInspection): readonly P
 function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
   const knownLimits: PdfKnownLimitCode[] = [];
 
-  if (inspection.analysis.indirectObjects.some((objectShell) => objectShell.hasStream)) {
+  if (hasUndecodedStreams(inspection)) {
     knownLimits.push("streams-not-decoded");
+  }
+  if (hasUnsupportedStreamFilters(inspection)) {
+    knownLimits.push("unsupported-stream-filters");
+  }
+  if (hasFailedStreamDecodes(inspection)) {
+    knownLimits.push("stream-decoding-failed");
   }
   if (
     inspection.analysis.crossReferenceKind === "xref-stream" ||
@@ -599,6 +605,26 @@ function collectObservationKnownLimits(inspection: PdfShellInspection): readonly
 
 function dedupeKnownLimits(knownLimits: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {
   return Array.from(new Set(knownLimits));
+}
+
+function hasDecodedStreams(inspection: PdfShellInspection): boolean {
+  return inspection.analysis.indirectObjects.some(
+    (objectShell) => objectShell.streamDecodeState === "available" || objectShell.streamDecodeState === "decoded",
+  );
+}
+
+function hasUndecodedStreams(inspection: PdfShellInspection): boolean {
+  return inspection.analysis.indirectObjects.some(
+    (objectShell) => objectShell.hasStream && objectShell.streamDecodeState !== "available" && objectShell.streamDecodeState !== "decoded",
+  );
+}
+
+function hasUnsupportedStreamFilters(inspection: PdfShellInspection): boolean {
+  return inspection.analysis.indirectObjects.some((objectShell) => objectShell.streamDecodeState === "unsupported-filter");
+}
+
+function hasFailedStreamDecodes(inspection: PdfShellInspection): boolean {
+  return inspection.analysis.indirectObjects.some((objectShell) => objectShell.streamDecodeState === "failed");
 }
 
 function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
@@ -687,6 +713,28 @@ function createIrDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
       level: "medium",
       message: "The shell could not recover any page objects from the current source.",
     });
+  }
+
+  for (const objectShell of inspection.analysis.indirectObjects) {
+    if (objectShell.streamDecodeState === "unsupported-filter") {
+      diagnostics.push({
+        code: "stream-filter-unsupported",
+        stage: "ir",
+        level: "medium",
+        message: "The shell found a stream filter that it does not decode yet.",
+        objectRef: objectShell.ref,
+      });
+    }
+
+    if (objectShell.streamDecodeState === "failed") {
+      diagnostics.push({
+        code: "stream-decoding-failed",
+        stage: "ir",
+        level: "medium",
+        message: "The shell could not decode one recovered stream body.",
+        objectRef: objectShell.ref,
+      });
+    }
   }
 
   return diagnostics;

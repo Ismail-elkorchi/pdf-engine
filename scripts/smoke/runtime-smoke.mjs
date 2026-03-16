@@ -20,6 +20,31 @@ function assert(condition, message) {
   }
 }
 
+function encodeText(value) {
+  return new TextEncoder().encode(value);
+}
+
+function decodeBase64(value) {
+  if (typeof Uint8Array.fromBase64 === "function") {
+    return Uint8Array.fromBase64(value);
+  }
+
+  return Uint8Array.from(globalThis.atob(value), (character) => character.charCodeAt(0));
+}
+
+function joinBytes(parts) {
+  const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
+  const joined = new Uint8Array(totalLength);
+  let offset = 0;
+
+  for (const part of parts) {
+    joined.set(part, offset);
+    offset += part.byteLength;
+  }
+
+  return joined;
+}
+
 const [moduleSpecifier, expectedRuntime] = getArgs();
 
 assert(typeof moduleSpecifier === "string" && moduleSpecifier.length > 0, "Missing module specifier.");
@@ -91,6 +116,24 @@ const encryptedPdfTemplate = [
   "",
 ].join("\n");
 
+const flateStreamBytes = decodeBase64("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
+const flatePdfPrefix = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(flateStreamBytes.byteLength)} /Filter /FlateDecode >>`,
+  "stream",
+].join("\n") + "\n";
+const flatePdfMiddle = "\nendstream\nendobj\n";
+
 const nestedPageTreeTemplate = [
   "%PDF-1.4",
   "1 0 obj",
@@ -141,6 +184,24 @@ assert(nestedStartXrefOffset >= 0, "Nested page-tree PDF did not contain an xref
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
 const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
 const nestedPageTreePdf = nestedPageTreeTemplate.replace("__NESTED_STARTXREF__", String(nestedStartXrefOffset));
+const flateXrefOffset = encodeText(flatePdfPrefix).byteLength + flateStreamBytes.byteLength + encodeText(flatePdfMiddle).byteLength;
+const flatePdfSuffix = [
+  "xref",
+  "0 5",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 5 >>",
+  "startxref",
+  String(flateXrefOffset),
+  "%%EOF",
+  "",
+].join("\n");
+const flatePdfBytes = joinBytes([
+  encodeText(flatePdfPrefix),
+  flateStreamBytes,
+  encodeText(flatePdfMiddle),
+  encodeText(flatePdfSuffix),
+]);
 const malformedPdf = [
   "%PDF-1.4",
   "1 0 obj",
@@ -165,21 +226,28 @@ const engine = moduleNamespace.createPdfEngine();
 assert(typeof engine.dispose === "function", "Engine does not expose dispose().");
 const result = await engine.run({
   source: {
-    bytes: new TextEncoder().encode(syntheticPdf),
+    bytes: encodeText(syntheticPdf),
     fileName: "synthetic.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const flateResult = await engine.run({
+  source: {
+    bytes: flatePdfBytes,
+    fileName: "flate.pdf",
     mediaType: "application/pdf",
   },
 });
 const recoveredResult = await engine.run({
   source: {
-    bytes: new TextEncoder().encode(malformedPdf),
+    bytes: encodeText(malformedPdf),
     fileName: "recovered.pdf",
     mediaType: "application/pdf",
   },
 });
 const blockedRecoveryResult = await engine.run({
   source: {
-    bytes: new TextEncoder().encode(malformedPdf),
+    bytes: encodeText(malformedPdf),
     fileName: "recovered.pdf",
     mediaType: "application/pdf",
   },
@@ -189,21 +257,21 @@ const blockedRecoveryResult = await engine.run({
 });
 const nestedPageTreeResult = await engine.run({
   source: {
-    bytes: new TextEncoder().encode(nestedPageTreePdf),
+    bytes: encodeText(nestedPageTreePdf),
     fileName: "nested-page-tree.pdf",
     mediaType: "application/pdf",
   },
 });
 const observationWithoutPassword = await engine.observe({
   source: {
-    bytes: new TextEncoder().encode(encryptedPdf),
+    bytes: encodeText(encryptedPdf),
     fileName: "encrypted.pdf",
     mediaType: "application/pdf",
   },
 });
 const observationWithPassword = await engine.observe({
   source: {
-    bytes: new TextEncoder().encode(encryptedPdf),
+    bytes: encodeText(encryptedPdf),
     fileName: "encrypted.pdf",
     mediaType: "application/pdf",
   },
@@ -223,12 +291,13 @@ assert((result.admission.value?.knownLimits.length ?? 0) === 0, "Admission known
 assert(result.admission.value?.parseCoverage.startXref === true, "The shell did not recover startxref coverage.");
 assert(result.admission.value?.parseCoverage.trailer === true, "The shell did not recover trailer coverage.");
 assert(result.ir.value?.indirectObjects.length === 4, `Unexpected indirect-object count: ${result.ir.value?.indirectObjects.length ?? 0}.`);
-assert(result.ir.value?.decodedStreams === false, "IR incorrectly claimed decoded streams.");
+assert(result.ir.value?.decodedStreams === true, "IR did not mark operator-ready streams as available.");
 assert(result.ir.value?.resolvedInheritedPageState === false, "IR incorrectly claimed inherited page resolution.");
 assert(result.ir.value?.trailer?.rootRef?.objectNumber === 1, "Trailer root ref was not recovered.");
 assert(result.ir.value?.pages[0]?.pageRef?.objectNumber === 3, "Page object ref was not recovered.");
 assert(result.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4, "Content stream ref was not recovered.");
 assert(result.ir.value?.pages[0]?.resolutionMethod === "page-tree", "IR page resolution method was not preserved.");
+assert(result.ir.value?.indirectObjects[3]?.streamDecodeState === "available", "Unfiltered stream was not marked as available.");
 assert(result.observation.value?.pages[0]?.pageRef?.objectNumber === 3, "Observation page ref was not preserved.");
 assert(result.observation.value?.pages[0]?.resolutionMethod === "page-tree", "Observation page resolution method was not preserved.");
 assert(result.observation.value?.pages[0]?.runs[0]?.contentStreamRef?.objectNumber === 4, "Observation run content stream ref was not preserved.");
@@ -242,6 +311,20 @@ assert(
 assert(
   result.observation.value?.extractedText === "Hello PDF Engine",
   `Unexpected extracted text: ${JSON.stringify(result.observation.value?.extractedText ?? null)}.`,
+);
+assert(flateResult.ir.value?.decodedStreams === true, "Flate stream did not mark decodedStreams.");
+assert(flateResult.ir.value?.indirectObjects[3]?.streamDecodeState === "decoded", "Flate stream was not marked as decoded.");
+assert(
+  flateResult.ir.value?.indirectObjects[3]?.streamFilterNames?.join(",") === "FlateDecode",
+  `Unexpected flate stream filters: ${flateResult.ir.value?.indirectObjects[3]?.streamFilterNames?.join(",") ?? "missing"}.`,
+);
+assert(
+  !flateResult.ir.value?.knownLimits.includes("streams-not-decoded"),
+  "Flate IR still reported streams-not-decoded.",
+);
+assert(
+  flateResult.observation.value?.extractedText === "Hello Flate",
+  `Unexpected flate extracted text: ${JSON.stringify(flateResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
@@ -288,6 +371,7 @@ console.log(
       admission: result.admission.status,
       supportedRuntimes: engine.identity.supportedRuntimes,
       repairState: result.admission.value?.repairState ?? null,
+      flateDecodedStreams: flateResult.ir.value?.decodedStreams ?? null,
       recoveredAdmission: recoveredResult.admission.status,
       recoveredRepairState: recoveredResult.admission.value?.repairState ?? null,
       ir: result.ir.status,

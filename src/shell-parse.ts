@@ -12,7 +12,11 @@ import type {
 
 export interface ParsedIndirectObject extends PdfIndirectObjectShell {
   readonly dictionaryEntries: ReadonlyMap<string, string>;
+  readonly objectValueText?: string;
   readonly streamText?: string;
+  readonly streamStartOffset?: number;
+  readonly streamEndOffset?: number;
+  readonly streamLengthRef?: PdfObjectRef;
 }
 
 export interface ParsedPageEntry {
@@ -45,16 +49,20 @@ export interface PdfShellAnalysis {
   readonly repairState: PdfRepairState;
 }
 
-export function analyzePdfShell(
+export async function analyzePdfShell(
   source: PdfDocumentSource,
   policy: PdfNormalizedAdmissionPolicy,
-): PdfShellAnalysis {
-  const scanText = decodeLatin1(source.bytes, policy.resourceBudget.maxScanBytes);
+): Promise<PdfShellAnalysis> {
+  const scanText = decodePdfBytes(source.bytes, policy.resourceBudget.maxScanBytes);
   const byteLength = source.bytes.byteLength;
   const isTruncated = scanText.length < byteLength;
   const header = findPdfHeader(scanText);
   const fileType = header ? "pdf" : "unknown";
-  const indirectObjects = parseIndirectObjects(scanText);
+  const parsedIndirectObjects = parseIndirectObjects(scanText);
+  const provisionalObjectIndex = new Map(
+    parsedIndirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const),
+  );
+  const indirectObjects = await finalizeIndirectObjects(parsedIndirectObjects, source.bytes, provisionalObjectIndex);
   const objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
   const crossReferenceSections = collectCrossReferenceSections(scanText, indirectObjects);
   const startXrefOffset = readStartXrefOffset(scanText);
@@ -105,8 +113,17 @@ export function keyOfObjectRef(objectRef: PdfObjectRef): string {
   return `${objectRef.objectNumber}:${objectRef.generationNumber}`;
 }
 
-function decodeLatin1(bytes: Uint8Array, limit = bytes.byteLength): string {
-  return new TextDecoder("latin1").decode(bytes.subarray(0, Math.min(limit, bytes.byteLength)));
+function decodePdfBytes(bytes: Uint8Array, limit = bytes.byteLength): string {
+  const chunkSize = 0x4000;
+  const end = Math.min(limit, bytes.byteLength);
+  let output = "";
+
+  for (let offset = 0; offset < end; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, Math.min(offset + chunkSize, end));
+    output += String.fromCharCode(...chunk);
+  }
+
+  return output;
 }
 
 function findPdfHeader(text: string): { version: string; offset: number } | undefined {
@@ -216,7 +233,7 @@ function readIndirectObject(text: string, startIndex: number): ParsedIndirectObj
   const bodyText = text.slice(bodyStart, endObjectIndex);
   const dictionaryText = findFirstDictionaryToken(bodyText);
   const dictionaryEntries = dictionaryText ? parseDictionaryEntries(dictionaryText) : new Map<string, string>();
-  const streamInfo = readObjectStream(bodyText);
+  const streamInfo = readObjectStream(bodyText, dictionaryEntries);
   const typeName = readNameValue(dictionaryEntries.get("Type"));
   const dictionaryKeys = Array.from(dictionaryEntries.keys());
 
@@ -230,27 +247,190 @@ function readIndirectObject(text: string, startIndex: number): ParsedIndirectObj
     hasStream: streamInfo !== undefined,
     ...(typeName !== undefined ? { typeName } : {}),
     dictionaryKeys,
-    ...(streamInfo?.text !== undefined ? { streamText: streamInfo.text } : {}),
-    ...(streamInfo?.text !== undefined ? { streamByteLength: streamInfo.text.length } : {}),
+    ...(bodyText.trim().length > 0 ? { objectValueText: bodyText.trim() } : {}),
+    ...(streamInfo?.dataStartOffset !== undefined ? { streamStartOffset: bodyStart + streamInfo.dataStartOffset } : {}),
+    ...(streamInfo?.dataEndOffset !== undefined ? { streamEndOffset: bodyStart + streamInfo.dataEndOffset } : {}),
+    ...(streamInfo?.lengthRef !== undefined ? { streamLengthRef: streamInfo.lengthRef } : {}),
     dictionaryEntries,
   };
 }
 
-function readObjectStream(bodyText: string): { text: string } | undefined {
+function readObjectStream(
+  bodyText: string,
+  dictionaryEntries: ReadonlyMap<string, string>,
+): {
+  dataStartOffset: number;
+  dataEndOffset?: number;
+  lengthRef?: PdfObjectRef;
+} | undefined {
   const streamKeywordIndex = findPdfKeyword(bodyText, "stream", 0);
   if (streamKeywordIndex < 0) {
     return undefined;
   }
 
   const dataStart = skipStreamLineBreak(bodyText, streamKeywordIndex + "stream".length);
+  const declaredLength = readIntegerValue(dictionaryEntries.get("Length"));
+  if (declaredLength !== undefined && dataStart + declaredLength <= bodyText.length) {
+    return {
+      dataStartOffset: dataStart,
+      dataEndOffset: dataStart + declaredLength,
+    };
+  }
+
+  const lengthRef = readObjectRefValue(dictionaryEntries.get("Length"));
   const endStreamIndex = findPdfKeyword(bodyText, "endstream", dataStart);
   if (endStreamIndex < 0) {
-    return undefined;
+    return lengthRef ? { dataStartOffset: dataStart, lengthRef } : undefined;
   }
 
   return {
-    text: bodyText.slice(dataStart, endStreamIndex),
+    dataStartOffset: dataStart,
+    dataEndOffset: endStreamIndex,
+    ...(lengthRef !== undefined ? { lengthRef } : {}),
   };
+}
+
+async function finalizeIndirectObjects(
+  indirectObjects: readonly ParsedIndirectObject[],
+  sourceBytes: Uint8Array,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): Promise<ParsedIndirectObject[]> {
+  const finalized: ParsedIndirectObject[] = [];
+
+  for (const objectShell of indirectObjects) {
+    finalized.push(await finalizeIndirectObject(objectShell, sourceBytes, objectIndex));
+  }
+
+  return finalized;
+}
+
+async function finalizeIndirectObject(
+  objectShell: ParsedIndirectObject,
+  sourceBytes: Uint8Array,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): Promise<ParsedIndirectObject> {
+  if (!objectShell.hasStream || objectShell.streamStartOffset === undefined) {
+    return objectShell;
+  }
+
+  const streamFilterNames = readStreamFilterNames(objectShell.dictionaryEntries.get("Filter"));
+  const rawStreamBytes = readStreamBytes(objectShell, sourceBytes, objectIndex);
+  if (rawStreamBytes === undefined) {
+    return {
+      ...objectShell,
+      ...(streamFilterNames.length > 0 ? { streamFilterNames } : {}),
+      streamDecodeState: "failed",
+    };
+  }
+
+  const finalizedBase = {
+    ...objectShell,
+    streamByteLength: rawStreamBytes.byteLength,
+    ...(streamFilterNames.length > 0 ? { streamFilterNames } : {}),
+  } satisfies ParsedIndirectObject;
+
+  if (streamFilterNames.length === 0) {
+    const streamText = decodePdfBytes(rawStreamBytes);
+    return {
+      ...finalizedBase,
+      streamDecodeState: "available",
+      decodedStreamByteLength: rawStreamBytes.byteLength,
+      streamText,
+    };
+  }
+
+  if (!streamFilterNames.every((filterName) => filterName === "FlateDecode")) {
+    return {
+      ...finalizedBase,
+      streamDecodeState: "unsupported-filter",
+    };
+  }
+
+  try {
+    const decodedStreamBytes = await inflateStreamBytes(rawStreamBytes);
+    return {
+      ...finalizedBase,
+      streamDecodeState: "decoded",
+      decodedStreamByteLength: decodedStreamBytes.byteLength,
+      streamText: decodePdfBytes(decodedStreamBytes),
+    };
+  } catch {
+    return {
+      ...finalizedBase,
+      streamDecodeState: "failed",
+    };
+  }
+}
+
+function readStreamBytes(
+  objectShell: ParsedIndirectObject,
+  sourceBytes: Uint8Array,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): Uint8Array | undefined {
+  const dataStartOffset = objectShell.streamStartOffset;
+  if (dataStartOffset === undefined) {
+    return undefined;
+  }
+
+  const dataEndOffset = resolveStreamEndOffset(objectShell, objectIndex);
+  if (dataEndOffset === undefined || dataEndOffset < dataStartOffset || dataEndOffset > sourceBytes.byteLength) {
+    return undefined;
+  }
+
+  return sourceBytes.slice(dataStartOffset, dataEndOffset);
+}
+
+function resolveStreamEndOffset(
+  objectShell: ParsedIndirectObject,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): number | undefined {
+  if (objectShell.streamLengthRef !== undefined) {
+    const lengthObject = objectIndex.get(keyOfObjectRef(objectShell.streamLengthRef));
+    const integerValue = readIntegerValueFromObject(lengthObject);
+    if (integerValue !== undefined) {
+      return objectShell.streamStartOffset !== undefined ? objectShell.streamStartOffset + integerValue : undefined;
+    }
+  }
+
+  return objectShell.streamEndOffset;
+}
+
+function readIntegerValueFromObject(objectShell: ParsedIndirectObject | undefined): number | undefined {
+  if (!objectShell) {
+    return undefined;
+  }
+
+  return readIntegerValue(objectShell.objectValueText);
+}
+
+function readStreamFilterNames(value: string | undefined): string[] {
+  if (!value) {
+    return [];
+  }
+
+  const directName = readNameValue(value);
+  if (directName !== undefined) {
+    return [directName];
+  }
+
+  const filterNames: string[] = [];
+  for (let index = 0; index < value.length; index += 1) {
+    const nameToken = readPdfNameToken(value, index);
+    if (!nameToken) {
+      continue;
+    }
+
+    filterNames.push(nameToken.name);
+    index = nameToken.nextIndex - 1;
+  }
+
+  return filterNames;
+}
+
+async function inflateStreamBytes(rawStreamBytes: Uint8Array): Promise<Uint8Array> {
+  const exactBytes = Uint8Array.from(rawStreamBytes);
+  const response = new Response(new Blob([exactBytes]).stream().pipeThrough(new DecompressionStream("deflate")));
+  return new Uint8Array(await response.arrayBuffer());
 }
 
 function collectCrossReferenceSections(
