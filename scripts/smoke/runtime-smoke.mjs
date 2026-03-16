@@ -621,6 +621,26 @@ assert(
   "ToUnicode flate stream still reported stream-decoding-failed.",
 );
 assert(
+  toUnicodeFlateResult.observation.status === "completed",
+  `ToUnicode flate observation status was ${toUnicodeFlateResult.observation.status}.`,
+);
+assert(
+  toUnicodeFlateResult.observation.value?.extractedText === "Hello!",
+  `Unexpected ToUnicode flate extracted text: ${JSON.stringify(toUnicodeFlateResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  !toUnicodeFlateResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "ToUnicode flate observation still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  toUnicodeFlateResult.observation.value?.pages[0]?.runs[0]?.fontRef?.objectNumber === 5,
+  "ToUnicode flate observation did not preserve the active font reference.",
+);
+assert(
+  toUnicodeFlateResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind === "hex",
+  `ToUnicode flate observation text encoding kind was ${toUnicodeFlateResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind ?? "missing"}.`,
+);
+assert(
   toUnicodeUnsupportedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
   "Unsupported ToUnicode stream role was not classified as tounicode.",
 );

@@ -1,4 +1,11 @@
-import { analyzePdfShell, analyzeTextOperators, extractTextOperatorRuns, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
+import { decodePdfHexTextWithUnicodeCMap, parsePdfUnicodeCMap } from "./cmap.ts";
+import {
+  analyzePdfShell,
+  decodePdfLiteral,
+  keyOfObjectRef,
+  parseTextOperatorRuns,
+  type PdfShellAnalysis,
+} from "./shell-parse.ts";
 
 import type {
   PdfAdmissionArtifact,
@@ -27,6 +34,7 @@ import type {
   PdfRuntimeCapabilities,
   PdfRuntimeDescriptor,
   PdfStageResult,
+  PdfTextEncodingKind,
 } from "./contracts.ts";
 
 const DEFAULT_POLICY: PdfNormalizedAdmissionPolicy = {
@@ -431,11 +439,12 @@ function buildObservationStage(
   }
 
   const diagnostics = createObservationDiagnostics(inspection);
-  const pages = buildObservedPages(inspection, diagnostics);
+  const observedPageResult = buildObservedPages(inspection, diagnostics);
+  const pages = observedPageResult.pages;
   const extractedText = pages.flatMap((page) => page.runs.map((run) => run.text)).join("\n");
 
   if (extractedText.length === 0) {
-    if (hasEncodedTextWithoutUnicodeMapping(inspection)) {
+    if (observedPageResult.hasFontMappingGap) {
       diagnostics.push({
         code: "font-unicode-mapping-not-implemented",
         stage: "observation",
@@ -457,7 +466,7 @@ function buildObservationStage(
     strategy: "decoded-text-operators",
     extractedText,
     pages,
-    knownLimits: collectObservationKnownLimits(inspection),
+    knownLimits: collectObservationKnownLimits(inspection, observedPageResult.hasFontMappingGap),
   };
 
   return stageResult(
@@ -471,15 +480,17 @@ function buildObservationStage(
 function buildObservedPages(
   inspection: PdfShellInspection,
   diagnostics: PdfDiagnostic[],
-): PdfObservedPage[] {
-  const resolutionMethod = inspection.analysis.pageTreeResolved ? "page-tree" : "recovered-page-order";
-  const observedPages = inspection.analysis.pageEntries.map((pageEntry) =>
-    buildObservedPage(pageEntry.pageNumber, pageEntry.pageRef, pageEntry.contentStreamRefs, resolutionMethod, inspection),
-  );
+): { pages: readonly PdfObservedPage[]; hasFontMappingGap: boolean } {
+  let hasFontMappingGap = false;
+  const observedPages = inspection.analysis.pageEntries.map((pageEntry) => {
+    const observedPage = buildObservedPage(pageEntry, inspection);
+    hasFontMappingGap = hasFontMappingGap || observedPage.hasFontMappingGap;
+    return observedPage.page;
+  });
 
   const hasTextRuns = observedPages.some((page) => page.runs.length > 0);
   if (hasTextRuns || inspection.analysis.pageEntries.length > 0) {
-    return observedPages;
+    return { pages: observedPages, hasFontMappingGap };
   }
 
   diagnostics.push({
@@ -493,30 +504,57 @@ function buildObservedPages(
     .filter((objectShell) => objectShell.hasStream && typeof objectShell.streamText === "string")
     .map((objectShell) => objectShell.ref);
 
-  return [buildObservedPage(1, undefined, fallbackStreamRefs, "stream-fallback", inspection)];
+  const fallbackPage = buildObservedPage(
+    {
+      pageNumber: 1,
+      contentStreamRefs: fallbackStreamRefs,
+      fontBindings: [],
+    },
+    inspection,
+    "stream-fallback",
+  );
+  return {
+    pages: [fallbackPage.page],
+    hasFontMappingGap: hasFontMappingGap || fallbackPage.hasFontMappingGap,
+  };
 }
 
 function buildObservedPage(
-  pageNumber: number,
-  pageRef: PdfObjectRef | undefined,
-  contentStreamRefs: readonly PdfObjectRef[],
-  resolutionMethod: "page-tree" | "recovered-page-order" | "stream-fallback",
+  pageEntry: {
+    readonly pageNumber: number;
+    readonly pageRef?: PdfObjectRef;
+    readonly contentStreamRefs: readonly PdfObjectRef[];
+    readonly fontBindings: readonly { readonly resourceName: string; readonly fontRef: PdfObjectRef }[];
+  },
   inspection: PdfShellInspection,
-): PdfObservedPage {
+  resolutionMethodOverride?: "page-tree" | "recovered-page-order" | "stream-fallback",
+): { page: PdfObservedPage; hasFontMappingGap: boolean } {
+  const resolutionMethod = resolutionMethodOverride ??
+    (inspection.analysis.pageTreeResolved ? "page-tree" : "recovered-page-order");
+  const pageNumber = pageEntry.pageNumber;
   const glyphs: PdfObservedGlyph[] = [];
   const runs: PdfObservedTextRun[] = [];
   let contentOrder = 0;
+  let hasFontMappingGap = false;
+  const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
+  const unicodeCMapByFontKey = new Map<string, ReturnType<typeof parsePdfUnicodeCMap>>();
 
-  for (const contentStreamRef of contentStreamRefs) {
+  for (const contentStreamRef of pageEntry.contentStreamRefs) {
     const contentStream = inspection.analysis.objectIndex.get(keyOfObjectRef(contentStreamRef));
     if (!contentStream?.streamText) {
       continue;
     }
 
-    const extractedRuns = extractTextOperatorRuns(contentStream.streamText);
-    for (const runText of extractedRuns) {
+    const parsedRuns = parseTextOperatorRuns(contentStream.streamText);
+    for (const parsedRun of parsedRuns) {
+      const observedRun = observeParsedTextRun(parsedRun, fontRefByResourceName, unicodeCMapByFontKey, inspection);
+      hasFontMappingGap = hasFontMappingGap || observedRun.hasFontMappingGap;
+      if (observedRun.text.length === 0) {
+        continue;
+      }
+
       const glyphIds: string[] = [];
-      const codePoints = Array.from(runText);
+      const codePoints = Array.from(observedRun.text);
 
       for (const [glyphIndex, text] of codePoints.entries()) {
         const glyphId = `glyph-${pageNumber}-${contentOrder + 1}-${glyphIndex + 1}`;
@@ -531,6 +569,8 @@ function buildObservedPage(
           hidden: false,
           origin: "native-text",
           contentStreamRef,
+          ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
+          ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
           objectRef: contentStreamRef,
         });
       }
@@ -539,10 +579,12 @@ function buildObservedPage(
         id: `run-${pageNumber}-${contentOrder + 1}`,
         pageNumber,
         contentOrder,
-        text: runText,
+        text: observedRun.text,
         glyphIds,
         origin: "native-text",
         contentStreamRef,
+        ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
+        ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
         objectRef: contentStreamRef,
       });
 
@@ -551,11 +593,118 @@ function buildObservedPage(
   }
 
   return {
-    pageNumber,
-    resolutionMethod,
-    ...(pageRef !== undefined ? { pageRef } : {}),
-    glyphs,
-    runs,
+    page: {
+      pageNumber,
+      resolutionMethod,
+      ...(pageEntry.pageRef !== undefined ? { pageRef: pageEntry.pageRef } : {}),
+      glyphs,
+      runs,
+    },
+    hasFontMappingGap,
+  };
+}
+
+function observeParsedTextRun(
+  parsedRun: ReturnType<typeof parseTextOperatorRuns>[number],
+  fontRefByResourceName: ReadonlyMap<string, PdfObjectRef>,
+  unicodeCMapByFontKey: Map<string, ReturnType<typeof parsePdfUnicodeCMap>>,
+  inspection: PdfShellInspection,
+): {
+  text: string;
+  hasFontMappingGap: boolean;
+  fontRef?: PdfObjectRef;
+  textEncodingKind?: PdfTextEncodingKind;
+} {
+  let text = "";
+  let hasFontMappingGap = false;
+  let textEncodingKind: PdfTextEncodingKind | undefined;
+  const fontRef = parsedRun.fontResourceName ? fontRefByResourceName.get(parsedRun.fontResourceName) : undefined;
+  const unicodeCMap = fontRef ? resolveUnicodeCMapForFont(fontRef, unicodeCMapByFontKey, inspection) : undefined;
+
+  for (const operand of parsedRun.operands) {
+    if (operand.kind === "literal") {
+      text += decodePdfLiteral(operand.token);
+      textEncodingKind = textEncodingKind ?? "literal";
+      continue;
+    }
+
+    textEncodingKind = textEncodingKind ?? inferHexTextEncodingKind(fontRef, inspection);
+    if (!unicodeCMap) {
+      hasFontMappingGap = true;
+      continue;
+    }
+
+    const decodedText = decodePdfHexTextWithUnicodeCMap(operand.token, unicodeCMap);
+    if (!decodedText.complete) {
+      hasFontMappingGap = true;
+    }
+    text += decodedText.text;
+  }
+
+  return {
+    text: text.trim(),
+    hasFontMappingGap,
+    ...(fontRef !== undefined ? { fontRef } : {}),
+    ...(textEncodingKind !== undefined ? { textEncodingKind } : {}),
+  };
+}
+
+function resolveUnicodeCMapForFont(
+  fontRef: PdfObjectRef,
+  unicodeCMapByFontKey: Map<string, ReturnType<typeof parsePdfUnicodeCMap>>,
+  inspection: PdfShellInspection,
+) {
+  const fontKey = keyOfObjectRef(fontRef);
+  if (unicodeCMapByFontKey.has(fontKey)) {
+    return unicodeCMapByFontKey.get(fontKey);
+  }
+
+  const fontObject = inspection.analysis.objectIndex.get(fontKey);
+  const toUnicodeRef = fontObject ? readOptionalObjectRef(fontObject.dictionaryEntries.get("ToUnicode")) : undefined;
+  const unicodeStreamText = toUnicodeRef
+    ? inspection.analysis.objectIndex.get(keyOfObjectRef(toUnicodeRef))?.streamText
+    : undefined;
+  const unicodeCMap = typeof unicodeStreamText === "string" ? parsePdfUnicodeCMap(unicodeStreamText) : undefined;
+  unicodeCMapByFontKey.set(fontKey, unicodeCMap);
+  return unicodeCMap;
+}
+
+function inferHexTextEncodingKind(
+  fontRef: PdfObjectRef | undefined,
+  inspection: PdfShellInspection,
+): PdfTextEncodingKind {
+  if (fontRef === undefined) {
+    return "hex";
+  }
+
+  const fontObject = inspection.analysis.objectIndex.get(keyOfObjectRef(fontRef));
+  const encodingValue = fontObject?.dictionaryEntries.get("Encoding")?.trim();
+  if (
+    fontObject?.dictionaryEntries.has("DescendantFonts") ||
+    fontObject?.dictionaryEntries.get("Subtype")?.trim() === "/Type0" ||
+    encodingValue === "/Identity-H" ||
+    encodingValue === "/Identity-V"
+  ) {
+    return "cid";
+  }
+
+  return "hex";
+}
+
+function readOptionalObjectRef(value: string | undefined): PdfObjectRef | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  const match = trimmedValue.match(/^(\d+)\s+(\d+)\s+R$/);
+  if (!match) {
+    return undefined;
+  }
+
+  return {
+    objectNumber: Number(match[1]),
+    generationNumber: Number(match[2]),
   };
 }
 
@@ -605,12 +754,15 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
   return dedupeKnownLimits(knownLimits);
 }
 
-function collectObservationKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
+function collectObservationKnownLimits(
+  inspection: PdfShellInspection,
+  hasFontMappingGap: boolean,
+): readonly PdfKnownLimitCode[] {
   const knownLimits: PdfKnownLimitCode[] = [...collectIrKnownLimits(inspection)];
   if (inspection.analysis.indirectObjects.some((objectShell) => typeof objectShell.streamText === "string")) {
     knownLimits.push("text-decoding-heuristic");
   }
-  if (hasEncodedTextWithoutUnicodeMapping(inspection)) {
+  if (hasFontMappingGap) {
     knownLimits.push("font-unicode-mapping-not-implemented");
   }
   return dedupeKnownLimits(knownLimits);
@@ -638,12 +790,6 @@ function hasUnsupportedStreamFilters(inspection: PdfShellInspection): boolean {
 
 function hasFailedStreamDecodes(inspection: PdfShellInspection): boolean {
   return inspection.analysis.indirectObjects.some((objectShell) => objectShell.streamDecodeState === "failed");
-}
-
-function hasEncodedTextWithoutUnicodeMapping(inspection: PdfShellInspection): boolean {
-  return inspection.analysis.indirectObjects.some(
-    (objectShell) => typeof objectShell.streamText === "string" && analyzeTextOperators(objectShell.streamText).hasHexTextOperands,
-  );
 }
 
 function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
