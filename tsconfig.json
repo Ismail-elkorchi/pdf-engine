@@ -15,7 +15,9 @@
     "skipLibCheck": false,
     "declaration": true,
     "sourceMap": true,
-    "verbatimModuleSyntax": true
+    "verbatimModuleSyntax": true,
+    "allowImportingTsExtensions": true,
+    "rewriteRelativeImportExtensions": true
   },
   "include": ["src/**/*.ts", "scripts/**/*.ts"]
 }

@@ -47,13 +47,17 @@
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json --noEmit",
     "deps:freshness": "npm outdated || true",
-    "smoke:node": "node --input-type=module -e \"await import('./dist/index.js');\"",
-    "smoke:deno": "deno eval \"import './jsr/mod.ts';\"",
-    "smoke:bun": "bun --eval \"await import('./dist/index.js');\"",
-    "smoke:all": "npm run build && npm run smoke:node && npm run smoke:deno && npm run smoke:bun",
+    "smoke:web": "node scripts/smoke/web-bundle.mjs",
+    "smoke:compiled:node": "node scripts/smoke/runtime-smoke.mjs ../../dist/index.js node",
+    "smoke:compiled:bun": "bun scripts/smoke/runtime-smoke.mjs ../../dist/index.js bun",
+    "smoke:node": "npm run build && npm run smoke:compiled:node",
+    "smoke:deno": "deno run --allow-read=./jsr,./src scripts/smoke/runtime-smoke.mjs ../../jsr/mod.ts deno",
+    "smoke:bun": "npm run build && npm run smoke:compiled:bun",
+    "smoke:all": "npm run build && npm run smoke:compiled:node && npm run smoke:deno && npm run smoke:compiled:bun && npm run smoke:web",
     "check:ci": "npm run check && npm run smoke:all"
   },
   "devDependencies": {
+    "esbuild": "^0.27.3",
     "typescript": "^5.9.2"
   }
 }

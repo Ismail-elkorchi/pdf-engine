@@ -1,1 +1,1 @@
-export * from "../src/contracts.ts";
+export * from "../src/index.ts";
