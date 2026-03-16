@@ -8,6 +8,7 @@ import type {
   PdfNormalizedAdmissionPolicy,
   PdfObjectRef,
   PdfParseCoverage,
+  PdfPoint,
   PdfPageValueOrigin,
   PdfRepairState,
   PdfStreamRole,
@@ -43,6 +44,9 @@ export interface ParsedFontResourceBinding {
 export interface ParsedTextOperatorRun {
   readonly operator: "Tj" | "TJ" | "'" | "\"";
   readonly fontResourceName?: string;
+  readonly fontSize?: number;
+  readonly startsNewLine: boolean;
+  readonly anchor?: PdfPoint;
   readonly operands: ReadonlyArray<
     | { readonly kind: "literal"; readonly token: string }
     | { readonly kind: "hex"; readonly token: string }
@@ -1377,9 +1381,73 @@ function readNameValue(value: string | undefined): string | undefined {
   return nameToken?.name;
 }
 
+function readNumericTokenValue(token: string): number | undefined {
+  const value = Number(token);
+  return Number.isFinite(value) ? value : undefined;
+}
+
+function readTrailingNumericOperands(
+  operands: ReadonlyArray<
+    | { readonly kind: "name"; readonly token: string }
+    | { readonly kind: "literal"; readonly token: string }
+    | { readonly kind: "hex"; readonly token: string }
+    | {
+      readonly kind: "array";
+      readonly items: ReadonlyArray<
+        | { readonly kind: "literal"; readonly token: string }
+        | { readonly kind: "hex"; readonly token: string }
+      >;
+    }
+    | { readonly kind: "other"; readonly token: string }
+  >,
+  count: number,
+): readonly number[] | undefined {
+  const numericValues: number[] = [];
+
+  for (let index = operands.length - 1; index >= 0 && numericValues.length < count; index -= 1) {
+    const operand = operands[index];
+    if (operand?.kind !== "other") {
+      continue;
+    }
+    const value = readNumericTokenValue(operand.token);
+    if (value === undefined) {
+      continue;
+    }
+    numericValues.push(value);
+  }
+
+  if (numericValues.length !== count) {
+    return undefined;
+  }
+
+  return numericValues.reverse();
+}
+
+function offsetPoint(anchor: PdfPoint | undefined, dx: number, dy: number): PdfPoint {
+  return {
+    x: (anchor?.x ?? 0) + dx,
+    y: (anchor?.y ?? 0) + dy,
+  };
+}
+
+function advanceToNextLine(anchor: PdfPoint | undefined, leading: number | undefined): PdfPoint | undefined {
+  if (!anchor || leading === undefined || leading === 0) {
+    return anchor;
+  }
+
+  return {
+    x: anchor.x,
+    y: anchor.y - leading,
+  };
+}
+
 export function parseTextOperatorRuns(text: string): readonly ParsedTextOperatorRun[] {
   const runs: ParsedTextOperatorRun[] = [];
   let currentFontResourceName: string | undefined;
+  let currentFontSize: number | undefined;
+  let currentTextAnchor: PdfPoint | undefined;
+  let currentLeading: number | undefined;
+  let pendingLineBreak = false;
   const operands: Array<
     | { kind: "name"; token: string }
     | { kind: "literal"; token: string }
@@ -1457,9 +1525,74 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
     }
 
     const token = text.slice(index, tokenEnd);
+    if (token === "BT") {
+      operands.length = 0;
+      pendingLineBreak = false;
+      currentTextAnchor = undefined;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "ET") {
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
     if (token === "Tf") {
       const fontOperand = [...operands].reverse().find((operand) => operand.kind === "name");
       currentFontResourceName = fontOperand?.kind === "name" ? fontOperand.token.slice(1) : currentFontResourceName;
+      const fontSizeOperand = [...operands]
+        .reverse()
+        .find((operand) => operand.kind === "other" && readNumericTokenValue(operand.token) !== undefined);
+      currentFontSize = fontSizeOperand?.kind === "other"
+        ? readNumericTokenValue(fontSizeOperand.token) ?? currentFontSize
+        : currentFontSize;
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "Tm") {
+      const matrixOperands = readTrailingNumericOperands(operands, 6);
+      if (matrixOperands) {
+        currentTextAnchor = {
+          x: matrixOperands[4] ?? 0,
+          y: matrixOperands[5] ?? 0,
+        };
+        pendingLineBreak = true;
+      }
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "Td") {
+      const positionOperands = readTrailingNumericOperands(operands, 2);
+      if (positionOperands) {
+        currentTextAnchor = offsetPoint(currentTextAnchor, positionOperands[0] ?? 0, positionOperands[1] ?? 0);
+        pendingLineBreak = true;
+      }
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "TD") {
+      const positionOperands = readTrailingNumericOperands(operands, 2);
+      if (positionOperands) {
+        currentTextAnchor = offsetPoint(currentTextAnchor, positionOperands[0] ?? 0, positionOperands[1] ?? 0);
+        currentLeading = -(positionOperands[1] ?? 0);
+        pendingLineBreak = true;
+      }
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "T*") {
+      currentTextAnchor = advanceToNextLine(currentTextAnchor, currentLeading);
+      pendingLineBreak = true;
       operands.length = 0;
       index = tokenEnd;
       continue;
@@ -1473,16 +1606,23 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         runs.push({
           operator: "Tj",
           ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          ...(currentFontSize !== undefined ? { fontSize: currentFontSize } : {}),
+          ...(currentTextAnchor !== undefined ? { anchor: currentTextAnchor } : {}),
+          startsNewLine: pendingLineBreak,
           operands: [literal],
         });
       } else if (literal?.kind === "hex") {
         runs.push({
           operator: "Tj",
           ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          ...(currentFontSize !== undefined ? { fontSize: currentFontSize } : {}),
+          ...(currentTextAnchor !== undefined ? { anchor: currentTextAnchor } : {}),
+          startsNewLine: pendingLineBreak,
           operands: [literal],
         });
       }
       operands.length = 0;
+      pendingLineBreak = false;
       index = tokenEnd;
       continue;
     }
@@ -1493,15 +1633,20 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         runs.push({
           operator: "TJ",
           ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          ...(currentFontSize !== undefined ? { fontSize: currentFontSize } : {}),
+          ...(currentTextAnchor !== undefined ? { anchor: currentTextAnchor } : {}),
+          startsNewLine: pendingLineBreak,
           operands: array.items,
         });
       }
       operands.length = 0;
+      pendingLineBreak = false;
       index = tokenEnd;
       continue;
     }
 
     if (token === "'") {
+      const lineAnchor = advanceToNextLine(currentTextAnchor, currentLeading);
       const literal = [...operands].reverse().find(
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
@@ -1509,21 +1654,30 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         runs.push({
           operator: "'",
           ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          ...(currentFontSize !== undefined ? { fontSize: currentFontSize } : {}),
+          ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
+          startsNewLine: true,
           operands: [literal],
         });
       } else if (literal?.kind === "hex") {
         runs.push({
           operator: "'",
           ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          ...(currentFontSize !== undefined ? { fontSize: currentFontSize } : {}),
+          ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
+          startsNewLine: true,
           operands: [literal],
         });
       }
+      currentTextAnchor = lineAnchor;
       operands.length = 0;
+      pendingLineBreak = false;
       index = tokenEnd;
       continue;
     }
 
     if (token === "\"") {
+      const lineAnchor = advanceToNextLine(currentTextAnchor, currentLeading);
       const literal = [...operands].reverse().find(
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
@@ -1531,16 +1685,24 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         runs.push({
           operator: "\"",
           ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          ...(currentFontSize !== undefined ? { fontSize: currentFontSize } : {}),
+          ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
+          startsNewLine: true,
           operands: [literal],
         });
       } else if (literal?.kind === "hex") {
         runs.push({
           operator: "\"",
           ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          ...(currentFontSize !== undefined ? { fontSize: currentFontSize } : {}),
+          ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
+          startsNewLine: true,
           operands: [literal],
         });
       }
+      currentTextAnchor = lineAnchor;
       operands.length = 0;
+      pendingLineBreak = false;
       index = tokenEnd;
       continue;
     }
