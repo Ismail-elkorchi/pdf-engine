@@ -13,10 +13,10 @@ Run before opening a pull request:
 
 - `npm ci`
 - `npm run check`
-- `npm run build`
-- `npm run smoke:all`
+- `npm run check:ci`
 
-`npm run check` includes the JSR documentation gates, so full local verification requires Deno as well as Node.js.
+`npm run check` includes lint, type, runtime-policy, and JSR documentation gates.
+`npm run check:ci` adds cross-runtime smoke coverage and the hostile-input fuzz check, so full local verification requires Deno, Bun, and Node.js.
 Runtime floors and CI-pinned versions are governed by [`tools/runtime-versions.json`](tools/runtime-versions.json).
 
 ## Constraints

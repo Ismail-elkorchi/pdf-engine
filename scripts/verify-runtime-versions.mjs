@@ -1,5 +1,5 @@
-import { readFile } from 'node:fs/promises';
 import { spawnSync } from 'node:child_process';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 
 const runtimeCommands = {
