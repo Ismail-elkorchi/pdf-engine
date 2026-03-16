@@ -68,6 +68,11 @@ export type PdfFeatureKind =
 export type PdfObservationOrigin = "native-text" | "heuristic-text" | "ocr" | "unknown";
 
 /**
+ * Encoding form used by the text operand that produced an observed run or glyph.
+ */
+export type PdfTextEncodingKind = "literal" | "hex" | "cid";
+
+/**
  * Cross-reference organization detected for a PDF file.
  */
 export type PdfCrossReferenceKind = "classic" | "xref-stream" | "hybrid" | "unknown";
@@ -530,6 +535,10 @@ export interface PdfObservedGlyph {
   readonly origin: PdfObservationOrigin;
   /** Content stream reference that produced this glyph when known. */
   readonly contentStreamRef?: PdfObjectRef;
+  /** Font object reference active when this glyph was decoded when known. */
+  readonly fontRef?: PdfObjectRef;
+  /** Text operand encoding form used to decode this glyph when known. */
+  readonly textEncodingKind?: PdfTextEncodingKind;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Optional glyph bounding box. */
@@ -554,6 +563,10 @@ export interface PdfObservedTextRun {
   readonly origin: PdfObservationOrigin;
   /** Content stream reference that produced this run when known. */
   readonly contentStreamRef?: PdfObjectRef;
+  /** Font object reference active when this run was decoded when known. */
+  readonly fontRef?: PdfObjectRef;
+  /** Text operand encoding form used to decode this run when known. */
+  readonly textEncodingKind?: PdfTextEncodingKind;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Optional run bounding box. */

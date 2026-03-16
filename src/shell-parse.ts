@@ -28,9 +28,24 @@ export interface ParsedPageEntry {
   readonly pageRef: PdfObjectRef;
   readonly contentStreamRefs: readonly PdfObjectRef[];
   readonly annotationRefs: readonly PdfObjectRef[];
+  readonly fontBindings: readonly ParsedFontResourceBinding[];
   readonly resourceRef?: PdfObjectRef;
   readonly resourceCount: number;
   readonly resourceOrigin?: PdfPageValueOrigin;
+}
+
+export interface ParsedFontResourceBinding {
+  readonly resourceName: string;
+  readonly fontRef: PdfObjectRef;
+}
+
+export interface ParsedTextOperatorRun {
+  readonly operator: "Tj" | "TJ" | "'" | "\"";
+  readonly fontResourceName?: string;
+  readonly operands: ReadonlyArray<
+    | { readonly kind: "literal"; readonly token: string }
+    | { readonly kind: "hex"; readonly token: string }
+  >;
 }
 
 export interface PdfShellAnalysis {
@@ -629,7 +644,7 @@ function buildPageEntries(
   const fallbackPages = indirectObjects
     .filter((objectShell) => objectShell.typeName === "Page")
     .sort((leftObject, rightObject) => leftObject.offset - rightObject.offset)
-    .map((objectShell, pageIndex) => toPageEntry(objectShell, pageIndex + 1));
+    .map((objectShell, pageIndex) => toPageEntry(objectShell, pageIndex + 1, {}, objectIndex));
 
   return { pages: fallbackPages, resolved: false, inheritedStateResolved: false };
 }
@@ -687,7 +702,7 @@ function appendPageTreeEntries(
 
   const nextInheritedState = mergeInheritedPageState(inheritedState, currentObject);
   if (currentObject.typeName === "Page") {
-    orderedPages.push(toPageEntry(currentObject, orderedPages.length + 1, nextInheritedState));
+    orderedPages.push(toPageEntry(currentObject, orderedPages.length + 1, nextInheritedState, objectIndex));
     return;
   }
 
@@ -738,6 +753,7 @@ function toPageEntry(
   objectShell: ParsedIndirectObject,
   pageNumber: number,
   inheritedState: InheritedPageState = {},
+  objectIndex?: ReadonlyMap<string, ParsedIndirectObject>,
 ): ParsedPageEntry {
   const contentStreamRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Contents"));
   const annotationRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Annots"));
@@ -747,16 +763,70 @@ function toPageEntry(
     : resourceValue
       ? "inherited"
       : undefined;
+  const fontBindings = resourceValue ? readFontResourceBindings(resourceValue.rawValue, objectIndex) : [];
 
   return {
     pageNumber,
     pageRef: objectShell.ref,
     contentStreamRefs,
     annotationRefs,
+    fontBindings,
     ...(resourceValue?.ref !== undefined ? { resourceRef: resourceValue.ref } : {}),
     ...(resourceOrigin !== undefined ? { resourceOrigin } : {}),
     resourceCount: resourceValue ? 1 : 0,
   };
+}
+
+function readFontResourceBindings(
+  resourceValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): ParsedFontResourceBinding[] {
+  const resolvedResourceDictionary = resolveDictionaryValue(resourceValue, objectIndex);
+  if (!resolvedResourceDictionary) {
+    return [];
+  }
+
+  const resourceEntries = parseDictionaryEntries(resolvedResourceDictionary);
+  const fontValue = resourceEntries.get("Font");
+  if (!fontValue) {
+    return [];
+  }
+
+  const resolvedFontDictionary = resolveDictionaryValue(fontValue, objectIndex);
+  if (!resolvedFontDictionary) {
+    return [];
+  }
+
+  const fontEntries = parseDictionaryEntries(resolvedFontDictionary);
+  const fontBindings: ParsedFontResourceBinding[] = [];
+
+  for (const [resourceName, fontValueToken] of fontEntries.entries()) {
+    const fontRef = readObjectRefValue(fontValueToken);
+    if (fontRef !== undefined) {
+      fontBindings.push({
+        resourceName,
+        fontRef,
+      });
+    }
+  }
+
+  return fontBindings;
+}
+
+function resolveDictionaryValue(
+  rawValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): string | undefined {
+  if (rawValue.startsWith("<<") && rawValue.endsWith(">>")) {
+    return rawValue;
+  }
+
+  const objectRef = readObjectRefValue(rawValue);
+  if (objectRef === undefined || objectIndex === undefined) {
+    return undefined;
+  }
+
+  return findFirstDictionaryToken(objectIndex.get(keyOfObjectRef(objectRef))?.objectValueText ?? "");
 }
 
 function countPageObjects(indirectObjects: readonly ParsedIndirectObject[]): number | undefined {
@@ -1172,13 +1242,11 @@ function readNameValue(value: string | undefined): string | undefined {
   return nameToken?.name;
 }
 
-export function analyzeTextOperators(text: string): {
-  readonly runs: readonly string[];
-  readonly hasHexTextOperands: boolean;
-} {
-  const runs: string[] = [];
-  let hasHexTextOperands = false;
+export function parseTextOperatorRuns(text: string): readonly ParsedTextOperatorRun[] {
+  const runs: ParsedTextOperatorRun[] = [];
+  let currentFontResourceName: string | undefined;
   const operands: Array<
+    | { kind: "name"; token: string }
     | { kind: "literal"; token: string }
     | { kind: "hex"; token: string }
     | {
@@ -1208,6 +1276,18 @@ export function analyzeTextOperators(text: string): {
 
       operands.push({ kind: "literal", token: literal.token });
       index = literal.nextIndex;
+      continue;
+    }
+
+    if (current === "/") {
+      const nameToken = readPdfNameToken(text, index);
+      if (!nameToken) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "name", token: nameToken.raw });
+      index = nameToken.nextIndex;
       continue;
     }
 
@@ -1242,14 +1322,30 @@ export function analyzeTextOperators(text: string): {
     }
 
     const token = text.slice(index, tokenEnd);
+    if (token === "Tf") {
+      const fontOperand = [...operands].reverse().find((operand) => operand.kind === "name");
+      currentFontResourceName = fontOperand?.kind === "name" ? fontOperand.token.slice(1) : currentFontResourceName;
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
     if (token === "Tj") {
       const literal = [...operands].reverse().find(
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
       if (literal?.kind === "literal") {
-        pushTextRun(runs, decodePdfLiteral(literal.token));
+        runs.push({
+          operator: "Tj",
+          ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          operands: [literal],
+        });
       } else if (literal?.kind === "hex") {
-        hasHexTextOperands = true;
+        runs.push({
+          operator: "Tj",
+          ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          operands: [literal],
+        });
       }
       operands.length = 0;
       index = tokenEnd;
@@ -1259,11 +1355,11 @@ export function analyzeTextOperators(text: string): {
     if (token === "TJ") {
       const array = operands.at(-1);
       if (array?.kind === "array") {
-        hasHexTextOperands = hasHexTextOperands || array.items.some((item) => item.kind === "hex");
-        pushTextRun(
-          runs,
-          array.items.map((item) => (item.kind === "literal" ? decodePdfLiteral(item.token) : "")).join(""),
-        );
+        runs.push({
+          operator: "TJ",
+          ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          operands: array.items,
+        });
       }
       operands.length = 0;
       index = tokenEnd;
@@ -1275,9 +1371,17 @@ export function analyzeTextOperators(text: string): {
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
       if (literal?.kind === "literal") {
-        pushTextRun(runs, decodePdfLiteral(literal.token));
+        runs.push({
+          operator: "'",
+          ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          operands: [literal],
+        });
       } else if (literal?.kind === "hex") {
-        hasHexTextOperands = true;
+        runs.push({
+          operator: "'",
+          ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          operands: [literal],
+        });
       }
       operands.length = 0;
       index = tokenEnd;
@@ -1289,9 +1393,17 @@ export function analyzeTextOperators(text: string): {
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
       if (literal?.kind === "literal") {
-        pushTextRun(runs, decodePdfLiteral(literal.token));
+        runs.push({
+          operator: "\"",
+          ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          operands: [literal],
+        });
       } else if (literal?.kind === "hex") {
-        hasHexTextOperands = true;
+        runs.push({
+          operator: "\"",
+          ...(currentFontResourceName !== undefined ? { fontResourceName: currentFontResourceName } : {}),
+          operands: [literal],
+        });
       }
       operands.length = 0;
       index = tokenEnd;
@@ -1302,9 +1414,23 @@ export function analyzeTextOperators(text: string): {
     index = tokenEnd;
   }
 
+  return runs;
+}
+
+export function analyzeTextOperators(text: string): {
+  readonly runs: readonly string[];
+  readonly hasHexTextOperands: boolean;
+} {
+  const parsedRuns = parseTextOperatorRuns(text);
+  const runs = parsedRuns
+    .map((parsedRun) =>
+      parsedRun.operands.map((operand) => (operand.kind === "literal" ? decodePdfLiteral(operand.token) : "")).join("").trim()
+    )
+    .filter((value) => value.length > 0);
+
   return {
     runs,
-    hasHexTextOperands,
+    hasHexTextOperands: parsedRuns.some((parsedRun) => parsedRun.operands.some((operand) => operand.kind === "hex")),
   };
 }
 
@@ -1381,7 +1507,7 @@ function readPdfTextArrayToken(
   return undefined;
 }
 
-function decodePdfLiteral(token: string): string {
+export function decodePdfLiteral(token: string): string {
   const source = token.startsWith("(") && token.endsWith(")") ? token.slice(1, -1) : token;
   let result = "";
 
@@ -1446,13 +1572,6 @@ function decodePdfLiteral(token: string): string {
   }
 
   return result;
-}
-
-function pushTextRun(runs: string[], text: string): void {
-  const normalizedText = text.trim();
-  if (normalizedText.length > 0) {
-    runs.push(normalizedText);
-  }
 }
 
 function findFirstDictionaryToken(text: string): string | undefined {
