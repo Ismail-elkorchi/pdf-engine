@@ -83,5 +83,8 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Build
+        run: npm run build
+
       - name: Smoke (Bun)
         run: npm run smoke:bun

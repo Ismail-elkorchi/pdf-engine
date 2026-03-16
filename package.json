@@ -46,6 +46,7 @@
   "scripts": {
     "build": "tsc -p tsconfig.build.json",
     "check": "tsc -p tsconfig.json --noEmit",
+    "deps:freshness": "npm outdated || true",
     "smoke:node": "node --input-type=module -e \"await import('./dist/index.js');\"",
     "smoke:deno": "deno eval \"import './jsr/mod.ts';\"",
     "smoke:bun": "bun --eval \"await import('./dist/index.js');\"",
@@ -53,7 +54,6 @@
     "check:ci": "npm run check && npm run smoke:all"
   },
   "devDependencies": {
-    "@types/node": "^24.5.2",
     "typescript": "^5.9.2"
   }
 }
