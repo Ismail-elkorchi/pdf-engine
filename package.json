@@ -54,6 +54,7 @@
     "docs:check:jsr": "npm run docs:lint:jsr && npm run docs:test:jsr",
     "check": "npm run typecheck && npm run verify:runtimes && npm run docs:check:jsr",
     "deps:freshness": "npm outdated || true",
+    "test:fuzz": "npm run build && node scripts/fuzz/run-fuzz.mjs",
     "smoke:web": "node scripts/smoke/web-bundle.mjs",
     "smoke:compiled:node": "node scripts/smoke/runtime-smoke.mjs ../../dist/index.js node",
     "smoke:compiled:bun": "bun scripts/smoke/runtime-smoke.mjs ../../dist/index.js bun",
@@ -61,10 +62,11 @@
     "smoke:deno": "deno run --allow-read=./jsr,./src scripts/smoke/runtime-smoke.mjs ../../jsr/mod.ts deno",
     "smoke:bun": "npm run build && npm run smoke:compiled:bun",
     "smoke:all": "npm run build && npm run smoke:compiled:node && npm run smoke:deno && npm run smoke:compiled:bun && npm run smoke:web",
-    "check:ci": "npm run check && npm run smoke:all"
+    "check:ci": "npm run check && npm run smoke:all && npm run test:fuzz"
   },
   "devDependencies": {
     "esbuild": "^0.27.3",
+    "fast-check": "^4.6.0",
     "typescript": "^5.9.2"
   }
 }

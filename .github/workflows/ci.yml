@@ -51,6 +51,9 @@ jobs:
       - name: Smoke (Node)
         run: npm run smoke:node
 
+      - name: Security fuzz
+        run: npm run test:fuzz
+
       - name: Fail on tracked-file churn
         shell: bash
         run: |
