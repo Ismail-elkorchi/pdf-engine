@@ -1,4 +1,5 @@
 import { decodePdfHexTextWithUnicodeCMap, parsePdfUnicodeCMap } from "./cmap.ts";
+import { buildKnowledgeDocument } from "./knowledge.ts";
 import { buildLayoutDocument } from "./layout.ts";
 import {
   analyzePdfShell,
@@ -25,6 +26,8 @@ import type {
   PdfKnownLimitCode,
   PdfLayoutDocument,
   PdfLayoutRequest,
+  PdfKnowledgeDocument,
+  PdfKnowledgeRequest,
   PdfNormalizedAdmissionPolicy,
   PdfObjectRef,
   PdfObservedDocument,
@@ -62,7 +65,7 @@ const ENGINE_IDENTITY: PdfEngineIdentity = {
   version: "0.1.0-shell",
   mode: "shell",
   supportedRuntimes: ["node", "deno", "bun", "web"],
-  supportedStages: ["admission", "ir", "observation", "layout"],
+  supportedStages: ["admission", "ir", "observation", "layout", "knowledge"],
 };
 
 const FEATURE_PATTERNS: ReadonlyArray<{
@@ -118,6 +121,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     toIr,
     observe,
     toLayout,
+    toKnowledge,
     run,
   };
 
@@ -172,6 +176,22 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     return buildLayoutStage(observation);
   }
 
+  async function toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>> {
+    const policy = mergePolicy(defaultPolicy, request.policy);
+    const inspection = await inspectSource(request.source, policy);
+    const admission = await buildAdmissionStage(
+      {
+        source: request.source,
+        ...(request.policy !== undefined ? { policy: request.policy } : {}),
+        ...(request.passwordProvider !== undefined ? { passwordProvider: request.passwordProvider } : {}),
+      },
+      inspection,
+    );
+    const observation = buildObservationStage(inspection, admission);
+    const layout = buildLayoutStage(observation);
+    return buildKnowledgeStage(layout);
+  }
+
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const inspection = await inspectSource(request.source, policy);
@@ -179,6 +199,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     const ir = buildIrStage(inspection, admission);
     const observation = buildObservationStage(inspection, admission);
     const layout = buildLayoutStage(observation);
+    const knowledge = buildKnowledgeStage(layout);
 
     return {
       engine: ENGINE_IDENTITY,
@@ -193,7 +214,8 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       ir,
       observation,
       layout,
-      diagnostics: dedupeDiagnostics([...admission.diagnostics, ...ir.diagnostics, ...observation.diagnostics, ...layout.diagnostics]),
+      knowledge,
+      diagnostics: dedupeDiagnostics([...admission.diagnostics, ...ir.diagnostics, ...observation.diagnostics, ...layout.diagnostics, ...knowledge.diagnostics]),
     };
   }
 }
@@ -513,6 +535,24 @@ function buildLayoutStage(
     observation.status === "partial" || diagnostics.length > 0 ? "partial" : "completed",
     diagnostics,
     layout,
+  );
+}
+
+function buildKnowledgeStage(
+  layout: PdfStageResult<PdfLayoutDocument>,
+): PdfStageResult<PdfKnowledgeDocument> {
+  if (layout.value === undefined) {
+    return stageResult("knowledge", layout.status === "failed" ? "failed" : "blocked", layout.diagnostics);
+  }
+
+  const diagnostics = createKnowledgeDiagnostics(layout);
+  const knowledge = buildKnowledgeDocument(layout.value);
+
+  return stageResult(
+    "knowledge",
+    layout.status === "partial" || diagnostics.length > 0 ? "partial" : "completed",
+    diagnostics,
+    knowledge,
   );
 }
 
@@ -1004,6 +1044,34 @@ function createLayoutDiagnostics(observation: PdfStageResult<PdfObservedDocument
       stage: "layout",
       level: "medium",
       message: "The layout stage could not build any blocks because the observation stage recovered no text runs.",
+    });
+  }
+
+  return diagnostics;
+}
+
+function createKnowledgeDiagnostics(layout: PdfStageResult<PdfLayoutDocument>): PdfDiagnostic[] {
+  const diagnostics: PdfDiagnostic[] = [];
+
+  diagnostics.push({
+    code: "knowledge-chunk-heuristic",
+    stage: "knowledge",
+    level: "medium",
+    message: "The current knowledge stage groups layout blocks into extractive chunks heuristically.",
+  });
+  diagnostics.push({
+    code: "table-projection-not-implemented",
+    stage: "knowledge",
+    level: "medium",
+    message: "The current knowledge stage does not emit tables unless stronger structural evidence is available.",
+  });
+
+  if (layout.value?.pages.every((page) => page.blocks.length === 0)) {
+    diagnostics.push({
+      code: "knowledge-empty",
+      stage: "knowledge",
+      level: "medium",
+      message: "The knowledge stage did not emit any chunks because the layout stage recovered no usable blocks.",
     });
   }
 

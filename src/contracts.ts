@@ -98,7 +98,9 @@ export type PdfKnownLimitCode =
   | "page-order-heuristic"
   | "layout-block-heuristic"
   | "layout-role-heuristic"
-  | "layout-reading-order-heuristic";
+  | "layout-reading-order-heuristic"
+  | "knowledge-chunk-heuristic"
+  | "table-projection-not-implemented";
 
 /**
  * Decode state for one recovered stream object.
@@ -705,6 +707,102 @@ export interface PdfLayoutDocument {
 }
 
 /**
+ * Role assigned to one knowledge chunk.
+ */
+export type PdfKnowledgeChunkRole = PdfLayoutRole | "mixed";
+
+/**
+ * First knowledge-projection strategy used by the shell implementation.
+ */
+export type PdfKnowledgeStrategy = "layout-chunks";
+
+/**
+ * One provenance record attached to a knowledge chunk or table cell.
+ */
+export interface PdfKnowledgeCitation {
+  /** Stable citation identifier within the knowledge result. */
+  readonly id: string;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Source layout block identifier. */
+  readonly blockId: string;
+  /** Source observation run identifiers. */
+  readonly runIds: readonly string[];
+  /** Source block text excerpt. */
+  readonly text: string;
+  /** Page object reference when known. */
+  readonly pageRef?: PdfObjectRef;
+}
+
+/**
+ * One chunk projected from the layout stage for downstream agent use.
+ */
+export interface PdfKnowledgeChunk {
+  /** Stable chunk identifier within the knowledge result. */
+  readonly id: string;
+  /** Chunk text emitted for downstream consumption. */
+  readonly text: string;
+  /** Role attached to the current chunk. */
+  readonly role: PdfKnowledgeChunkRole;
+  /** Page numbers covered by the chunk. */
+  readonly pageNumbers: readonly number[];
+  /** Source layout block identifiers covered by the chunk. */
+  readonly blockIds: readonly string[];
+  /** Source observation run identifiers covered by the chunk. */
+  readonly runIds: readonly string[];
+  /** Provenance records for the chunk. */
+  readonly citations: readonly PdfKnowledgeCitation[];
+}
+
+/**
+ * One cell emitted in a projected knowledge table.
+ */
+export interface PdfKnowledgeTableCell {
+  /** Zero-based row index. */
+  readonly rowIndex: number;
+  /** Zero-based column index. */
+  readonly columnIndex: number;
+  /** Cell text. */
+  readonly text: string;
+  /** Provenance records for the cell. */
+  readonly citations: readonly PdfKnowledgeCitation[];
+}
+
+/**
+ * One projected knowledge table.
+ */
+export interface PdfKnowledgeTable {
+  /** Stable table identifier within the knowledge result. */
+  readonly id: string;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Source layout block identifiers that fed this table. */
+  readonly blockIds: readonly string[];
+  /** Confidence attached to the current table projection. */
+  readonly confidence: number;
+  /** Projected cells in row-major order. */
+  readonly cells: readonly PdfKnowledgeTableCell[];
+}
+
+/**
+ * First knowledge-stage result for a document.
+ */
+export interface PdfKnowledgeDocument {
+  /** Knowledge implementation kind. */
+  readonly kind: "shell-knowledge";
+  /** Knowledge strategy used by the current implementation. */
+  readonly strategy: PdfKnowledgeStrategy;
+  /** Chunk projections for downstream agent use. */
+  readonly chunks: readonly PdfKnowledgeChunk[];
+  /** Table projections when the current evidence is sufficient. */
+  readonly tables: readonly PdfKnowledgeTable[];
+  /** Flattened text in knowledge-chunk order. */
+  readonly extractedText: string;
+  /** Known implementation limits that materially affect this knowledge result. */
+  readonly knownLimits: readonly PdfKnownLimitCode[];
+}
+
+/**
  * Generic result wrapper for one pipeline stage.
  *
  * @typeParam T Value emitted by the stage when available.
@@ -771,6 +869,18 @@ export interface PdfLayoutRequest {
 }
 
 /**
+ * Request accepted by the knowledge stage.
+ */
+export interface PdfKnowledgeRequest {
+  /** Source document. */
+  readonly source: PdfDocumentSource;
+  /** Optional request-specific policy overrides. */
+  readonly policy?: PdfAdmissionPolicy;
+  /** Optional password provider for encrypted documents. */
+  readonly passwordProvider?: PdfPasswordProvider;
+}
+
+/**
  * Request accepted by the full staged pipeline.
  */
 export interface PdfPipelineRequest {
@@ -816,6 +926,8 @@ export interface PdfPipelineResult {
   readonly observation: PdfStageResult<PdfObservedDocument>;
   /** Layout stage result. */
   readonly layout: PdfStageResult<PdfLayoutDocument>;
+  /** Knowledge stage result. */
+  readonly knowledge: PdfStageResult<PdfKnowledgeDocument>;
   /** De-duplicated diagnostics across the completed stages. */
   readonly diagnostics: readonly PdfDiagnostic[];
 }
@@ -875,6 +987,13 @@ export interface PdfEngine {
    * @returns Layout stage result.
    */
   toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>>;
+  /**
+   * Produces the shell-stage knowledge result for one document.
+   *
+   * @param request Knowledge request.
+   * @returns Knowledge stage result.
+   */
+  toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>>;
   /**
    * Runs the staged shell pipeline for one document.
    *
