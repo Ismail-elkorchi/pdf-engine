@@ -86,12 +86,18 @@ export type PdfKnownLimitCode =
   | "xref-stream-entries-not-decoded"
   | "object-streams-not-expanded"
   | "resource-inheritance-unresolved"
-  | "text-decoding-heuristic";
+  | "text-decoding-heuristic"
+  | "page-order-heuristic";
 
 /**
  * Observation strategy used to produce the current text evidence.
  */
 export type PdfObservationStrategy = "heuristic-literal-scan";
+
+/**
+ * How page ordering for the current page shell or observation page was resolved.
+ */
+export type PdfPageResolutionMethod = "page-tree" | "recovered-page-order" | "stream-fallback";
 
 /**
  * Caller-provided resource limits for one request.
@@ -410,6 +416,8 @@ export interface PdfAdmissionArtifact {
 export interface PdfIrPageShell {
   /** One-based page number. */
   readonly pageNumber: number;
+  /** How page ordering for this shell page was resolved. */
+  readonly resolutionMethod: PdfPageResolutionMethod;
   /** Page object reference when the page tree could be traversed. */
   readonly pageRef?: PdfObjectRef;
   /** Number of content streams mapped to this page shell. */
@@ -492,6 +500,8 @@ export interface PdfObservedGlyph {
   readonly hidden: boolean;
   /** Origin of the glyph observation. */
   readonly origin: PdfObservationOrigin;
+  /** Content stream reference that produced this glyph when known. */
+  readonly contentStreamRef?: PdfObjectRef;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Optional glyph bounding box. */
@@ -514,6 +524,8 @@ export interface PdfObservedTextRun {
   readonly glyphIds: readonly string[];
   /** Origin of the run observation. */
   readonly origin: PdfObservationOrigin;
+  /** Content stream reference that produced this run when known. */
+  readonly contentStreamRef?: PdfObjectRef;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Optional run bounding box. */
@@ -526,6 +538,8 @@ export interface PdfObservedTextRun {
 export interface PdfObservedPage {
   /** One-based page number. */
   readonly pageNumber: number;
+  /** How page ordering for this observation page was resolved. */
+  readonly resolutionMethod: PdfPageResolutionMethod;
   /** Page object reference when known. */
   readonly pageRef?: PdfObjectRef;
   /** Observed glyphs for the page. */

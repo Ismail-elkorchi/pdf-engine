@@ -91,13 +91,56 @@ const encryptedPdfTemplate = [
   "",
 ].join("\n");
 
+const nestedPageTreeTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R 5 0 R] /Count 2 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Pages /Kids [4 0 R] /Count 1 /Parent 2 0 R >>",
+  "endobj",
+  "4 0 obj",
+  "<< /Type /Page /Parent 3 0 R /Contents 6 0 R >>",
+  "endobj",
+  "5 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 7 0 R >>",
+  "endobj",
+  "6 0 obj",
+  "<< /Length 10 >>",
+  "stream",
+  "(First) Tj",
+  "endstream",
+  "endobj",
+  "7 0 obj",
+  "<< /Length 11 >>",
+  "stream",
+  "(Second) Tj",
+  "endstream",
+  "endobj",
+  "xref",
+  "0 8",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 8 >>",
+  "startxref",
+  "__NESTED_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
+
 const startXrefOffset = syntheticPdfTemplate.indexOf("xref\n0 5");
 assert(startXrefOffset >= 0, "Synthetic PDF did not contain an xref section.");
 const encryptedStartXrefOffset = encryptedPdfTemplate.indexOf("xref\n0 6");
 assert(encryptedStartXrefOffset >= 0, "Encrypted synthetic PDF did not contain an xref section.");
+const nestedStartXrefOffset = nestedPageTreeTemplate.indexOf("xref\n0 8");
+assert(nestedStartXrefOffset >= 0, "Nested page-tree PDF did not contain an xref section.");
 
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
 const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
+const nestedPageTreePdf = nestedPageTreeTemplate.replace("__NESTED_STARTXREF__", String(nestedStartXrefOffset));
 const malformedPdf = [
   "%PDF-1.4",
   "1 0 obj",
@@ -144,6 +187,13 @@ const blockedRecoveryResult = await engine.run({
     repairMode: "never",
   },
 });
+const nestedPageTreeResult = await engine.run({
+  source: {
+    bytes: new TextEncoder().encode(nestedPageTreePdf),
+    fileName: "nested-page-tree.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const observationWithoutPassword = await engine.observe({
   source: {
     bytes: new TextEncoder().encode(encryptedPdf),
@@ -169,7 +219,7 @@ assert(result.admission.status === "completed", `Admission status was ${result.a
 assert(result.ir.status === "completed", `IR status was ${result.ir.status}.`);
 assert(result.observation.status === "completed", `Observation status was ${result.observation.status}.`);
 assert(result.admission.value?.repairState === "clean", `Repair state was ${result.admission.value?.repairState ?? "missing"}.`);
-assert(result.admission.value?.knownLimits.includes("streams-not-decoded"), "Admission known limits did not include streams-not-decoded.");
+assert((result.admission.value?.knownLimits.length ?? 0) === 0, "Admission known limits should be empty for the clean synthetic document.");
 assert(result.admission.value?.parseCoverage.startXref === true, "The shell did not recover startxref coverage.");
 assert(result.admission.value?.parseCoverage.trailer === true, "The shell did not recover trailer coverage.");
 assert(result.ir.value?.indirectObjects.length === 4, `Unexpected indirect-object count: ${result.ir.value?.indirectObjects.length ?? 0}.`);
@@ -178,8 +228,12 @@ assert(result.ir.value?.resolvedInheritedPageState === false, "IR incorrectly cl
 assert(result.ir.value?.trailer?.rootRef?.objectNumber === 1, "Trailer root ref was not recovered.");
 assert(result.ir.value?.pages[0]?.pageRef?.objectNumber === 3, "Page object ref was not recovered.");
 assert(result.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4, "Content stream ref was not recovered.");
+assert(result.ir.value?.pages[0]?.resolutionMethod === "page-tree", "IR page resolution method was not preserved.");
 assert(result.observation.value?.pages[0]?.pageRef?.objectNumber === 3, "Observation page ref was not preserved.");
+assert(result.observation.value?.pages[0]?.resolutionMethod === "page-tree", "Observation page resolution method was not preserved.");
+assert(result.observation.value?.pages[0]?.runs[0]?.contentStreamRef?.objectNumber === 4, "Observation run content stream ref was not preserved.");
 assert(result.observation.value?.pages[0]?.runs[0]?.objectRef?.objectNumber === 4, "Observation run object ref was not preserved.");
+assert(result.observation.value?.pages[0]?.glyphs[0]?.contentStreamRef?.objectNumber === 4, "Observation glyph content stream ref was not preserved.");
 assert(result.observation.value?.strategy === "heuristic-literal-scan", "Observation strategy was not preserved.");
 assert(
   result.observation.value?.knownLimits.includes("text-decoding-heuristic"),
@@ -192,7 +246,21 @@ assert(
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
 assert(recoveredResult.admission.value?.repairState === "recovered", `Recovered repair state was ${recoveredResult.admission.value?.repairState ?? "missing"}.`);
+assert(recoveredResult.ir.value?.pages[0]?.resolutionMethod === "recovered-page-order", "Recovered IR page resolution method was not preserved.");
+assert(recoveredResult.observation.value?.pages[0]?.resolutionMethod === "recovered-page-order", "Recovered observation page resolution method was not preserved.");
+assert(
+  recoveredResult.observation.value?.knownLimits.includes("page-order-heuristic"),
+  "Recovered observation known limits did not include page-order-heuristic.",
+);
 assert(recoveredResult.observation.value?.extractedText === "Recovered", "Recovered observation text was not preserved.");
+assert(
+  nestedPageTreeResult.ir.value?.pages.map((page) => page.pageRef?.objectNumber).join(",") === "4,5",
+  `Nested page-tree IR order was ${nestedPageTreeResult.ir.value?.pages.map((page) => page.pageRef?.objectNumber).join(",") ?? "missing"}.`,
+);
+assert(
+  nestedPageTreeResult.observation.value?.pages.flatMap((page) => page.runs.map((run) => run.text)).join(",") === "First,Second",
+  `Nested page-tree observation order was ${nestedPageTreeResult.observation.value?.pages.flatMap((page) => page.runs.map((run) => run.text)).join(",") ?? "missing"}.`,
+);
 assert(
   blockedRecoveryResult.admission.status === "blocked",
   `Repair-blocked admission status was ${blockedRecoveryResult.admission.status}.`,
