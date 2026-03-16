@@ -107,6 +107,11 @@ export type PdfObservationStrategy = "decoded-text-operators" | "heuristic-liter
 export type PdfPageResolutionMethod = "page-tree" | "recovered-page-order" | "stream-fallback";
 
 /**
+ * Where a page-level value came from after page-tree inheritance was resolved.
+ */
+export type PdfPageValueOrigin = "direct" | "inherited";
+
+/**
  * Caller-provided resource limits for one request.
  */
 export interface PdfResourceBudget {
@@ -439,6 +444,8 @@ export interface PdfIrPageShell {
   readonly contentStreamRefs: readonly PdfObjectRef[];
   /** Number of `/Resources` hits mapped to this page shell. */
   readonly resourceCount: number;
+  /** Whether the current resource mapping came from the page or an inherited ancestor. */
+  readonly resourceOrigin?: PdfPageValueOrigin;
   /** Resource dictionary reference when present and indirect. */
   readonly resourceRef?: PdfObjectRef;
   /** Number of annotations mapped to this page shell. */
@@ -488,7 +495,7 @@ export interface PdfIrDocument {
   /** Whether xref stream entries were decoded into a full index. */
   readonly decodedXrefStreamEntries: false;
   /** Whether inherited page resources and defaults were resolved. */
-  readonly resolvedInheritedPageState: false;
+  readonly resolvedInheritedPageState: boolean;
   /** Known implementation limits that materially affect this IR. */
   readonly knownLimits: readonly PdfKnownLimitCode[];
 }

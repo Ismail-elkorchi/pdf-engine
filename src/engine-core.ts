@@ -390,6 +390,7 @@ function buildIrStage(
     contentStreamCount: pageEntry.contentStreamRefs.length,
     contentStreamRefs: pageEntry.contentStreamRefs,
     resourceCount: pageEntry.resourceCount,
+    ...(pageEntry.resourceOrigin !== undefined ? { resourceOrigin: pageEntry.resourceOrigin } : {}),
     ...(pageEntry.resourceRef !== undefined ? { resourceRef: pageEntry.resourceRef } : {}),
     annotationCount: pageEntry.annotationRefs.length,
     annotationRefs: pageEntry.annotationRefs,
@@ -414,7 +415,7 @@ function buildIrStage(
     decodedStreams: hasDecodedStreams(inspection),
     expandedObjectStreams: false,
     decodedXrefStreamEntries: false,
-    resolvedInheritedPageState: false,
+    resolvedInheritedPageState: inspection.analysis.inheritedPageStateResolved,
     knownLimits: collectIrKnownLimits(inspection),
   };
 
@@ -582,7 +583,7 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
   if (inspection.featureSignals.some((signal) => signal.kind === "object-streams" && signal.detected)) {
     knownLimits.push("object-streams-not-expanded");
   }
-  if (inspection.analysis.pageEntries.length > 0) {
+  if (inspection.analysis.pageEntries.length > 0 && !inspection.analysis.inheritedPageStateResolved) {
     knownLimits.push("resource-inheritance-unresolved");
   }
   if (!inspection.analysis.pageTreeResolved) {
