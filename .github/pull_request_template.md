@@ -22,4 +22,5 @@
 ## Additional checklist
 - [ ] PR title is a Conventional Commit title.
 - [ ] Breaking change status evaluated.
+- [ ] Release and triage labels applied or intentionally left unchanged.
 - [ ] Docs are present tense and match current behavior.
