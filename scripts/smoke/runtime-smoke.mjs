@@ -380,6 +380,9 @@ const encodedTextPdfTemplate = [
 const toUnicodeCMapFlateBytes = decodeBase64(
   "eJxdkM1qxCAQx+8+xRy3h0UT2qUHCZSUQA79oGkfwOgkFRoVYw55+0502UIPOr9h5j9fvO2fe2cT8Pfo9YAJJutMxNVvUSOMOFvHqhqM1enq5V8vKjBO4mFfEy69mzxICfyDgmuKO5yejB/xDvhbNBitm+H01Q7kD1sIP7igSyCgacDgRIVeVHhVCwLPsnNvKG7TfibNX8bnHhDq7FdlGO0NrkFpjMrNyKQQDciuaxg68y92KYpx0t8qMnn/SJlCkGHy8pCZDHFbuD24K0z1ZC0ykyGuCle5z7Xi0fE4ym0VvcVIW+TL5fGPwa3D23GDD4cqv18KDXoH",
 );
+const cidToUnicodeCMapFlateBytes = decodeBase64(
+  "SIlU0U1PhDAQBuA7v2KOGg+lwK6SEBLtQsLBj7joHdoBSaQ0BQ7776UdXOMByNNh+vGWiepU6WEB9mYnecYFukEri/O0WonQYj9o4BGoQS67/FuOjQG2NZ8v84JjpbsJsixg71txXuwFbuqa34W3wF6tQjvofhtJoo/PbeS8GvONI+oFQshzUNgFTDw35qUZEZhv/BusLwYh8ub72pPC2TQSbaN7hCwMwyR3HxnngFr9rwc8pra2k1+NDX5/L4uU50489jqVpINXce8VPTgJ8eQVR74mEhLNIgRJeZVUS2iWlHSgvsfC60gqSC13Wz9GtJ4kxbtiUpoH27H2/bsDuvCvgcnV2i1Lf0M+MZfVoPF6iWYyLhb3BD8CDAAT945ACg==",
+);
 const malformedToUnicodeBytes = encodeText("not-deflate");
 const unsupportedToUnicodeBytes = encodeText("BT /F1 12 Tf <48656C6C6F21> Tj ET");
 const toUnicodeFlateStreamObject = joinBytes([
@@ -533,6 +536,17 @@ const toUnicodeMalformedPdfBytes = buildPdfWithFontResourceStream({
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
   ],
   resourceStreamObject: toUnicodeMalformedStreamObject,
+});
+const cidToUnicodePdfBytes = buildPdfWithFontResourceStream({
+  contentStreamText: "BT\n/F1 12 Tf\n<0045003D000400520034001300B1> Tj\nET",
+  fontDictionaryLines: [
+    "<< /Type /Font /Subtype /Type0 /BaseFont /SyntheticCID /Encoding /Identity-H /DescendantFonts [7 0 R] /ToUnicode 6 0 R >>",
+  ],
+  resourceStreamObject: joinBytes([
+    encodeText(`<< /Length ${String(cidToUnicodeCMapFlateBytes.byteLength)} /Filter /FlateDecode >>\nstream\n`),
+    cidToUnicodeCMapFlateBytes,
+    encodeText("\nendstream\nendobj\n"),
+  ]),
 });
 const objectStreamContentText = "BT\n(Object Stream) Tj\nET";
 const objectStreamPdfPrefix = [
@@ -688,6 +702,13 @@ const toUnicodeMalformedResult = await engine.run({
   source: {
     bytes: toUnicodeMalformedPdfBytes,
     fileName: "tounicode-malformed.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const cidToUnicodeResult = await engine.run({
+  source: {
+    bytes: cidToUnicodePdfBytes,
+    fileName: "cid-tounicode.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -965,6 +986,30 @@ assert(
 assert(
   toUnicodeMalformedResult.ir.diagnostics.some((diagnostic) => diagnostic.code === "stream-decoding-failed"),
   "Malformed ToUnicode stream did not surface stream-decoding-failed.",
+);
+assert(
+  cidToUnicodeResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
+  "CID ToUnicode stream role was not classified as tounicode.",
+);
+assert(
+  cidToUnicodeResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState === "decoded",
+  `CID ToUnicode stream decode state was ${cidToUnicodeResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState ?? "missing"}.`,
+);
+assert(
+  cidToUnicodeResult.observation.status === "completed",
+  `CID ToUnicode observation status was ${cidToUnicodeResult.observation.status}.`,
+);
+assert(
+  cidToUnicodeResult.observation.value?.extractedText === "ﺔﻴﺑﺮﻌﻟا",
+  `Unexpected CID ToUnicode extracted text: ${JSON.stringify(cidToUnicodeResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  !cidToUnicodeResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "CID ToUnicode observation still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  cidToUnicodeResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind === "cid",
+  `CID ToUnicode text encoding kind was ${cidToUnicodeResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind ?? "missing"}.`,
 );
 assert(objectStreamResult.ir.value?.expandedObjectStreams === true, "Object stream expansion was not marked as enabled.");
 assert(
