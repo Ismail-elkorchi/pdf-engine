@@ -421,8 +421,8 @@ function buildIrStage(
     featureKinds: inspection.featureSignals.filter((signal) => signal.detected).map((signal) => signal.kind),
     pages,
     decodedStreams: hasDecodedStreams(inspection),
-    expandedObjectStreams: false,
-    decodedXrefStreamEntries: false,
+    expandedObjectStreams: inspection.analysis.expandedObjectStreams,
+    decodedXrefStreamEntries: inspection.analysis.decodedXrefStreamEntries,
     resolvedInheritedPageState: inspection.analysis.inheritedPageStateResolved,
     knownLimits: collectIrKnownLimits(inspection),
   };
@@ -736,9 +736,14 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
     inspection.analysis.crossReferenceKind === "xref-stream" ||
     inspection.analysis.crossReferenceKind === "hybrid"
   ) {
-    knownLimits.push("xref-stream-entries-not-decoded");
+    if (!inspection.analysis.decodedXrefStreamEntries) {
+      knownLimits.push("xref-stream-entries-not-decoded");
+    }
   }
-  if (inspection.featureSignals.some((signal) => signal.kind === "object-streams" && signal.detected)) {
+  if (
+    inspection.featureSignals.some((signal) => signal.kind === "object-streams" && signal.detected) &&
+    !inspection.analysis.expandedObjectStreams
+  ) {
     knownLimits.push("object-streams-not-expanded");
   }
   if (inspection.analysis.pageEntries.length > 0 && !inspection.analysis.inheritedPageStateResolved) {

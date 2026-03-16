@@ -264,6 +264,8 @@ export interface PdfCrossReferenceSection {
   readonly offset: number;
   /** Number of entries declared or implied by the section when known. */
   readonly entryCount?: number;
+  /** Number of xref entries successfully decoded from the section when known. */
+  readonly decodedEntryCount?: number;
   /** Object reference for an xref stream section when one exists. */
   readonly objectRef?: PdfObjectRef;
 }
@@ -312,6 +314,8 @@ export interface PdfIndirectObjectShell {
   readonly decodedStreamByteLength?: number;
   /** Structural role inferred for the stream when the shell can classify it. */
   readonly streamRole?: PdfStreamRole;
+  /** Containing object stream reference when this object was expanded from an object stream. */
+  readonly containerObjectRef?: PdfObjectRef;
 }
 
 /**
@@ -504,9 +508,9 @@ export interface PdfIrDocument {
   /** Whether the shell recovered at least one operator-ready stream body. */
   readonly decodedStreams: boolean;
   /** Whether object streams were expanded into member objects. */
-  readonly expandedObjectStreams: false;
+  readonly expandedObjectStreams: boolean;
   /** Whether xref stream entries were decoded into a full index. */
-  readonly decodedXrefStreamEntries: false;
+  readonly decodedXrefStreamEntries: boolean;
   /** Whether inherited page resources and defaults were resolved. */
   readonly resolvedInheritedPageState: boolean;
   /** Known implementation limits that materially affect this IR. */

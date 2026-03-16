@@ -18,6 +18,7 @@ export interface ParsedIndirectObject extends PdfIndirectObjectShell {
   readonly dictionaryEntries: ReadonlyMap<string, string>;
   readonly objectValueText?: string;
   readonly streamText?: string;
+  readonly decodedStreamBytes?: Uint8Array;
   readonly streamStartOffset?: number;
   readonly streamEndOffset?: number;
   readonly streamLengthRef?: PdfObjectRef;
@@ -64,6 +65,8 @@ export interface PdfShellAnalysis {
   readonly pageEntries: readonly ParsedPageEntry[];
   readonly pageTreeResolved: boolean;
   readonly inheritedPageStateResolved: boolean;
+  readonly expandedObjectStreams: boolean;
+  readonly decodedXrefStreamEntries: boolean;
   readonly pageCountEstimate?: number;
   readonly objectCountEstimate?: number;
   readonly parseCoverage: PdfParseCoverage;
@@ -83,7 +86,9 @@ export async function analyzePdfShell(
   const provisionalObjectIndex = new Map(
     parsedIndirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const),
   );
-  const indirectObjects = await finalizeIndirectObjects(parsedIndirectObjects, source.bytes, provisionalObjectIndex);
+  const finalizedIndirectObjects = await finalizeIndirectObjects(parsedIndirectObjects, source.bytes, provisionalObjectIndex);
+  const expandedObjectStreamResult = expandObjectStreams(finalizedIndirectObjects);
+  const indirectObjects = expandedObjectStreamResult.indirectObjects;
   let objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
   const crossReferenceSections = collectCrossReferenceSections(scanText, indirectObjects);
   const startXrefOffset = readStartXrefOffset(scanText);
@@ -120,6 +125,10 @@ export async function analyzePdfShell(
     pageEntries,
     pageTreeResolved: pageTree.resolved,
     inheritedPageStateResolved: pageTree.inheritedStateResolved,
+    expandedObjectStreams: expandedObjectStreamResult.expanded,
+    decodedXrefStreamEntries: crossReferenceSections
+      .filter((section) => section.kind === "xref-stream")
+      .every((section) => section.decodedEntryCount !== undefined),
     ...(pageCountEstimate !== undefined ? { pageCountEstimate } : {}),
     ...(objectCountEstimate !== undefined ? { objectCountEstimate } : {}),
     parseCoverage,
@@ -352,6 +361,7 @@ async function finalizeIndirectObject(
       ...finalizedBase,
       streamDecodeState: decodedStream.state,
       decodedStreamByteLength: decodedStream.decodedBytes.byteLength,
+      decodedStreamBytes: decodedStream.decodedBytes,
       streamText,
     };
   }
@@ -360,6 +370,91 @@ async function finalizeIndirectObject(
     ...finalizedBase,
     streamDecodeState: decodedStream.state,
   };
+}
+
+function expandObjectStreams(indirectObjects: readonly ParsedIndirectObject[]): {
+  indirectObjects: readonly ParsedIndirectObject[];
+  expanded: boolean;
+} {
+  const expandedMembers: ParsedIndirectObject[] = [];
+
+  for (const objectStream of indirectObjects) {
+    if (objectStream.typeName !== "ObjStm" || typeof objectStream.streamText !== "string") {
+      continue;
+    }
+
+    expandedMembers.push(...expandObjectStreamMembers(objectStream));
+  }
+
+  if (expandedMembers.length === 0) {
+    return {
+      indirectObjects,
+      expanded: false,
+    };
+  }
+
+  return {
+    indirectObjects: [...indirectObjects, ...expandedMembers],
+    expanded: true,
+  };
+}
+
+function expandObjectStreamMembers(objectStream: ParsedIndirectObject): ParsedIndirectObject[] {
+  const firstOffset = readIntegerValue(objectStream.dictionaryEntries.get("First"));
+  const objectCount = readIntegerValue(objectStream.dictionaryEntries.get("N"));
+  if (firstOffset === undefined || objectCount === undefined || typeof objectStream.streamText !== "string") {
+    return [];
+  }
+
+  const headerText = objectStream.streamText.slice(0, firstOffset);
+  const bodyText = objectStream.streamText.slice(firstOffset);
+  const headerNumbers = headerText.match(/\d+/g)?.map((value) => Number(value)) ?? [];
+  if (headerNumbers.length < objectCount * 2) {
+    return [];
+  }
+
+  const members: ParsedIndirectObject[] = [];
+  for (let memberIndex = 0; memberIndex < objectCount; memberIndex += 1) {
+    const objectNumber = headerNumbers[memberIndex * 2];
+    const objectOffset = headerNumbers[memberIndex * 2 + 1];
+    const nextOffset = memberIndex + 1 < objectCount ? headerNumbers[(memberIndex + 1) * 2 + 1] : bodyText.length;
+    if (
+      objectNumber === undefined ||
+      objectOffset === undefined ||
+      nextOffset === undefined ||
+      objectOffset < 0 ||
+      nextOffset < objectOffset
+    ) {
+      continue;
+    }
+
+    const memberValueText = bodyText.slice(objectOffset, nextOffset).trim();
+    if (memberValueText.length === 0) {
+      continue;
+    }
+
+    const dictionaryText = findFirstDictionaryToken(memberValueText);
+    const dictionaryEntries = dictionaryText ? parseDictionaryEntries(dictionaryText) : new Map<string, string>();
+    const typeName = readNameValue(dictionaryEntries.get("Type"));
+    const dictionaryKeys = Array.from(dictionaryEntries.keys());
+
+    members.push({
+      ref: {
+        objectNumber,
+        generationNumber: 0,
+      },
+      offset: objectStream.offset,
+      endOffset: objectStream.endOffset,
+      hasStream: false,
+      ...(typeName !== undefined ? { typeName } : {}),
+      dictionaryKeys,
+      objectValueText: memberValueText,
+      dictionaryEntries,
+      containerObjectRef: objectStream.ref,
+    });
+  }
+
+  return members;
 }
 
 function readStreamBytes(
@@ -425,12 +520,14 @@ function collectCrossReferenceSections(
       continue;
     }
 
+    const decodedEntryCount = decodeXrefStreamEntryCount(objectShell);
     sections.push({
       kind: "xref-stream",
       offset: objectShell.offset,
       ...(readIntegerValue(objectShell.dictionaryEntries.get("Size")) !== undefined
         ? { entryCount: readIntegerValue(objectShell.dictionaryEntries.get("Size")) as number }
         : {}),
+      ...(decodedEntryCount !== undefined ? { decodedEntryCount } : {}),
       objectRef: objectShell.ref,
     });
   }
@@ -524,6 +621,44 @@ function streamRolePriority(streamRole: PdfStreamRole): number {
     case "unknown":
       return 0;
   }
+}
+
+function decodeXrefStreamEntryCount(objectShell: ParsedIndirectObject): number | undefined {
+  const fieldWidths = readIntegerArrayValue(objectShell.dictionaryEntries.get("W"));
+  if (fieldWidths.length !== 3 || objectShell.decodedStreamBytes === undefined) {
+    return undefined;
+  }
+
+  const [typeWidth, fieldOneWidth, fieldTwoWidth] = fieldWidths;
+  if (typeWidth === undefined || fieldOneWidth === undefined || fieldTwoWidth === undefined) {
+    return undefined;
+  }
+
+  const entryWidth = typeWidth + fieldOneWidth + fieldTwoWidth;
+  if (entryWidth <= 0 || objectShell.decodedStreamBytes.byteLength % entryWidth !== 0) {
+    return undefined;
+  }
+
+  const indexValues = readIntegerArrayValue(objectShell.dictionaryEntries.get("Index"));
+  if (indexValues.length > 0 && indexValues.length % 2 === 0) {
+    let declaredEntries = 0;
+    for (let index = 1; index < indexValues.length; index += 2) {
+      declaredEntries += indexValues[index] ?? 0;
+    }
+    if (declaredEntries > 0) {
+      return declaredEntries;
+    }
+  }
+
+  return objectShell.decodedStreamBytes.byteLength / entryWidth;
+}
+
+function readIntegerArrayValue(value: string | undefined): number[] {
+  if (!value || !value.startsWith("[") || !value.endsWith("]")) {
+    return [];
+  }
+
+  return [...value.matchAll(/\d+/g)].map((match) => Number(match[0]));
 }
 
 function readClassicCrossReferenceSection(text: string, keywordIndex: number): PdfCrossReferenceSection {

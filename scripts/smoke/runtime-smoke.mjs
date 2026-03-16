@@ -45,6 +45,10 @@ function joinBytes(parts) {
   return joined;
 }
 
+function fromByteValues(values) {
+  return Uint8Array.from(values);
+}
+
 function buildPdfWithFontResourceStream({
   contentStreamText,
   fontDictionaryLines,
@@ -87,6 +91,24 @@ function buildPdfWithFontResourceStream({
   ].join("\n");
 
   return joinBytes([encodeText(prefix), resourceStreamObject, encodeText(suffix)]);
+}
+
+function buildObjectStreamMembers(memberTexts) {
+  const headerParts = [];
+  let bodyOffset = 0;
+
+  for (const memberText of memberTexts) {
+    headerParts.push(String(memberText.objectNumber), String(bodyOffset));
+    bodyOffset += encodeText(memberText.text).byteLength;
+  }
+
+  const headerText = `${headerParts.join(" ")} `;
+  const bodyText = memberTexts.map((memberText) => memberText.text).join("");
+
+  return {
+    firstOffset: encodeText(headerText).byteLength,
+    bytes: encodeText(`${headerText}${bodyText}`),
+  };
 }
 
 const [moduleSpecifier, expectedRuntime] = getArgs();
@@ -288,6 +310,23 @@ const toUnicodeMalformedStreamObject = joinBytes([
   malformedToUnicodeBytes,
   encodeText("\nendstream\nendobj\n"),
 ]);
+const objectStreamMembers = buildObjectStreamMembers([
+  {
+    objectNumber: 3,
+    text: "<< /Type /Pages /Kids [4 0 R] /Count 1 >>\n",
+  },
+  {
+    objectNumber: 4,
+    text: "<< /Type /Page /Parent 3 0 R /Contents 5 0 R >>\n",
+  },
+]);
+const xrefStreamEntries = fromByteValues([
+  0x00, 0x00, 0x00, 0xff,
+  0x01, 0x00, 0x09, 0x00,
+  0x01, 0x00, 0x2a, 0x00,
+  0x01, 0x00, 0x4d, 0x00,
+  0x01, 0x00, 0x70, 0x00,
+]);
 
 const startXrefOffset = syntheticPdfTemplate.indexOf("xref\n0 5");
 assert(startXrefOffset >= 0, "Synthetic PDF did not contain an xref section.");
@@ -408,6 +447,85 @@ const toUnicodeMalformedPdfBytes = buildPdfWithFontResourceStream({
   ],
   resourceStreamObject: toUnicodeMalformedStreamObject,
 });
+const objectStreamContentText = "BT\n(Object Stream) Tj\nET";
+const objectStreamPdfPrefix = [
+  "%PDF-1.5",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 3 0 R >>",
+  "endobj",
+  "2 0 obj",
+  `<< /Type /ObjStm /N 2 /First ${String(objectStreamMembers.firstOffset)} /Length ${String(objectStreamMembers.bytes.byteLength)} >>`,
+  "stream",
+].join("\n") + "\n";
+const objectStreamPdfMiddle = "\nendstream\nendobj\n";
+const objectStreamContentsObject = [
+  "5 0 obj",
+  `<< /Length ${String(encodeText(objectStreamContentText).byteLength)} >>`,
+  "stream",
+  objectStreamContentText,
+  "endstream",
+  "endobj",
+  "",
+].join("\n");
+const objectStreamXrefOffset =
+  encodeText(objectStreamPdfPrefix).byteLength +
+  objectStreamMembers.bytes.byteLength +
+  encodeText(objectStreamPdfMiddle).byteLength +
+  encodeText(objectStreamContentsObject).byteLength;
+const objectStreamPdfSuffix = [
+  "xref",
+  "0 6",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 6 >>",
+  "startxref",
+  String(objectStreamXrefOffset),
+  "%%EOF",
+  "",
+].join("\n");
+const objectStreamPdfBytes = joinBytes([
+  encodeText(objectStreamPdfPrefix),
+  objectStreamMembers.bytes,
+  encodeText(objectStreamPdfMiddle),
+  encodeText(objectStreamContentsObject),
+  encodeText(objectStreamPdfSuffix),
+]);
+const xrefStreamContentText = "BT\n(XRef Stream) Tj\nET";
+const xrefStreamPdfPrefix = [
+  "%PDF-1.5",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(xrefStreamContentText).byteLength)} >>`,
+  "stream",
+  xrefStreamContentText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  `<< /Type /XRef /Root 1 0 R /Size 5 /W [1 2 1] /Index [0 5] /Length ${String(xrefStreamEntries.byteLength)} >>`,
+  "stream",
+].join("\n") + "\n";
+const xrefStreamXrefOffset = encodeText(xrefStreamPdfPrefix).byteLength;
+const xrefStreamPdfSuffix = [
+  "endstream",
+  "endobj",
+  "startxref",
+  String(xrefStreamXrefOffset),
+  "%%EOF",
+  "",
+].join("\n");
+const xrefStreamPdfBytes = joinBytes([
+  encodeText(xrefStreamPdfPrefix),
+  xrefStreamEntries,
+  encodeText(`\n${xrefStreamPdfSuffix}`),
+]);
 const malformedPdf = [
   "%PDF-1.4",
   "1 0 obj",
@@ -483,6 +601,20 @@ const toUnicodeMalformedResult = await engine.run({
   source: {
     bytes: toUnicodeMalformedPdfBytes,
     fileName: "tounicode-malformed.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const objectStreamResult = await engine.run({
+  source: {
+    bytes: objectStreamPdfBytes,
+    fileName: "object-stream.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const xrefStreamResult = await engine.run({
+  source: {
+    bytes: xrefStreamPdfBytes,
+    fileName: "xref-stream.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -663,6 +795,32 @@ assert(
 assert(
   toUnicodeMalformedResult.ir.diagnostics.some((diagnostic) => diagnostic.code === "stream-decoding-failed"),
   "Malformed ToUnicode stream did not surface stream-decoding-failed.",
+);
+assert(objectStreamResult.ir.value?.expandedObjectStreams === true, "Object stream expansion was not marked as enabled.");
+assert(
+  !objectStreamResult.ir.value?.knownLimits.includes("object-streams-not-expanded"),
+  "Object stream IR still reported object-streams-not-expanded.",
+);
+assert(
+  objectStreamResult.ir.value?.indirectObjects.some((objectShell) => objectShell.ref.objectNumber === 4 && objectShell.containerObjectRef?.objectNumber === 2),
+  "Object stream member object was not expanded with container provenance.",
+);
+assert(
+  objectStreamResult.observation.value?.extractedText === "Object Stream",
+  `Unexpected object-stream extracted text: ${JSON.stringify(objectStreamResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(xrefStreamResult.ir.value?.decodedXrefStreamEntries === true, "XRef stream entries were not marked as decoded.");
+assert(
+  !xrefStreamResult.ir.value?.knownLimits.includes("xref-stream-entries-not-decoded"),
+  "XRef stream IR still reported xref-stream-entries-not-decoded.",
+);
+assert(
+  xrefStreamResult.ir.value?.crossReferenceSections.find((section) => section.kind === "xref-stream")?.decodedEntryCount === 5,
+  `Unexpected decoded xref entry count: ${xrefStreamResult.ir.value?.crossReferenceSections.find((section) => section.kind === "xref-stream")?.decodedEntryCount ?? "missing"}.`,
+);
+assert(
+  xrefStreamResult.observation.value?.extractedText === "XRef Stream",
+  `Unexpected xref-stream extracted text: ${JSON.stringify(xrefStreamResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(
   encodedTextResult.observation.status === "partial",
