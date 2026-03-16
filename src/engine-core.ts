@@ -1,4 +1,5 @@
 import { decodePdfHexTextWithUnicodeCMap, parsePdfUnicodeCMap } from "./cmap.ts";
+import { buildLayoutDocument } from "./layout.ts";
 import {
   analyzePdfShell,
   decodePdfLiteral,
@@ -22,6 +23,8 @@ import type {
   PdfIrPageShell,
   PdfIrRequest,
   PdfKnownLimitCode,
+  PdfLayoutDocument,
+  PdfLayoutRequest,
   PdfNormalizedAdmissionPolicy,
   PdfObjectRef,
   PdfObservedDocument,
@@ -59,7 +62,7 @@ const ENGINE_IDENTITY: PdfEngineIdentity = {
   version: "0.1.0-shell",
   mode: "shell",
   supportedRuntimes: ["node", "deno", "bun", "web"],
-  supportedStages: ["admission", "ir", "observation"],
+  supportedStages: ["admission", "ir", "observation", "layout"],
 };
 
 const FEATURE_PATTERNS: ReadonlyArray<{
@@ -114,6 +117,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     admit,
     toIr,
     observe,
+    toLayout,
     run,
   };
 
@@ -153,12 +157,28 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     return buildObservationStage(inspection, admission);
   }
 
+  async function toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>> {
+    const policy = mergePolicy(defaultPolicy, request.policy);
+    const inspection = await inspectSource(request.source, policy);
+    const admission = await buildAdmissionStage(
+      {
+        source: request.source,
+        ...(request.policy !== undefined ? { policy: request.policy } : {}),
+        ...(request.passwordProvider !== undefined ? { passwordProvider: request.passwordProvider } : {}),
+      },
+      inspection,
+    );
+    const observation = buildObservationStage(inspection, admission);
+    return buildLayoutStage(observation);
+  }
+
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const inspection = await inspectSource(request.source, policy);
     const admission = await buildAdmissionStage(request, inspection);
     const ir = buildIrStage(inspection, admission);
     const observation = buildObservationStage(inspection, admission);
+    const layout = buildLayoutStage(observation);
 
     return {
       engine: ENGINE_IDENTITY,
@@ -172,7 +192,8 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       admission,
       ir,
       observation,
-      diagnostics: dedupeDiagnostics([...admission.diagnostics, ...ir.diagnostics, ...observation.diagnostics]),
+      layout,
+      diagnostics: dedupeDiagnostics([...admission.diagnostics, ...ir.diagnostics, ...observation.diagnostics, ...layout.diagnostics]),
     };
   }
 }
@@ -477,6 +498,24 @@ function buildObservationStage(
   );
 }
 
+function buildLayoutStage(
+  observation: PdfStageResult<PdfObservedDocument>,
+): PdfStageResult<PdfLayoutDocument> {
+  if (observation.value === undefined) {
+    return stageResult("layout", observation.status === "failed" ? "failed" : "blocked", observation.diagnostics);
+  }
+
+  const diagnostics = createLayoutDiagnostics(observation);
+  const layout = buildLayoutDocument(observation.value);
+
+  return stageResult(
+    "layout",
+    observation.status === "partial" || diagnostics.length > 0 ? "partial" : "completed",
+    diagnostics,
+    layout,
+  );
+}
+
 function buildObservedPages(
   inspection: PdfShellInspection,
   diagnostics: PdfDiagnostic[],
@@ -572,6 +611,9 @@ function buildObservedPage(
           ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
           ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
           objectRef: contentStreamRef,
+          ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
+          ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
+          ...(observedRun.startsNewLine ? { startsNewLine: true } : {}),
         });
       }
 
@@ -586,6 +628,9 @@ function buildObservedPage(
         ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
         ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
         objectRef: contentStreamRef,
+        ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
+        ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
+        ...(observedRun.startsNewLine ? { startsNewLine: true } : {}),
       });
 
       contentOrder += 1;
@@ -614,6 +659,9 @@ function observeParsedTextRun(
   hasFontMappingGap: boolean;
   fontRef?: PdfObjectRef;
   textEncodingKind?: PdfTextEncodingKind;
+  anchor?: { readonly x: number; readonly y: number };
+  fontSize?: number;
+  startsNewLine: boolean;
 } {
   let text = "";
   let hasFontMappingGap = false;
@@ -644,8 +692,11 @@ function observeParsedTextRun(
   return {
     text: text.trim(),
     hasFontMappingGap,
+    startsNewLine: parsedRun.startsNewLine,
     ...(fontRef !== undefined ? { fontRef } : {}),
     ...(textEncodingKind !== undefined ? { textEncodingKind } : {}),
+    ...(parsedRun.anchor !== undefined ? { anchor: parsedRun.anchor } : {}),
+    ...(parsedRun.fontSize !== undefined ? { fontSize: parsedRun.fontSize } : {}),
   };
 }
 
@@ -919,6 +970,40 @@ function createObservationDiagnostics(inspection: PdfShellInspection): PdfDiagno
       stage: "observation",
       level: "medium",
       message: "Observation uses recovered page order because the page tree was not resolved from the catalog.",
+    });
+  }
+
+  return diagnostics;
+}
+
+function createLayoutDiagnostics(observation: PdfStageResult<PdfObservedDocument>): PdfDiagnostic[] {
+  const diagnostics: PdfDiagnostic[] = [];
+
+  diagnostics.push({
+    code: "layout-block-heuristic",
+    stage: "layout",
+    level: "medium",
+    message: "The current layout stage groups observed runs into line-oriented blocks heuristically.",
+  });
+  diagnostics.push({
+    code: "layout-reading-order-heuristic",
+    stage: "layout",
+    level: "medium",
+    message: "The current layout reading order follows observed page order and recovered text anchors heuristically.",
+  });
+  diagnostics.push({
+    code: "layout-role-heuristic",
+    stage: "layout",
+    level: "medium",
+    message: "The current layout roles are heuristic and should not be treated as final semantic labels.",
+  });
+
+  if (observation.value?.pages.every((page) => page.runs.length === 0)) {
+    diagnostics.push({
+      code: "layout-empty",
+      stage: "layout",
+      level: "medium",
+      message: "The layout stage could not build any blocks because the observation stage recovered no text runs.",
     });
   }
 

@@ -93,6 +93,51 @@ function buildPdfWithFontResourceStream({
   return joinBytes([encodeText(prefix), resourceStreamObject, encodeText(suffix)]);
 }
 
+function buildPdfWithPageContents(pageContents) {
+  const lines = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "endobj",
+    "2 0 obj",
+    `<< /Type /Pages /Kids [${pageContents.map((_, index) => `${String(3 + index * 2)} 0 R`).join(" ")}] /Count ${String(pageContents.length)} >>`,
+    "endobj",
+  ];
+
+  for (const [index, contentStreamText] of pageContents.entries()) {
+    const pageObjectNumber = 3 + index * 2;
+    const contentObjectNumber = pageObjectNumber + 1;
+    lines.push(
+      `${String(pageObjectNumber)} 0 obj`,
+      `<< /Type /Page /Parent 2 0 R /Contents ${String(contentObjectNumber)} 0 R >>`,
+      "endobj",
+      `${String(contentObjectNumber)} 0 obj`,
+      `<< /Length ${String(encodeText(contentStreamText).byteLength)} >>`,
+      "stream",
+      contentStreamText,
+      "endstream",
+      "endobj",
+    );
+  }
+
+  lines.push(
+    "xref",
+    `0 ${String(3 + pageContents.length * 2)}`,
+    "0000000000 65535 f",
+    "trailer",
+    `<< /Root 1 0 R /Size ${String(3 + pageContents.length * 2)} >>`,
+    "startxref",
+    "__STARTXREF__",
+    "%%EOF",
+    "",
+  );
+
+  const template = lines.join("\n");
+  const xrefOffset = template.indexOf("\nxref\n") + 1;
+  assert(xrefOffset > 0, "Multi-page synthetic PDF did not contain an xref section.");
+  return template.replace("__STARTXREF__", String(xrefOffset));
+}
+
 function buildObjectStreamMembers(memberTexts) {
   const headerParts = [];
   let bodyOffset = 0;
@@ -261,6 +306,48 @@ const nestedPageTreeTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+const layoutPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "72 720 Td",
+    "(Quarterly Report) Tj",
+    "0 -24 Td",
+    "/F1 12 Tf",
+    "(Revenue increased across regions) Tj",
+    "0 -14 Td",
+    "(- North America) Tj",
+    "0 -14 Td",
+    "(- Europe) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const repeatedBoundaryPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 14 Tf",
+    "72 720 Td",
+    "(Quarterly Report) Tj",
+    "0 -28 Td",
+    "/F1 12 Tf",
+    "(Page One Body) Tj",
+    "0 -620 Td",
+    "(Confidential) Tj",
+    "ET",
+  ].join("\n"),
+  [
+    "BT",
+    "/F1 14 Tf",
+    "72 720 Td",
+    "(Quarterly Report) Tj",
+    "0 -28 Td",
+    "/F1 12 Tf",
+    "(Page Two Body) Tj",
+    "0 -620 Td",
+    "(Confidential) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const encodedTextPdfTemplate = [
   "%PDF-1.4",
   "1 0 obj",
@@ -642,6 +729,20 @@ const nestedPageTreeResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const layoutResult = await engine.run({
+  source: {
+    bytes: encodeText(layoutPdf),
+    fileName: "layout.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const repeatedBoundaryResult = await engine.toLayout({
+  source: {
+    bytes: encodeText(repeatedBoundaryPdf),
+    fileName: "repeated-boundary.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const observationWithoutPassword = await engine.observe({
   source: {
     bytes: encodeText(encryptedPdf),
@@ -663,6 +764,7 @@ assert(engine.identity.supportedRuntimes.includes(expectedRuntime), `Engine iden
 assert(engine.identity.supportedStages.includes("admission"), "Engine identity does not claim admission support.");
 assert(engine.identity.supportedStages.includes("ir"), "Engine identity does not claim IR support.");
 assert(engine.identity.supportedStages.includes("observation"), "Engine identity does not claim observation support.");
+assert(engine.identity.supportedStages.includes("layout"), "Engine identity does not claim layout support.");
 assert(result.admission.status === "completed", `Admission status was ${result.admission.status}.`);
 assert(result.ir.status === "completed", `IR status was ${result.ir.status}.`);
 assert(result.observation.status === "completed", `Observation status was ${result.observation.status}.`);
@@ -693,6 +795,43 @@ assert(
 assert(
   result.observation.value?.extractedText === "Hello PDF Engine",
   `Unexpected extracted text: ${JSON.stringify(result.observation.value?.extractedText ?? null)}.`,
+);
+assert(layoutResult.layout.status === "partial", `Layout status was ${layoutResult.layout.status}.`);
+assert(layoutResult.layout.value?.strategy === "line-blocks", "Layout strategy was not preserved.");
+assert(
+  layoutResult.observation.value?.pages[0]?.runs[0]?.anchor?.x === 72 && layoutResult.observation.value?.pages[0]?.runs[0]?.anchor?.y === 720,
+  `Layout observation anchor was ${JSON.stringify(layoutResult.observation.value?.pages[0]?.runs[0]?.anchor ?? null)}.`,
+);
+assert(
+  layoutResult.observation.value?.pages[0]?.runs[0]?.fontSize === 18,
+  `Layout observation font size was ${String(layoutResult.observation.value?.pages[0]?.runs[0]?.fontSize ?? "missing")}.`,
+);
+assert(
+  layoutResult.layout.value?.pages[0]?.blocks[0]?.role === "heading",
+  `Layout heading role was ${layoutResult.layout.value?.pages[0]?.blocks[0]?.role ?? "missing"}.`,
+);
+assert(
+  layoutResult.layout.value?.pages[0]?.blocks[1]?.role === "body",
+  `Layout body role was ${layoutResult.layout.value?.pages[0]?.blocks[1]?.role ?? "missing"}.`,
+);
+assert(
+  layoutResult.layout.value?.pages[0]?.blocks[2]?.role === "list",
+  `Layout list role was ${layoutResult.layout.value?.pages[0]?.blocks[2]?.role ?? "missing"}.`,
+);
+assert(
+  layoutResult.layout.value?.knownLimits.includes("layout-reading-order-heuristic"),
+  "Layout known limits did not include layout-reading-order-heuristic.",
+);
+assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
+assert(
+  repeatedBoundaryResult.value?.pages[0]?.blocks[0]?.role === "header" &&
+    repeatedBoundaryResult.value?.pages[1]?.blocks[0]?.role === "header",
+  "Repeated header text was not classified as header on both pages.",
+);
+assert(
+  repeatedBoundaryResult.value?.pages[0]?.blocks.at(-1)?.role === "footer" &&
+    repeatedBoundaryResult.value?.pages[1]?.blocks.at(-1)?.role === "footer",
+  "Repeated footer text was not classified as footer on both pages.",
 );
 assert(flateResult.ir.value?.decodedStreams === true, "Flate stream did not mark decodedStreams.");
 assert(flateResult.ir.value?.indirectObjects[3]?.streamDecodeState === "decoded", "Flate stream was not marked as decoded.");
@@ -885,6 +1024,8 @@ console.log(
       ir: result.ir.status,
       observation: result.observation.status,
       observationStrategy: result.observation.value?.strategy ?? null,
+      layout: result.layout.status,
+      layoutStrategy: result.layout.value?.strategy ?? null,
       text: result.observation.value?.extractedText ?? null,
     },
     null,

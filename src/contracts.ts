@@ -95,7 +95,10 @@ export type PdfKnownLimitCode =
   | "object-streams-not-expanded"
   | "resource-inheritance-unresolved"
   | "text-decoding-heuristic"
-  | "page-order-heuristic";
+  | "page-order-heuristic"
+  | "layout-block-heuristic"
+  | "layout-role-heuristic"
+  | "layout-reading-order-heuristic";
 
 /**
  * Decode state for one recovered stream object.
@@ -224,6 +227,16 @@ export interface PdfBoundingBox {
   readonly width: number;
   /** Rectangle height. */
   readonly height: number;
+}
+
+/**
+ * One anchor point in page-space units.
+ */
+export interface PdfPoint {
+  /** Horizontal coordinate. */
+  readonly x: number;
+  /** Vertical coordinate. */
+  readonly y: number;
 }
 
 /**
@@ -545,6 +558,12 @@ export interface PdfObservedGlyph {
   readonly textEncodingKind?: PdfTextEncodingKind;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
+  /** Approximate text anchor when the shell can recover one. */
+  readonly anchor?: PdfPoint;
+  /** Active font size when the shell can recover it. */
+  readonly fontSize?: number;
+  /** Whether the glyph run started on a new text line. */
+  readonly startsNewLine?: boolean;
   /** Optional glyph bounding box. */
   readonly bbox?: PdfBoundingBox;
 }
@@ -573,6 +592,12 @@ export interface PdfObservedTextRun {
   readonly textEncodingKind?: PdfTextEncodingKind;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
+  /** Approximate text anchor when the shell can recover one. */
+  readonly anchor?: PdfPoint;
+  /** Active font size when the shell can recover it. */
+  readonly fontSize?: number;
+  /** Whether this run started on a new text line. */
+  readonly startsNewLine?: boolean;
   /** Optional run bounding box. */
   readonly bbox?: PdfBoundingBox;
 }
@@ -606,6 +631,76 @@ export interface PdfObservedDocument {
   /** Observed pages in source order. */
   readonly pages: readonly PdfObservedPage[];
   /** Known implementation limits that materially affect this observation result. */
+  readonly knownLimits: readonly PdfKnownLimitCode[];
+}
+
+/**
+ * Structural role inferred for one layout block.
+ */
+export type PdfLayoutRole = "body" | "heading" | "list" | "header" | "footer" | "unknown";
+
+/**
+ * First-layout strategy used by the shell implementation.
+ */
+export type PdfLayoutStrategy = "line-blocks";
+
+/**
+ * One layout block recovered from the observed text stage.
+ */
+export interface PdfLayoutBlock {
+  /** Stable block identifier within the layout result. */
+  readonly id: string;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Reading-order position within the page layout result. */
+  readonly readingOrder: number;
+  /** Combined block text. */
+  readonly text: string;
+  /** Role inferred for the block. */
+  readonly role: PdfLayoutRole;
+  /** Confidence attached to the current role assignment. */
+  readonly roleConfidence: number;
+  /** Observation run identifiers grouped into this block. */
+  readonly runIds: readonly string[];
+  /** Observation glyph identifiers grouped into this block. */
+  readonly glyphIds: readonly string[];
+  /** How page ordering for this layout block was resolved. */
+  readonly resolutionMethod: PdfPageResolutionMethod;
+  /** Page object reference when known. */
+  readonly pageRef?: PdfObjectRef;
+  /** Approximate block anchor when the shell can recover one. */
+  readonly anchor?: PdfPoint;
+  /** Dominant font size for the first run in this block when the shell can recover it. */
+  readonly fontSize?: number;
+}
+
+/**
+ * One layout page in the shell-stage layout result.
+ */
+export interface PdfLayoutPage {
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** How page ordering for this layout page was resolved. */
+  readonly resolutionMethod: PdfPageResolutionMethod;
+  /** Page object reference when known. */
+  readonly pageRef?: PdfObjectRef;
+  /** Layout blocks in reading order. */
+  readonly blocks: readonly PdfLayoutBlock[];
+}
+
+/**
+ * First-layout result for a document.
+ */
+export interface PdfLayoutDocument {
+  /** Layout implementation kind. */
+  readonly kind: "shell-layout";
+  /** Layout strategy used by the current implementation. */
+  readonly strategy: PdfLayoutStrategy;
+  /** Layout pages in reading order. */
+  readonly pages: readonly PdfLayoutPage[];
+  /** Flattened text in layout reading order. */
+  readonly extractedText: string;
+  /** Known implementation limits that materially affect this layout result. */
   readonly knownLimits: readonly PdfKnownLimitCode[];
 }
 
@@ -664,6 +759,18 @@ export interface PdfObservationRequest {
 }
 
 /**
+ * Request accepted by the layout stage.
+ */
+export interface PdfLayoutRequest {
+  /** Source document. */
+  readonly source: PdfDocumentSource;
+  /** Optional request-specific policy overrides. */
+  readonly policy?: PdfAdmissionPolicy;
+  /** Optional password provider for encrypted documents. */
+  readonly passwordProvider?: PdfPasswordProvider;
+}
+
+/**
  * Request accepted by the full staged pipeline.
  */
 export interface PdfPipelineRequest {
@@ -707,6 +814,8 @@ export interface PdfPipelineResult {
   readonly ir: PdfStageResult<PdfIrDocument>;
   /** Observation stage result. */
   readonly observation: PdfStageResult<PdfObservedDocument>;
+  /** Layout stage result. */
+  readonly layout: PdfStageResult<PdfLayoutDocument>;
   /** De-duplicated diagnostics across the completed stages. */
   readonly diagnostics: readonly PdfDiagnostic[];
 }
@@ -759,6 +868,13 @@ export interface PdfEngine {
    * @returns Observation stage result.
    */
   observe(request: PdfObservationRequest): Promise<PdfStageResult<PdfObservedDocument>>;
+  /**
+   * Produces the shell-stage layout result for one document.
+   *
+   * @param request Layout request.
+   * @returns Layout stage result.
+   */
+  toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>>;
   /**
    * Runs the staged shell pipeline for one document.
    *
