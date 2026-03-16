@@ -1,3 +1,5 @@
+import { decodePdfStreamBytes } from "./stream-decode.ts";
+
 import type {
   PdfCrossReferenceKind,
   PdfCrossReferenceSection,
@@ -8,6 +10,7 @@ import type {
   PdfParseCoverage,
   PdfPageValueOrigin,
   PdfRepairState,
+  PdfStreamRole,
   PdfTrailerShell,
 } from "./contracts.ts";
 
@@ -66,18 +69,20 @@ export async function analyzePdfShell(
     parsedIndirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const),
   );
   const indirectObjects = await finalizeIndirectObjects(parsedIndirectObjects, source.bytes, provisionalObjectIndex);
-  const objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
+  let objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
   const crossReferenceSections = collectCrossReferenceSections(scanText, indirectObjects);
   const startXrefOffset = readStartXrefOffset(scanText);
   const startXrefResolved = resolveStartXref(startXrefOffset, crossReferenceSections);
   const trailer = parseTrailerShell(scanText, indirectObjects);
   const pageTree = buildPageEntries(trailer, objectIndex, indirectObjects);
   const pageEntries = pageTree.pages;
-  const pageCountEstimate = pageEntries.length > 0 ? pageEntries.length : countPageObjects(indirectObjects);
-  const objectCountEstimate = indirectObjects.length === 0 ? undefined : indirectObjects.length;
+  const classifiedIndirectObjects = classifyIndirectObjectStreamRoles(indirectObjects, pageEntries, objectIndex);
+  objectIndex = new Map(classifiedIndirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
+  const pageCountEstimate = pageEntries.length > 0 ? pageEntries.length : countPageObjects(classifiedIndirectObjects);
+  const objectCountEstimate = classifiedIndirectObjects.length === 0 ? undefined : classifiedIndirectObjects.length;
   const parseCoverage: PdfParseCoverage = {
     header: header !== undefined,
-    indirectObjects: indirectObjects.length > 0,
+    indirectObjects: classifiedIndirectObjects.length > 0,
     crossReference: crossReferenceSections.length > 0,
     trailer: trailer !== undefined,
     startXref: startXrefOffset !== undefined,
@@ -95,7 +100,7 @@ export async function analyzePdfShell(
     crossReferenceKind: summarizeCrossReferenceKind(crossReferenceSections),
     crossReferenceSections,
     ...(trailer !== undefined ? { trailer } : {}),
-    indirectObjects,
+    indirectObjects: classifiedIndirectObjects,
     objectIndex,
     pageEntries,
     pageTreeResolved: pageTree.resolved,
@@ -317,53 +322,29 @@ async function finalizeIndirectObject(
     return objectShell;
   }
 
-  const streamFilterNames = readStreamFilterNames(objectShell.dictionaryEntries.get("Filter"));
   const rawStreamBytes = readStreamBytes(objectShell, sourceBytes, objectIndex);
-  if (rawStreamBytes === undefined) {
-    return {
-      ...objectShell,
-      ...(streamFilterNames.length > 0 ? { streamFilterNames } : {}),
-      streamDecodeState: "failed",
-    };
-  }
+  const decodedStream = await decodePdfStreamBytes(rawStreamBytes, objectShell.dictionaryEntries.get("Filter"));
 
   const finalizedBase = {
     ...objectShell,
-    streamByteLength: rawStreamBytes.byteLength,
-    ...(streamFilterNames.length > 0 ? { streamFilterNames } : {}),
+    ...(rawStreamBytes !== undefined ? { streamByteLength: rawStreamBytes.byteLength } : {}),
+    ...(decodedStream.filterNames.length > 0 ? { streamFilterNames: decodedStream.filterNames } : {}),
   } satisfies ParsedIndirectObject;
 
-  if (streamFilterNames.length === 0) {
-    const streamText = decodePdfBytes(rawStreamBytes);
+  if (decodedStream.decodedBytes !== undefined) {
+    const streamText = decodePdfBytes(decodedStream.decodedBytes);
     return {
       ...finalizedBase,
-      streamDecodeState: "available",
-      decodedStreamByteLength: rawStreamBytes.byteLength,
+      streamDecodeState: decodedStream.state,
+      decodedStreamByteLength: decodedStream.decodedBytes.byteLength,
       streamText,
     };
   }
 
-  if (!streamFilterNames.every((filterName) => filterName === "FlateDecode")) {
-    return {
-      ...finalizedBase,
-      streamDecodeState: "unsupported-filter",
-    };
-  }
-
-  try {
-    const decodedStreamBytes = await inflateStreamBytes(rawStreamBytes);
-    return {
-      ...finalizedBase,
-      streamDecodeState: "decoded",
-      decodedStreamByteLength: decodedStreamBytes.byteLength,
-      streamText: decodePdfBytes(decodedStreamBytes),
-    };
-  } catch {
-    return {
-      ...finalizedBase,
-      streamDecodeState: "failed",
-    };
-  }
+  return {
+    ...finalizedBase,
+    streamDecodeState: decodedStream.state,
+  };
 }
 
 function readStreamBytes(
@@ -407,36 +388,6 @@ function readIntegerValueFromObject(objectShell: ParsedIndirectObject | undefine
   return readIntegerValue(objectShell.objectValueText);
 }
 
-function readStreamFilterNames(value: string | undefined): string[] {
-  if (!value) {
-    return [];
-  }
-
-  const directName = readNameValue(value);
-  if (directName !== undefined) {
-    return [directName];
-  }
-
-  const filterNames: string[] = [];
-  for (let index = 0; index < value.length; index += 1) {
-    const nameToken = readPdfNameToken(value, index);
-    if (!nameToken) {
-      continue;
-    }
-
-    filterNames.push(nameToken.name);
-    index = nameToken.nextIndex - 1;
-  }
-
-  return filterNames;
-}
-
-async function inflateStreamBytes(rawStreamBytes: Uint8Array): Promise<Uint8Array> {
-  const exactBytes = Uint8Array.from(rawStreamBytes);
-  const response = new Response(new Blob([exactBytes]).stream().pipeThrough(new DecompressionStream("deflate")));
-  return new Uint8Array(await response.arrayBuffer());
-}
-
 function collectCrossReferenceSections(
   text: string,
   indirectObjects: readonly ParsedIndirectObject[],
@@ -470,6 +421,94 @@ function collectCrossReferenceSections(
   }
 
   return sections.sort((leftSection, rightSection) => leftSection.offset - rightSection.offset);
+}
+
+function classifyIndirectObjectStreamRoles(
+  indirectObjects: readonly ParsedIndirectObject[],
+  pageEntries: readonly ParsedPageEntry[],
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): ParsedIndirectObject[] {
+  const streamRoleByObjectKey = new Map<string, PdfStreamRole>();
+
+  for (const pageEntry of pageEntries) {
+    for (const contentStreamRef of pageEntry.contentStreamRefs) {
+      setStreamRole(streamRoleByObjectKey, contentStreamRef, "content");
+    }
+  }
+
+  for (const objectShell of indirectObjects) {
+    if (objectShell.typeName === "XRef") {
+      setStreamRole(streamRoleByObjectKey, objectShell.ref, "xref");
+      continue;
+    }
+
+    if (objectShell.typeName === "ObjStm") {
+      setStreamRole(streamRoleByObjectKey, objectShell.ref, "object-stream");
+    }
+
+    if (objectShell.typeName === "CMap" || objectShell.dictionaryEntries.has("UseCMap")) {
+      setStreamRole(streamRoleByObjectKey, objectShell.ref, "cmap");
+    }
+
+    const toUnicodeRef = readObjectRefValue(objectShell.dictionaryEntries.get("ToUnicode"));
+    if (toUnicodeRef !== undefined) {
+      setStreamRole(streamRoleByObjectKey, toUnicodeRef, "tounicode");
+    }
+
+    if (isFontLikeObject(objectShell)) {
+      const encodingRef = readObjectRefValue(objectShell.dictionaryEntries.get("Encoding"));
+      if (encodingRef !== undefined) {
+        const encodingObject = objectIndex.get(keyOfObjectRef(encodingRef));
+        if (encodingObject?.hasStream) {
+          setStreamRole(streamRoleByObjectKey, encodingRef, "cmap");
+        }
+      }
+    }
+  }
+
+  return indirectObjects.map((objectShell) => {
+    if (!objectShell.hasStream) {
+      return objectShell;
+    }
+
+    return {
+      ...objectShell,
+      streamRole: streamRoleByObjectKey.get(keyOfObjectRef(objectShell.ref)) ?? "unknown",
+    };
+  });
+}
+
+function isFontLikeObject(objectShell: ParsedIndirectObject): boolean {
+  return objectShell.typeName === "Font" || objectShell.dictionaryEntries.has("BaseFont") || objectShell.dictionaryEntries.has("DescendantFonts");
+}
+
+function setStreamRole(
+  streamRoleByObjectKey: Map<string, PdfStreamRole>,
+  objectRef: PdfObjectRef,
+  nextRole: PdfStreamRole,
+): void {
+  const objectKey = keyOfObjectRef(objectRef);
+  const currentRole = streamRoleByObjectKey.get(objectKey);
+  if (currentRole === undefined || streamRolePriority(nextRole) > streamRolePriority(currentRole)) {
+    streamRoleByObjectKey.set(objectKey, nextRole);
+  }
+}
+
+function streamRolePriority(streamRole: PdfStreamRole): number {
+  switch (streamRole) {
+    case "xref":
+      return 5;
+    case "object-stream":
+      return 4;
+    case "tounicode":
+      return 3;
+    case "cmap":
+      return 2;
+    case "content":
+      return 1;
+    case "unknown":
+      return 0;
+  }
 }
 
 function readClassicCrossReferenceSection(text: string, keywordIndex: number): PdfCrossReferenceSection {
