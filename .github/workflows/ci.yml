@@ -39,6 +39,9 @@ jobs:
       - name: Install
         run: npm ci
 
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+
       - name: Check
         run: npm run check
 
@@ -47,6 +50,9 @@ jobs:
 
       - name: Smoke (Web bundle)
         run: npm run smoke:web
+
+      - name: Smoke (Browser runtime)
+        run: npm run smoke:browser
 
       - name: Smoke (Node)
         run: npm run smoke:node

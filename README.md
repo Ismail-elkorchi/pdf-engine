@@ -29,7 +29,7 @@ The published surface is still early, but it is no longer contracts-only. This r
 
 - staged public contracts for admission, IR, and observation
 - an object-aware shell engine that recovers indirect objects, xref/trailer structure, repair state, page-resolution provenance, inherited page-resource state, and content-stream provenance for observed text, with operator-ready stream bodies for unfiltered and `FlateDecode` streams plus decoded text-operator observation, document-specific shell limitation markers, runtime support claims, and a no-op disposal contract for future worker or WASM backends
-- runtime smoke coverage for Node.js, Deno, and Bun, plus a browser bundle compatibility proof
+- runtime smoke coverage for Node.js, Deno, Bun, and a real Chromium browser session, plus a browser bundle compatibility proof
 - JSR/npm publication scaffolding and public GitHub automation
 
 It does not yet ship a finished parser, layout engine, knowledge projection layer, renderer, or benchmark-backed superiority claims.
