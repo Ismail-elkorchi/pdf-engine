@@ -14,6 +14,7 @@ import type {
   PdfIrDocument,
   PdfIrPageShell,
   PdfIrRequest,
+  PdfKnownLimitCode,
   PdfNormalizedAdmissionPolicy,
   PdfObjectRef,
   PdfObservedDocument,
@@ -49,7 +50,21 @@ const ENGINE_IDENTITY: PdfEngineIdentity = {
   name: "@ismail-elkorchi/pdf-engine",
   version: "0.1.0-shell",
   mode: "shell",
+  supportedRuntimes: ["node", "deno", "bun", "web"],
+  supportedStages: ["admission", "ir", "observation"],
 };
+
+const BASE_SHELL_LIMITS: readonly PdfKnownLimitCode[] = [
+  "streams-not-decoded",
+  "xref-stream-entries-not-decoded",
+  "object-streams-not-expanded",
+  "resource-inheritance-unresolved",
+] as const;
+
+const OBSERVATION_SHELL_LIMITS: readonly PdfKnownLimitCode[] = [
+  ...BASE_SHELL_LIMITS,
+  "text-decoding-heuristic",
+] as const;
 
 const FEATURE_PATTERNS: ReadonlyArray<{
   kind: PdfFeatureKind;
@@ -99,11 +114,14 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     runtime,
     capabilities,
     defaultPolicy,
+    dispose,
     admit,
     toIr,
     observe,
     run,
   };
+
+  async function dispose(): Promise<void> {}
 
   async function admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
@@ -118,6 +136,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       {
         source: request.source,
         ...(request.policy !== undefined ? { policy: request.policy } : {}),
+        ...(request.passwordProvider !== undefined ? { passwordProvider: request.passwordProvider } : {}),
       },
       inspection,
     );
@@ -131,6 +150,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       {
         source: request.source,
         ...(request.policy !== undefined ? { policy: request.policy } : {}),
+        ...(request.passwordProvider !== undefined ? { passwordProvider: request.passwordProvider } : {}),
       },
       inspection,
     );
@@ -182,6 +202,7 @@ async function buildAdmissionStage(
   inspection: PdfShellInspection,
 ): Promise<PdfStageResult<PdfAdmissionArtifact>> {
   const diagnostics = createAdmissionDiagnostics(inspection);
+  const knownLimits = collectAdmissionKnownLimits(inspection);
   const artifactBase = {
     fileType: inspection.analysis.fileType,
     byteLength: request.source.bytes.byteLength,
@@ -190,6 +211,7 @@ async function buildAdmissionStage(
     parseCoverage: inspection.analysis.parseCoverage,
     featureSignals: inspection.featureSignals,
     policy: inspection.policy,
+    knownLimits,
     ...(request.source.fileName !== undefined ? { fileName: request.source.fileName } : {}),
     ...(inspection.analysis.pdfVersion !== undefined ? { pdfVersion: inspection.analysis.pdfVersion } : {}),
     ...(inspection.analysis.pageCountEstimate !== undefined ? { pageCountEstimate: inspection.analysis.pageCountEstimate } : {}),
@@ -399,6 +421,11 @@ function buildIrStage(
     indirectObjects: inspection.analysis.indirectObjects,
     featureKinds: inspection.featureSignals.filter((signal) => signal.detected).map((signal) => signal.kind),
     pages,
+    decodedStreams: false,
+    expandedObjectStreams: false,
+    decodedXrefStreamEntries: false,
+    resolvedInheritedPageState: false,
+    knownLimits: collectIrKnownLimits(inspection),
   };
 
   return stageResult("ir", admission.status === "partial" || diagnostics.length > 0 ? "partial" : "completed", diagnostics, ir);
@@ -427,8 +454,10 @@ function buildObservationStage(
 
   const observation: PdfObservedDocument = {
     kind: "shell",
+    strategy: "heuristic-literal-scan",
     extractedText,
     pages,
+    knownLimits: collectObservationKnownLimits(inspection),
   };
 
   return stageResult(
@@ -527,6 +556,30 @@ function buildObservedPage(
 
 function canAdvance(admission: PdfStageResult<PdfAdmissionArtifact>): boolean {
   return admission.value?.decision === "accepted" && (admission.status === "completed" || admission.status === "partial");
+}
+
+function collectAdmissionKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
+  const knownLimits: PdfKnownLimitCode[] = [...BASE_SHELL_LIMITS];
+  if (inspection.isEncrypted) {
+    knownLimits.push("decryption-not-implemented");
+  }
+  return knownLimits;
+}
+
+function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
+  const knownLimits: PdfKnownLimitCode[] = [...BASE_SHELL_LIMITS];
+  if (inspection.isEncrypted) {
+    knownLimits.push("decryption-not-implemented");
+  }
+  return knownLimits;
+}
+
+function collectObservationKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
+  const knownLimits: PdfKnownLimitCode[] = [...OBSERVATION_SHELL_LIMITS];
+  if (inspection.isEncrypted) {
+    knownLimits.push("decryption-not-implemented");
+  }
+  return knownLimits;
 }
 
 function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
