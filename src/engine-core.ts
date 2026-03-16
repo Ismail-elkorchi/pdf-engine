@@ -1,4 +1,4 @@
-import { analyzePdfShell, extractTextOperatorRuns, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
+import { analyzePdfShell, analyzeTextOperators, extractTextOperatorRuns, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
 
 import type {
   PdfAdmissionArtifact,
@@ -435,6 +435,15 @@ function buildObservationStage(
   const extractedText = pages.flatMap((page) => page.runs.map((run) => run.text)).join("\n");
 
   if (extractedText.length === 0) {
+    if (hasEncodedTextWithoutUnicodeMapping(inspection)) {
+      diagnostics.push({
+        code: "font-unicode-mapping-not-implemented",
+        stage: "observation",
+        level: "medium",
+        message: "The shell found encoded text operators that still need font or Unicode mapping support before text can be recovered honestly.",
+      });
+    }
+
     diagnostics.push({
       code: "shell-observation-empty",
       stage: "observation",
@@ -601,6 +610,9 @@ function collectObservationKnownLimits(inspection: PdfShellInspection): readonly
   if (inspection.analysis.indirectObjects.some((objectShell) => typeof objectShell.streamText === "string")) {
     knownLimits.push("text-decoding-heuristic");
   }
+  if (hasEncodedTextWithoutUnicodeMapping(inspection)) {
+    knownLimits.push("font-unicode-mapping-not-implemented");
+  }
   return dedupeKnownLimits(knownLimits);
 }
 
@@ -626,6 +638,12 @@ function hasUnsupportedStreamFilters(inspection: PdfShellInspection): boolean {
 
 function hasFailedStreamDecodes(inspection: PdfShellInspection): boolean {
   return inspection.analysis.indirectObjects.some((objectShell) => objectShell.streamDecodeState === "failed");
+}
+
+function hasEncodedTextWithoutUnicodeMapping(inspection: PdfShellInspection): boolean {
+  return inspection.analysis.indirectObjects.some(
+    (objectShell) => typeof objectShell.streamText === "string" && analyzeTextOperators(objectShell.streamText).hasHexTextOperands,
+  );
 }
 
 function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {

@@ -82,6 +82,7 @@ export type PdfRepairState = "clean" | "recovered" | "recovery-required";
  */
 export type PdfKnownLimitCode =
   | "decryption-not-implemented"
+  | "font-unicode-mapping-not-implemented"
   | "streams-not-decoded"
   | "unsupported-stream-filters"
   | "stream-decoding-failed"

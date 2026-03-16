@@ -1133,11 +1133,22 @@ function readNameValue(value: string | undefined): string | undefined {
   return nameToken?.name;
 }
 
-export function extractTextOperatorRuns(text: string): string[] {
+export function analyzeTextOperators(text: string): {
+  readonly runs: readonly string[];
+  readonly hasHexTextOperands: boolean;
+} {
   const runs: string[] = [];
+  let hasHexTextOperands = false;
   const operands: Array<
     | { kind: "literal"; token: string }
-    | { kind: "array"; strings: readonly string[] }
+    | { kind: "hex"; token: string }
+    | {
+      kind: "array";
+      items: ReadonlyArray<
+        | { readonly kind: "literal"; readonly token: string }
+        | { readonly kind: "hex"; readonly token: string }
+      >;
+    }
     | { kind: "other"; token: string }
   > = [];
 
@@ -1161,6 +1172,18 @@ export function extractTextOperatorRuns(text: string): string[] {
       continue;
     }
 
+    if (current === "<" && text[index + 1] !== "<") {
+      const hex = readPdfHexStringToken(text, index);
+      if (!hex) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "hex", token: hex.token });
+      index = hex.nextIndex;
+      continue;
+    }
+
     if (current === "[") {
       const array = readPdfTextArrayToken(text, index);
       if (!array) {
@@ -1168,7 +1191,7 @@ export function extractTextOperatorRuns(text: string): string[] {
         continue;
       }
 
-      operands.push({ kind: "array", strings: array.strings });
+      operands.push({ kind: "array", items: array.items });
       index = array.nextIndex;
       continue;
     }
@@ -1181,9 +1204,13 @@ export function extractTextOperatorRuns(text: string): string[] {
 
     const token = text.slice(index, tokenEnd);
     if (token === "Tj") {
-      const literal = operands.at(-1);
+      const literal = [...operands].reverse().find(
+        (operand) => operand.kind === "literal" || operand.kind === "hex",
+      );
       if (literal?.kind === "literal") {
         pushTextRun(runs, decodePdfLiteral(literal.token));
+      } else if (literal?.kind === "hex") {
+        hasHexTextOperands = true;
       }
       operands.length = 0;
       index = tokenEnd;
@@ -1193,9 +1220,10 @@ export function extractTextOperatorRuns(text: string): string[] {
     if (token === "TJ") {
       const array = operands.at(-1);
       if (array?.kind === "array") {
+        hasHexTextOperands = hasHexTextOperands || array.items.some((item) => item.kind === "hex");
         pushTextRun(
           runs,
-          array.strings.map((literalToken) => decodePdfLiteral(literalToken)).join(""),
+          array.items.map((item) => (item.kind === "literal" ? decodePdfLiteral(item.token) : "")).join(""),
         );
       }
       operands.length = 0;
@@ -1204,9 +1232,13 @@ export function extractTextOperatorRuns(text: string): string[] {
     }
 
     if (token === "'") {
-      const literal = operands.at(-1);
+      const literal = [...operands].reverse().find(
+        (operand) => operand.kind === "literal" || operand.kind === "hex",
+      );
       if (literal?.kind === "literal") {
         pushTextRun(runs, decodePdfLiteral(literal.token));
+      } else if (literal?.kind === "hex") {
+        hasHexTextOperands = true;
       }
       operands.length = 0;
       index = tokenEnd;
@@ -1214,9 +1246,13 @@ export function extractTextOperatorRuns(text: string): string[] {
     }
 
     if (token === "\"") {
-      const literal = [...operands].reverse().find((operand) => operand.kind === "literal");
+      const literal = [...operands].reverse().find(
+        (operand) => operand.kind === "literal" || operand.kind === "hex",
+      );
       if (literal?.kind === "literal") {
         pushTextRun(runs, decodePdfLiteral(literal.token));
+      } else if (literal?.kind === "hex") {
+        hasHexTextOperands = true;
       }
       operands.length = 0;
       index = tokenEnd;
@@ -1227,18 +1263,34 @@ export function extractTextOperatorRuns(text: string): string[] {
     index = tokenEnd;
   }
 
-  return runs;
+  return {
+    runs,
+    hasHexTextOperands,
+  };
+}
+
+export function extractTextOperatorRuns(text: string): string[] {
+  return [...analyzeTextOperators(text).runs];
 }
 
 function readPdfTextArrayToken(
   text: string,
   startIndex: number,
-): { strings: readonly string[]; nextIndex: number } | undefined {
+): {
+  readonly items: ReadonlyArray<
+    | { readonly kind: "literal"; readonly token: string }
+    | { readonly kind: "hex"; readonly token: string }
+  >;
+  readonly nextIndex: number;
+} | undefined {
   if (text[startIndex] !== "[") {
     return undefined;
   }
 
-  const strings: string[] = [];
+  const items: Array<
+    | { readonly kind: "literal"; readonly token: string }
+    | { readonly kind: "hex"; readonly token: string }
+  > = [];
   let depth = 1;
 
   for (let index = startIndex + 1; index < text.length; index += 1) {
@@ -1255,8 +1307,19 @@ function readPdfTextArrayToken(
         return undefined;
       }
 
-      strings.push(literal.token);
+      items.push({ kind: "literal", token: literal.token });
       index = literal.nextIndex - 1;
+      continue;
+    }
+
+    if (current === "<" && text[index + 1] !== "<") {
+      const hex = readPdfHexStringToken(text, index);
+      if (!hex) {
+        return undefined;
+      }
+
+      items.push({ kind: "hex", token: hex.token });
+      index = hex.nextIndex - 1;
       continue;
     }
 
@@ -1269,7 +1332,7 @@ function readPdfTextArrayToken(
       depth -= 1;
       if (depth === 0) {
         return {
-          strings,
+          items,
           nextIndex: index + 1,
         };
       }
