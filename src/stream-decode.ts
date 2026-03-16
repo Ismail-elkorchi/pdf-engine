@@ -6,6 +6,10 @@ export interface PdfDecodedStreamResult {
   readonly decodedBytes?: Uint8Array;
 }
 
+interface NodeZlibModule {
+  readonly inflateSync: (input: Uint8Array) => Uint8Array;
+}
+
 export function readPdfStreamFilters(value: string | undefined): readonly string[] {
   if (!value) {
     return [];
@@ -98,8 +102,47 @@ function readPdfNameToken(
 
 async function inflateStreamBytes(rawStreamBytes: Uint8Array): Promise<Uint8Array> {
   const exactBytes = Uint8Array.from(rawStreamBytes);
-  const response = new Response(new Blob([exactBytes]).stream().pipeThrough(new DecompressionStream("deflate")));
-  return new Uint8Array(await response.arrayBuffer());
+
+  try {
+    const response = new Response(new Blob([exactBytes]).stream().pipeThrough(new DecompressionStream("deflate")));
+    return new Uint8Array(await response.arrayBuffer());
+  } catch {
+    if (isBrowserRuntime()) {
+      throw new Error("Browser runtime could not decode flate stream with DecompressionStream.");
+    }
+
+    // Some valid zlib-wrapped PDF flate streams still fail through current DecompressionStream implementations.
+    const zlibModule = readNodeBuiltinModule("zlib");
+    if (!zlibModule) {
+      throw new Error("Runtime does not expose a built-in zlib module fallback.");
+    }
+
+    return Uint8Array.from(zlibModule.inflateSync(exactBytes));
+  }
+}
+
+function isBrowserRuntime(): boolean {
+  return typeof window !== "undefined" && typeof document !== "undefined";
+}
+
+function readNodeBuiltinModule(moduleName: string): NodeZlibModule | undefined {
+  const processLike = globalThis as typeof globalThis & {
+    readonly process?: {
+      readonly getBuiltinModule?: (specifier: string) => unknown;
+    };
+  };
+  const builtinModule = processLike.process?.getBuiltinModule?.(moduleName);
+
+  if (
+    !builtinModule ||
+    typeof builtinModule !== "object" ||
+    !("inflateSync" in builtinModule) ||
+    typeof builtinModule.inflateSync !== "function"
+  ) {
+    return undefined;
+  }
+
+  return builtinModule as NodeZlibModule;
 }
 
 function isPdfDelimiter(value: string): boolean {
