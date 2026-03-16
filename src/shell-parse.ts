@@ -1050,7 +1050,17 @@ function readIntegerValue(value: string | undefined): number | undefined {
     return undefined;
   }
 
-  const integerToken = readUnsignedInteger(value.trim(), 0);
+  const normalizedValue = value.trim();
+  const integerToken = readUnsignedInteger(normalizedValue, 0);
+  if (!integerToken) {
+    return undefined;
+  }
+
+  const trailingIndex = skipPdfWhitespaceAndComments(normalizedValue, integerToken.nextIndex);
+  if (trailingIndex !== normalizedValue.length) {
+    return undefined;
+  }
+
   return integerToken?.value;
 }
 
@@ -1061,6 +1071,226 @@ function readNameValue(value: string | undefined): string | undefined {
 
   const nameToken = readPdfNameToken(value.trim(), 0);
   return nameToken?.name;
+}
+
+export function extractTextOperatorRuns(text: string): string[] {
+  const runs: string[] = [];
+  const operands: Array<
+    | { kind: "literal"; token: string }
+    | { kind: "array"; strings: readonly string[] }
+    | { kind: "other"; token: string }
+  > = [];
+
+  for (let index = 0; index < text.length; ) {
+    index = skipPdfWhitespaceAndComments(text, index);
+    const current = text[index];
+
+    if (current === undefined) {
+      break;
+    }
+
+    if (current === "(") {
+      const literal = readPdfLiteralToken(text, index);
+      if (!literal) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "literal", token: literal.token });
+      index = literal.nextIndex;
+      continue;
+    }
+
+    if (current === "[") {
+      const array = readPdfTextArrayToken(text, index);
+      if (!array) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "array", strings: array.strings });
+      index = array.nextIndex;
+      continue;
+    }
+
+    const tokenEnd = readUntilDelimiter(text, index);
+    if (tokenEnd <= index) {
+      index += 1;
+      continue;
+    }
+
+    const token = text.slice(index, tokenEnd);
+    if (token === "Tj") {
+      const literal = operands.at(-1);
+      if (literal?.kind === "literal") {
+        pushTextRun(runs, decodePdfLiteral(literal.token));
+      }
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "TJ") {
+      const array = operands.at(-1);
+      if (array?.kind === "array") {
+        pushTextRun(
+          runs,
+          array.strings.map((literalToken) => decodePdfLiteral(literalToken)).join(""),
+        );
+      }
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "'") {
+      const literal = operands.at(-1);
+      if (literal?.kind === "literal") {
+        pushTextRun(runs, decodePdfLiteral(literal.token));
+      }
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "\"") {
+      const literal = [...operands].reverse().find((operand) => operand.kind === "literal");
+      if (literal?.kind === "literal") {
+        pushTextRun(runs, decodePdfLiteral(literal.token));
+      }
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    operands.push({ kind: "other", token });
+    index = tokenEnd;
+  }
+
+  return runs;
+}
+
+function readPdfTextArrayToken(
+  text: string,
+  startIndex: number,
+): { strings: readonly string[]; nextIndex: number } | undefined {
+  if (text[startIndex] !== "[") {
+    return undefined;
+  }
+
+  const strings: string[] = [];
+  let depth = 1;
+
+  for (let index = startIndex + 1; index < text.length; index += 1) {
+    const current = text[index] ?? "";
+
+    if (current === "%") {
+      index = skipPdfComment(text, index);
+      continue;
+    }
+
+    if (current === "(") {
+      const literal = readPdfLiteralToken(text, index);
+      if (!literal) {
+        return undefined;
+      }
+
+      strings.push(literal.token);
+      index = literal.nextIndex - 1;
+      continue;
+    }
+
+    if (current === "[") {
+      depth += 1;
+      continue;
+    }
+
+    if (current === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          strings,
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function decodePdfLiteral(token: string): string {
+  const source = token.startsWith("(") && token.endsWith(")") ? token.slice(1, -1) : token;
+  let result = "";
+
+  for (let index = 0; index < source.length; index += 1) {
+    const current = source[index];
+
+    if (current !== "\\") {
+      result += current;
+      continue;
+    }
+
+    const next = source[index + 1];
+    if (next === undefined) {
+      break;
+    }
+
+    if (/[0-7]/.test(next)) {
+      let octal = next;
+      if (/[0-7]/.test(source[index + 2] ?? "")) {
+        octal += source[index + 2];
+      }
+      if (/[0-7]/.test(source[index + 3] ?? "")) {
+        octal += source[index + 3];
+      }
+      result += String.fromCharCode(Number.parseInt(octal, 8));
+      index += octal.length;
+      continue;
+    }
+
+    if (next === "n") {
+      result += "\n";
+      index += 1;
+      continue;
+    }
+
+    if (next === "r") {
+      result += "\r";
+      index += 1;
+      continue;
+    }
+
+    if (next === "t") {
+      result += "\t";
+      index += 1;
+      continue;
+    }
+
+    if (next === "b") {
+      result += "\b";
+      index += 1;
+      continue;
+    }
+
+    if (next === "f") {
+      result += "\f";
+      index += 1;
+      continue;
+    }
+
+    result += next;
+    index += 1;
+  }
+
+  return result;
+}
+
+function pushTextRun(runs: string[], text: string): void {
+  const normalizedText = text.trim();
+  if (normalizedText.length > 0) {
+    runs.push(normalizedText);
+  }
 }
 
 function findFirstDictionaryToken(text: string): string | undefined {

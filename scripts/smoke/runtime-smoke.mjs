@@ -133,6 +133,28 @@ const flatePdfPrefix = [
   "stream",
 ].join("\n") + "\n";
 const flatePdfMiddle = "\nendstream\nendobj\n";
+const indirectLengthFlatePdfPrefix = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  "<< /Length 5 0 R /Filter /FlateDecode >>",
+  "stream",
+].join("\n") + "\n";
+const indirectLengthFlatePdfMiddle = "\nendstream\nendobj\n";
+const indirectLengthFlatePdfLengthObject = [
+  "5 0 obj",
+  String(flateStreamBytes.byteLength),
+  "endobj",
+  "",
+].join("\n");
 
 const nestedPageTreeTemplate = [
   "%PDF-1.4",
@@ -202,6 +224,29 @@ const flatePdfBytes = joinBytes([
   encodeText(flatePdfMiddle),
   encodeText(flatePdfSuffix),
 ]);
+const indirectLengthFlateXrefOffset =
+  encodeText(indirectLengthFlatePdfPrefix).byteLength +
+  flateStreamBytes.byteLength +
+  encodeText(indirectLengthFlatePdfMiddle).byteLength +
+  encodeText(indirectLengthFlatePdfLengthObject).byteLength;
+const indirectLengthFlatePdfSuffix = [
+  "xref",
+  "0 6",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 6 >>",
+  "startxref",
+  String(indirectLengthFlateXrefOffset),
+  "%%EOF",
+  "",
+].join("\n");
+const indirectLengthFlatePdfBytes = joinBytes([
+  encodeText(indirectLengthFlatePdfPrefix),
+  flateStreamBytes,
+  encodeText(indirectLengthFlatePdfMiddle),
+  encodeText(indirectLengthFlatePdfLengthObject),
+  encodeText(indirectLengthFlatePdfSuffix),
+]);
 const malformedPdf = [
   "%PDF-1.4",
   "1 0 obj",
@@ -235,6 +280,13 @@ const flateResult = await engine.run({
   source: {
     bytes: flatePdfBytes,
     fileName: "flate.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const indirectLengthFlateResult = await engine.run({
+  source: {
+    bytes: indirectLengthFlatePdfBytes,
+    fileName: "flate-indirect-length.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -302,8 +354,10 @@ assert(result.observation.value?.pages[0]?.pageRef?.objectNumber === 3, "Observa
 assert(result.observation.value?.pages[0]?.resolutionMethod === "page-tree", "Observation page resolution method was not preserved.");
 assert(result.observation.value?.pages[0]?.runs[0]?.contentStreamRef?.objectNumber === 4, "Observation run content stream ref was not preserved.");
 assert(result.observation.value?.pages[0]?.runs[0]?.objectRef?.objectNumber === 4, "Observation run object ref was not preserved.");
+assert(result.observation.value?.pages[0]?.runs[0]?.origin === "native-text", "Observation run origin was not updated.");
 assert(result.observation.value?.pages[0]?.glyphs[0]?.contentStreamRef?.objectNumber === 4, "Observation glyph content stream ref was not preserved.");
-assert(result.observation.value?.strategy === "heuristic-literal-scan", "Observation strategy was not preserved.");
+assert(result.observation.value?.pages[0]?.glyphs[0]?.origin === "native-text", "Observation glyph origin was not updated.");
+assert(result.observation.value?.strategy === "decoded-text-operators", "Observation strategy was not updated.");
 assert(
   result.observation.value?.knownLimits.includes("text-decoding-heuristic"),
   "Observation known limits did not include text-decoding-heuristic.",
@@ -325,6 +379,18 @@ assert(
 assert(
   flateResult.observation.value?.extractedText === "Hello Flate",
   `Unexpected flate extracted text: ${JSON.stringify(flateResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  indirectLengthFlateResult.ir.value?.indirectObjects[3]?.streamDecodeState === "decoded",
+  "Indirect-length flate stream was not marked as decoded.",
+);
+assert(
+  !indirectLengthFlateResult.ir.value?.knownLimits.includes("stream-decoding-failed"),
+  "Indirect-length flate stream still reported stream-decoding-failed.",
+);
+assert(
+  indirectLengthFlateResult.observation.value?.extractedText === "Hello Flate",
+  `Unexpected indirect-length flate extracted text: ${JSON.stringify(indirectLengthFlateResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
