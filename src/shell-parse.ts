@@ -427,41 +427,41 @@ function traversePageTree(
 
   const orderedPages: ParsedPageEntry[] = [];
   const visited = new Set<string>();
-  const queue: PdfObjectRef[] = [pagesRootRef];
-
-  while (queue.length > 0) {
-    const currentRef = queue.shift();
-    if (!currentRef) {
-      continue;
-    }
-
-    const currentKey = keyOfObjectRef(currentRef);
-    if (visited.has(currentKey)) {
-      continue;
-    }
-    visited.add(currentKey);
-
-    const currentObject = objectIndex.get(currentKey);
-    if (!currentObject) {
-      continue;
-    }
-
-    if (currentObject.typeName === "Page") {
-      orderedPages.push(toPageEntry(currentObject, orderedPages.length + 1));
-      continue;
-    }
-
-    if (currentObject.typeName !== "Pages") {
-      continue;
-    }
-
-    const kids = readObjectRefsValue(currentObject.dictionaryEntries.get("Kids"));
-    for (const kidRef of kids) {
-      queue.push(kidRef);
-    }
-  }
+  appendPageTreeEntries(pagesRootRef, objectIndex, visited, orderedPages);
 
   return orderedPages;
+}
+
+function appendPageTreeEntries(
+  currentRef: PdfObjectRef,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+  visited: Set<string>,
+  orderedPages: ParsedPageEntry[],
+): void {
+  const currentKey = keyOfObjectRef(currentRef);
+  if (visited.has(currentKey)) {
+    return;
+  }
+  visited.add(currentKey);
+
+  const currentObject = objectIndex.get(currentKey);
+  if (!currentObject) {
+    return;
+  }
+
+  if (currentObject.typeName === "Page") {
+    orderedPages.push(toPageEntry(currentObject, orderedPages.length + 1));
+    return;
+  }
+
+  if (currentObject.typeName !== "Pages") {
+    return;
+  }
+
+  const kids = readObjectRefsValue(currentObject.dictionaryEntries.get("Kids"));
+  for (const kidRef of kids) {
+    appendPageTreeEntries(kidRef, objectIndex, visited, orderedPages);
+  }
 }
 
 function toPageEntry(objectShell: ParsedIndirectObject, pageNumber: number): ParsedPageEntry {

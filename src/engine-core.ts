@@ -54,18 +54,6 @@ const ENGINE_IDENTITY: PdfEngineIdentity = {
   supportedStages: ["admission", "ir", "observation"],
 };
 
-const BASE_SHELL_LIMITS: readonly PdfKnownLimitCode[] = [
-  "streams-not-decoded",
-  "xref-stream-entries-not-decoded",
-  "object-streams-not-expanded",
-  "resource-inheritance-unresolved",
-] as const;
-
-const OBSERVATION_SHELL_LIMITS: readonly PdfKnownLimitCode[] = [
-  ...BASE_SHELL_LIMITS,
-  "text-decoding-heuristic",
-] as const;
-
 const FEATURE_PATTERNS: ReadonlyArray<{
   kind: PdfFeatureKind;
   pattern: RegExp;
@@ -394,8 +382,10 @@ function buildIrStage(
   }
 
   const diagnostics = createIrDiagnostics(inspection);
+  const resolutionMethod = inspection.analysis.pageTreeResolved ? "page-tree" : "recovered-page-order";
   const pages: PdfIrPageShell[] = inspection.analysis.pageEntries.map((pageEntry) => ({
     pageNumber: pageEntry.pageNumber,
+    resolutionMethod,
     pageRef: pageEntry.pageRef,
     contentStreamCount: pageEntry.contentStreamRefs.length,
     contentStreamRefs: pageEntry.contentStreamRefs,
@@ -472,8 +462,9 @@ function buildObservedPages(
   inspection: PdfShellInspection,
   diagnostics: PdfDiagnostic[],
 ): PdfObservedPage[] {
+  const resolutionMethod = inspection.analysis.pageTreeResolved ? "page-tree" : "recovered-page-order";
   const observedPages = inspection.analysis.pageEntries.map((pageEntry) =>
-    buildObservedPage(pageEntry.pageNumber, pageEntry.pageRef, pageEntry.contentStreamRefs, inspection),
+    buildObservedPage(pageEntry.pageNumber, pageEntry.pageRef, pageEntry.contentStreamRefs, resolutionMethod, inspection),
   );
 
   const hasTextRuns = observedPages.some((page) => page.runs.length > 0);
@@ -492,13 +483,14 @@ function buildObservedPages(
     .filter((objectShell) => objectShell.hasStream && typeof objectShell.streamText === "string")
     .map((objectShell) => objectShell.ref);
 
-  return [buildObservedPage(1, undefined, fallbackStreamRefs, inspection)];
+  return [buildObservedPage(1, undefined, fallbackStreamRefs, "stream-fallback", inspection)];
 }
 
 function buildObservedPage(
   pageNumber: number,
   pageRef: PdfObjectRef | undefined,
   contentStreamRefs: readonly PdfObjectRef[],
+  resolutionMethod: "page-tree" | "recovered-page-order" | "stream-fallback",
   inspection: PdfShellInspection,
 ): PdfObservedPage {
   const glyphs: PdfObservedGlyph[] = [];
@@ -528,6 +520,7 @@ function buildObservedPage(
           unicodeCodePoint: text.codePointAt(0) ?? 0,
           hidden: false,
           origin: "heuristic-text",
+          contentStreamRef,
           objectRef: contentStreamRef,
         });
       }
@@ -539,6 +532,7 @@ function buildObservedPage(
         text: runText,
         glyphIds,
         origin: "heuristic-text",
+        contentStreamRef,
         objectRef: contentStreamRef,
       });
 
@@ -548,6 +542,7 @@ function buildObservedPage(
 
   return {
     pageNumber,
+    resolutionMethod,
     ...(pageRef !== undefined ? { pageRef } : {}),
     glyphs,
     runs,
@@ -559,7 +554,7 @@ function canAdvance(admission: PdfStageResult<PdfAdmissionArtifact>): boolean {
 }
 
 function collectAdmissionKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
-  const knownLimits: PdfKnownLimitCode[] = [...BASE_SHELL_LIMITS];
+  const knownLimits: PdfKnownLimitCode[] = [];
   if (inspection.isEncrypted) {
     knownLimits.push("decryption-not-implemented");
   }
@@ -567,19 +562,43 @@ function collectAdmissionKnownLimits(inspection: PdfShellInspection): readonly P
 }
 
 function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
-  const knownLimits: PdfKnownLimitCode[] = [...BASE_SHELL_LIMITS];
+  const knownLimits: PdfKnownLimitCode[] = [];
+
+  if (inspection.analysis.indirectObjects.some((objectShell) => objectShell.hasStream)) {
+    knownLimits.push("streams-not-decoded");
+  }
+  if (
+    inspection.analysis.crossReferenceKind === "xref-stream" ||
+    inspection.analysis.crossReferenceKind === "hybrid"
+  ) {
+    knownLimits.push("xref-stream-entries-not-decoded");
+  }
+  if (inspection.featureSignals.some((signal) => signal.kind === "object-streams" && signal.detected)) {
+    knownLimits.push("object-streams-not-expanded");
+  }
+  if (inspection.analysis.pageEntries.length > 0) {
+    knownLimits.push("resource-inheritance-unresolved");
+  }
+  if (!inspection.analysis.pageTreeResolved) {
+    knownLimits.push("page-order-heuristic");
+  }
   if (inspection.isEncrypted) {
     knownLimits.push("decryption-not-implemented");
   }
-  return knownLimits;
+
+  return dedupeKnownLimits(knownLimits);
 }
 
 function collectObservationKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
-  const knownLimits: PdfKnownLimitCode[] = [...OBSERVATION_SHELL_LIMITS];
-  if (inspection.isEncrypted) {
-    knownLimits.push("decryption-not-implemented");
+  const knownLimits: PdfKnownLimitCode[] = [...collectIrKnownLimits(inspection)];
+  if (inspection.analysis.indirectObjects.some((objectShell) => typeof objectShell.streamText === "string")) {
+    knownLimits.push("text-decoding-heuristic");
   }
-  return knownLimits;
+  return dedupeKnownLimits(knownLimits);
+}
+
+function dedupeKnownLimits(knownLimits: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {
+  return Array.from(new Set(knownLimits));
 }
 
 function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
