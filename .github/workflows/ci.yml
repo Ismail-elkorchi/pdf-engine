@@ -37,6 +37,9 @@ jobs:
       - name: Build
         run: npm run build
 
+      - name: Smoke (Web bundle)
+        run: npm run smoke:web
+
       - name: Smoke (Node)
         run: npm run smoke:node
 
