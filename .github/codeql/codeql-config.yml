@@ -1,0 +1,4 @@
+name: pdf-engine
+paths-ignore:
+  - dist/**
+  - node_modules/**

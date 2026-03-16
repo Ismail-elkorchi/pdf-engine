@@ -1,0 +1,59 @@
+{
+  "name": "@ismail-elkorchi/pdf-engine",
+  "version": "0.1.0",
+  "description": "Evidence-driven cross-runtime PDF parsing, reading, viewing, and extraction engine.",
+  "type": "module",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Ismail-elkorchi/pdf-engine.git"
+  },
+  "homepage": "https://github.com/Ismail-elkorchi/pdf-engine#readme",
+  "bugs": {
+    "url": "https://github.com/Ismail-elkorchi/pdf-engine/issues"
+  },
+  "packageManager": "npm@11.8.0",
+  "keywords": [
+    "pdf",
+    "parser",
+    "reader",
+    "rendering",
+    "extraction",
+    "typescript",
+    "jsr",
+    "npm"
+  ],
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "publishConfig": {
+    "access": "public"
+  },
+  "engines": {
+    "node": ">=24.0.0",
+    "npm": ">=11.0.0"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "smoke:node": "node --input-type=module -e \"await import('./dist/index.js');\"",
+    "smoke:deno": "deno eval \"import './jsr/mod.ts';\"",
+    "smoke:bun": "bun --eval \"await import('./dist/index.js');\"",
+    "smoke:all": "npm run build && npm run smoke:node && npm run smoke:deno && npm run smoke:bun",
+    "check:ci": "npm run check && npm run smoke:all"
+  },
+  "devDependencies": {
+    "@types/node": "^24.5.2",
+    "typescript": "^5.9.2"
+  }
+}
