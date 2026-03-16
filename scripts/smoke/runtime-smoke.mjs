@@ -195,6 +195,35 @@ const nestedPageTreeTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+const encodedTextPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  "<< /Length 22 >>",
+  "stream",
+  "BT",
+  "<48656C6C6F> Tj",
+  "ET",
+  "endstream",
+  "endobj",
+  "xref",
+  "0 5",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 5 >>",
+  "startxref",
+  "__ENCODED_TEXT_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
 
 const startXrefOffset = syntheticPdfTemplate.indexOf("xref\n0 5");
 assert(startXrefOffset >= 0, "Synthetic PDF did not contain an xref section.");
@@ -202,10 +231,13 @@ const encryptedStartXrefOffset = encryptedPdfTemplate.indexOf("xref\n0 6");
 assert(encryptedStartXrefOffset >= 0, "Encrypted synthetic PDF did not contain an xref section.");
 const nestedStartXrefOffset = nestedPageTreeTemplate.indexOf("xref\n0 8");
 assert(nestedStartXrefOffset >= 0, "Nested page-tree PDF did not contain an xref section.");
+const encodedTextStartXrefOffset = encodedTextPdfTemplate.indexOf("xref\n0 5");
+assert(encodedTextStartXrefOffset >= 0, "Encoded-text PDF did not contain an xref section.");
 
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
 const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
 const nestedPageTreePdf = nestedPageTreeTemplate.replace("__NESTED_STARTXREF__", String(nestedStartXrefOffset));
+const encodedTextPdf = encodedTextPdfTemplate.replace("__ENCODED_TEXT_STARTXREF__", String(encodedTextStartXrefOffset));
 const flateXrefOffset = encodeText(flatePdfPrefix).byteLength + flateStreamBytes.byteLength + encodeText(flatePdfMiddle).byteLength;
 const flatePdfSuffix = [
   "xref",
@@ -341,6 +373,13 @@ const inheritedResourceResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const encodedTextResult = await engine.run({
+  source: {
+    bytes: encodeText(encodedTextPdf),
+    fileName: "encoded-text.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const recoveredResult = await engine.run({
   source: {
     bytes: encodeText(malformedPdf),
@@ -462,6 +501,18 @@ assert(
 assert(
   inheritedResourceResult.observation.value?.extractedText === "Inherited Resources",
   `Unexpected inherited resource extracted text: ${JSON.stringify(inheritedResourceResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  encodedTextResult.observation.status === "partial",
+  `Encoded-text observation status was ${encodedTextResult.observation.status}.`,
+);
+assert(
+  encodedTextResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "Encoded-text observation did not report font-unicode-mapping-not-implemented.",
+);
+assert(
+  encodedTextResult.observation.diagnostics.some((diagnostic) => diagnostic.code === "font-unicode-mapping-not-implemented"),
+  "Encoded-text observation did not surface font-unicode-mapping-not-implemented.",
 );
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
