@@ -322,6 +322,21 @@ const layoutPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const paragraphPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "72 720 Td",
+    "(First paragraph line one) Tj",
+    "0 -14 Td",
+    "(line two) Tj",
+    "0 -26 Td",
+    "(Second paragraph starts here) Tj",
+    "0 -14 Td",
+    "(line four) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const repeatedBoundaryPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -757,6 +772,13 @@ const layoutResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const paragraphResult = await engine.run({
+  source: {
+    bytes: encodeText(paragraphPdf),
+    fileName: "paragraphs.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const repeatedBoundaryResult = await engine.toLayout({
   source: {
     bytes: encodeText(repeatedBoundaryPdf),
@@ -851,6 +873,22 @@ assert(
   layoutResult.layout.value?.knownLimits.includes("layout-reading-order-heuristic"),
   "Layout known limits did not include layout-reading-order-heuristic.",
 );
+assert(
+  paragraphResult.observation.value?.knownLimits.includes("paragraph-break-heuristic"),
+  "Observation known limits did not include paragraph-break-heuristic for the paragraph fixture.",
+);
+assert(
+  paragraphResult.observation.value?.extractedText === "First paragraph line one line two\n\nSecond paragraph starts here line four",
+  `Paragraph-aware observation text was ${JSON.stringify(paragraphResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  paragraphResult.layout.value?.pages[0]?.blocks[1]?.startsParagraph === true,
+  "The second paragraph block was not marked as a paragraph start.",
+);
+assert(
+  paragraphResult.layout.value?.extractedText === "First paragraph line one line two\n\nSecond paragraph starts here line four",
+  `Paragraph-aware layout text was ${JSON.stringify(paragraphResult.layout.value?.extractedText ?? null)}.`,
+);
 assert(layoutResult.knowledge.status === "partial", `Knowledge status was ${layoutResult.knowledge.status}.`);
 assert(layoutResult.knowledge.value?.strategy === "layout-chunks", "Knowledge strategy was not preserved.");
 assert(
@@ -864,6 +902,10 @@ assert(
 assert(
   layoutResult.knowledge.value?.knownLimits.includes("table-projection-not-implemented"),
   "Knowledge known limits did not include table-projection-not-implemented.",
+);
+assert(
+  paragraphResult.knowledge.value?.chunks[0]?.text === "First paragraph line one line two\n\nSecond paragraph starts here line four",
+  `Paragraph-aware knowledge text was ${JSON.stringify(paragraphResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(

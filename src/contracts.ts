@@ -95,6 +95,7 @@ export type PdfKnownLimitCode =
   | "object-streams-not-expanded"
   | "resource-inheritance-unresolved"
   | "text-decoding-heuristic"
+  | "paragraph-break-heuristic"
   | "page-order-heuristic"
   | "layout-block-heuristic"
   | "layout-role-heuristic"
@@ -662,6 +663,8 @@ export interface PdfLayoutBlock {
   readonly role: PdfLayoutRole;
   /** Confidence attached to the current role assignment. */
   readonly roleConfidence: number;
+  /** Whether the current block starts a new paragraph according to the shell layout heuristics. */
+  readonly startsParagraph: boolean;
   /** Observation run identifiers grouped into this block. */
   readonly runIds: readonly string[];
   /** Observation glyph identifiers grouped into this block. */
