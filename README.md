@@ -28,7 +28,7 @@ npm run smoke:all
 The published surface is still early, but it is no longer contracts-only. This repository currently ships:
 
 - staged public contracts for admission, IR, and observation
-- a runnable shell engine with runtime smoke coverage for Node.js, Deno, and Bun, plus a browser bundle compatibility proof
+- an object-aware shell engine that recovers indirect objects, xref/trailer structure, repair state, and page/content-stream shells, with runtime smoke coverage for Node.js, Deno, and Bun, plus a browser bundle compatibility proof
 - JSR/npm publication scaffolding and public GitHub automation
 
 It does not yet ship a finished parser, layout engine, knowledge projection layer, renderer, or benchmark-backed superiority claims.

@@ -73,6 +73,11 @@ export type PdfObservationOrigin = "native-text" | "heuristic-text" | "ocr" | "u
 export type PdfCrossReferenceKind = "classic" | "xref-stream" | "hybrid" | "unknown";
 
 /**
+ * Structural recovery state for the current shell parse.
+ */
+export type PdfRepairState = "clean" | "recovered" | "recovery-required";
+
+/**
  * Caller-provided resource limits for one request.
  */
 export interface PdfResourceBudget {
@@ -187,6 +192,76 @@ export interface PdfObjectRef {
 }
 
 /**
+ * Structural coverage reached by the current shell parse.
+ */
+export interface PdfParseCoverage {
+  /** Whether a `%PDF-` header was found. */
+  readonly header: boolean;
+  /** Whether at least one indirect object boundary was recovered. */
+  readonly indirectObjects: boolean;
+  /** Whether a classic xref table or xref stream was found. */
+  readonly crossReference: boolean;
+  /** Whether a trailer dictionary or trailer-like xref-stream dictionary was found. */
+  readonly trailer: boolean;
+  /** Whether a `startxref` marker was found. */
+  readonly startXref: boolean;
+  /** Whether the page tree was traversed from the catalog. */
+  readonly pageTree: boolean;
+}
+
+/**
+ * One cross-reference section recovered by the shell parse.
+ */
+export interface PdfCrossReferenceSection {
+  /** Cross-reference section kind. */
+  readonly kind: "classic" | "xref-stream";
+  /** Byte offset where the section starts in the scanned source. */
+  readonly offset: number;
+  /** Number of entries declared or implied by the section when known. */
+  readonly entryCount?: number;
+  /** Object reference for an xref stream section when one exists. */
+  readonly objectRef?: PdfObjectRef;
+}
+
+/**
+ * Trailer summary recovered from the shell parse.
+ */
+export interface PdfTrailerShell {
+  /** Declared `/Size` value when present. */
+  readonly size?: number;
+  /** `/Root` reference when present. */
+  readonly rootRef?: PdfObjectRef;
+  /** `/Info` reference when present. */
+  readonly infoRef?: PdfObjectRef;
+  /** `/Encrypt` reference when present. */
+  readonly encryptRef?: PdfObjectRef;
+  /** `/Prev` offset when present. */
+  readonly prevOffset?: number;
+  /** Whether an `/ID` entry is present. */
+  readonly hasDocumentId: boolean;
+}
+
+/**
+ * One indirect object boundary recovered by the shell parse.
+ */
+export interface PdfIndirectObjectShell {
+  /** Indirect object reference. */
+  readonly ref: PdfObjectRef;
+  /** Byte offset where the `obj` header starts. */
+  readonly offset: number;
+  /** Byte offset immediately after the matching `endobj`. */
+  readonly endOffset: number;
+  /** Whether the object contains a stream. */
+  readonly hasStream: boolean;
+  /** `/Type` name when the shell can recover it. */
+  readonly typeName?: string;
+  /** Top-level dictionary keys recovered from the object. */
+  readonly dictionaryKeys: readonly string[];
+  /** Stream byte length within the scanned shell input when known. */
+  readonly streamByteLength?: number;
+}
+
+/**
  * Runtime detected for an engine instance.
  */
 export interface PdfRuntimeDescriptor {
@@ -293,8 +368,14 @@ export interface PdfAdmissionArtifact {
   readonly pageCountEstimate?: number;
   /** Estimated indirect-object count when the shell can infer it. */
   readonly objectCountEstimate?: number;
+  /** `startxref` offset when the shell can recover it. */
+  readonly startXrefOffset?: number;
   /** Whether the document appears to be encrypted. */
   readonly isEncrypted: boolean;
+  /** Structural recovery state for the current shell parse. */
+  readonly repairState: PdfRepairState;
+  /** Structural coverage reached by the current shell parse. */
+  readonly parseCoverage: PdfParseCoverage;
   /** Feature detection results captured during admission. */
   readonly featureSignals: readonly PdfFeatureSignal[];
   /** Fully normalized policy used for the request. */
@@ -307,12 +388,20 @@ export interface PdfAdmissionArtifact {
 export interface PdfIrPageShell {
   /** One-based page number. */
   readonly pageNumber: number;
+  /** Page object reference when the page tree could be traversed. */
+  readonly pageRef?: PdfObjectRef;
   /** Number of content streams mapped to this page shell. */
   readonly contentStreamCount: number;
+  /** Content stream references mapped to this page shell. */
+  readonly contentStreamRefs: readonly PdfObjectRef[];
   /** Number of `/Resources` hits mapped to this page shell. */
   readonly resourceCount: number;
+  /** Resource dictionary reference when present and indirect. */
+  readonly resourceRef?: PdfObjectRef;
   /** Number of annotations mapped to this page shell. */
   readonly annotationCount: number;
+  /** Annotation references mapped to this page shell. */
+  readonly annotationRefs: readonly PdfObjectRef[];
 }
 
 /**
@@ -329,10 +418,22 @@ export interface PdfIrDocument {
   readonly pageCountEstimate?: number;
   /** Estimated indirect-object count when known. */
   readonly objectCountEstimate?: number;
+  /** `startxref` offset when the shell can recover it. */
+  readonly startXrefOffset?: number;
   /** Cross-reference organization detected by the shell. */
   readonly crossReferenceKind: PdfCrossReferenceKind;
   /** Whether the document appears to be encrypted. */
   readonly isEncrypted: boolean;
+  /** Structural recovery state for the current shell parse. */
+  readonly repairState: PdfRepairState;
+  /** Structural coverage reached by the current shell parse. */
+  readonly parseCoverage: PdfParseCoverage;
+  /** Cross-reference sections recovered by the shell parse. */
+  readonly crossReferenceSections: readonly PdfCrossReferenceSection[];
+  /** Trailer summary recovered by the shell parse. */
+  readonly trailer?: PdfTrailerShell;
+  /** Indirect object shells recovered by the shell parse. */
+  readonly indirectObjects: readonly PdfIndirectObjectShell[];
   /** Feature kinds detected during admission. */
   readonly featureKinds: readonly PdfFeatureKind[];
   /** Per-page shell summaries. */
@@ -381,6 +482,8 @@ export interface PdfObservedTextRun {
   readonly glyphIds: readonly string[];
   /** Origin of the run observation. */
   readonly origin: PdfObservationOrigin;
+  /** Optional originating object reference. */
+  readonly objectRef?: PdfObjectRef;
   /** Optional run bounding box. */
   readonly bbox?: PdfBoundingBox;
 }
@@ -391,6 +494,8 @@ export interface PdfObservedTextRun {
 export interface PdfObservedPage {
   /** One-based page number. */
   readonly pageNumber: number;
+  /** Page object reference when known. */
+  readonly pageRef?: PdfObjectRef;
   /** Observed glyphs for the page. */
   readonly glyphs: readonly PdfObservedGlyph[];
   /** Observed text runs for the page. */
