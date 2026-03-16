@@ -127,8 +127,8 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     const fileType = /%PDF-\d\.\d/.test(scanText) ? "pdf" : "unknown";
     const pdfVersion = readPdfVersion(scanText);
     const featureSignals = detectFeatureSignals(scanText, policy);
-    const pageCountEstimate = countMatches(scanText, /\/Type\s*\/Page\b/g) || undefined;
-    const objectCountEstimate = countMatches(scanText, /\b\d+\s+\d+\s+obj\b/g) || undefined;
+    const pageCountEstimate = countMatchesOrUndefined(scanText, /\/Type\s*\/Page\b/g);
+    const objectCountEstimate = countMatchesOrUndefined(scanText, /\b\d+\s+\d+\s+obj\b/g);
     const isEncrypted = featureSignals.some((signal) => signal.kind === "encryption" && signal.detected);
 
     if (fileType !== "pdf") {
@@ -590,19 +590,158 @@ function countMatches(text: string, pattern: RegExp): number {
   return count;
 }
 
+function countMatchesOrUndefined(text: string, pattern: RegExp): number | undefined {
+  const count = countMatches(text, pattern);
+  return count === 0 ? undefined : count;
+}
+
 function extractTextRuns(text: string): string[] {
-  const directRuns = Array.from(text.matchAll(/\((?:\\.|[^\\()])*\)\s*Tj/g), (match) =>
-    decodePdfLiteral(match[0].replace(/\s*Tj$/, "")),
-  );
+  const runs: string[] = [];
 
-  const arrayRuns = Array.from(text.matchAll(/\[(?:[\s\S]*?)\]\s*TJ/g), (match) => {
-    const strings = Array.from(match[0].matchAll(/\((?:\\.|[^\\()])*\)/g), (stringMatch) =>
-      decodePdfLiteral(stringMatch[0]),
-    );
-    return strings.join("");
-  });
+  for (let index = 0; index < text.length; index += 1) {
+    const current = text[index];
 
-  return [...directRuns, ...arrayRuns].map((value) => value.trim()).filter((value) => value.length > 0);
+    if (current === "(") {
+      const literal = readPdfLiteralToken(text, index);
+
+      if (!literal) {
+        continue;
+      }
+
+      const operatorStart = skipPdfWhitespace(text, literal.nextIndex);
+      if (text.startsWith("Tj", operatorStart)) {
+        runs.push(decodePdfLiteral(literal.token));
+        index = operatorStart + 1;
+        continue;
+      }
+
+      index = literal.nextIndex - 1;
+      continue;
+    }
+
+    if (current === "[") {
+      const array = readPdfArrayToken(text, index);
+
+      if (!array) {
+        continue;
+      }
+
+      const operatorStart = skipPdfWhitespace(text, array.nextIndex);
+      if (text.startsWith("TJ", operatorStart)) {
+        runs.push(array.strings.map((token) => decodePdfLiteral(token)).join(""));
+        index = operatorStart + 1;
+        continue;
+      }
+
+      index = array.nextIndex - 1;
+    }
+  }
+
+  return runs.map((value) => value.trim()).filter((value) => value.length > 0);
+}
+
+function readPdfLiteralToken(
+  text: string,
+  startIndex: number,
+): { token: string; nextIndex: number } | undefined {
+  if (text[startIndex] !== "(") {
+    return undefined;
+  }
+
+  let depth = 0;
+
+  for (let index = startIndex; index < text.length; index += 1) {
+    const current = text[index];
+
+    if (current === "\\") {
+      index += 1;
+      continue;
+    }
+
+    if (current === "(") {
+      depth += 1;
+      continue;
+    }
+
+    if (current === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          token: text.slice(startIndex, index + 1),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfArrayToken(
+  text: string,
+  startIndex: number,
+): { strings: string[]; nextIndex: number } | undefined {
+  if (text[startIndex] !== "[") {
+    return undefined;
+  }
+
+  const strings: string[] = [];
+  let depth = 1;
+
+  for (let index = startIndex + 1; index < text.length; index += 1) {
+    const current = text[index];
+
+    if (current === "(") {
+      const literal = readPdfLiteralToken(text, index);
+
+      if (!literal) {
+        return undefined;
+      }
+
+      strings.push(literal.token);
+      index = literal.nextIndex - 1;
+      continue;
+    }
+
+    if (current === "[") {
+      depth += 1;
+      continue;
+    }
+
+    if (current === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          strings,
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function skipPdfWhitespace(text: string, startIndex: number): number {
+  let index = startIndex;
+
+  while (index < text.length) {
+    const current = text[index];
+    if (
+      current !== " " &&
+      current !== "\t" &&
+      current !== "\n" &&
+      current !== "\r" &&
+      current !== "\f" &&
+      current !== "\0"
+    ) {
+      break;
+    }
+
+    index += 1;
+  }
+
+  return index;
 }
 
 function decodePdfLiteral(token: string): string {
