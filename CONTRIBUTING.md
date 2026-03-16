@@ -16,6 +16,8 @@ Run before opening a pull request:
 - `npm run build`
 - `npm run smoke:all`
 
+`npm run check` includes the JSR documentation gates, so full local verification requires Deno as well as Node.js.
+
 ## Constraints
 
 - Keep this repository limited to public package code, package metadata, public docs, and public GitHub automation.
