@@ -45,3 +45,12 @@ jobs:
 
       - name: Runtime smoke matrix
         run: npm run smoke:all
+
+      - name: Fail on tracked-file churn
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain=v1)" ]]; then
+            echo "Tracked files changed during the runtime-latest job:"
+            git status --porcelain=v1
+            exit 1
+          fi

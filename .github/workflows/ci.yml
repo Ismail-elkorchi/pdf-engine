@@ -48,6 +48,15 @@ jobs:
       - name: Smoke (Node)
         run: npm run smoke:node
 
+      - name: Fail on tracked-file churn
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain=v1)" ]]; then
+            echo "Tracked files changed during the node job:"
+            git status --porcelain=v1
+            exit 1
+          fi
+
   deno:
     name: deno
     runs-on: ubuntu-latest
@@ -71,6 +80,15 @@ jobs:
 
       - name: Smoke (Deno)
         run: npm run smoke:deno
+
+      - name: Fail on tracked-file churn
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain=v1)" ]]; then
+            echo "Tracked files changed during the deno job:"
+            git status --porcelain=v1
+            exit 1
+          fi
 
   bun:
     name: bun
@@ -96,3 +114,12 @@ jobs:
 
       - name: Smoke (Bun)
         run: npm run smoke:bun
+
+      - name: Fail on tracked-file churn
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain=v1)" ]]; then
+            echo "Tracked files changed during the bun job:"
+            git status --porcelain=v1
+            exit 1
+          fi
