@@ -2,7 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer } from "node:http";
 import { dirname, extname, normalize, resolve } from "node:path";
 
-import { chromium } from "playwright";
+import { chromium, firefox, webkit } from "playwright";
 
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
@@ -13,13 +13,32 @@ const MIME_TYPES = {
 };
 
 function parseArgs(argv) {
+  let browserName = "chromium";
   let reportPath = "reports/smoke-browser-runtime.json";
   for (const arg of argv) {
+    if (arg.startsWith("--browser=")) {
+      browserName = arg.slice("--browser=".length);
+      continue;
+    }
     if (arg.startsWith("--report=")) {
       reportPath = arg.slice("--report=".length);
     }
   }
-  return { reportPath };
+  return { browserName, reportPath };
+}
+
+function resolveBrowserLauncher(browserName) {
+  if (browserName === "chromium") {
+    return chromium;
+  }
+  if (browserName === "firefox") {
+    return firefox;
+  }
+  if (browserName === "webkit") {
+    return webkit;
+  }
+
+  throw new Error(`Unsupported browser runtime: ${browserName}`);
 }
 
 function createStaticServer(rootDir) {
@@ -59,8 +78,9 @@ function createStaticServer(rootDir) {
   });
 }
 
-async function runBrowserSmoke(baseUrl) {
-  const browser = await chromium.launch({ headless: true });
+async function runBrowserSmoke(baseUrl, browserName) {
+  const browserLauncher = resolveBrowserLauncher(browserName);
+  const browser = await browserLauncher.launch({ headless: true });
   const page = await browser.newPage();
 
   try {
@@ -208,6 +228,7 @@ async function runBrowserSmoke(baseUrl) {
 
     return {
       ok: smoke.ok,
+      browserName,
       checks: smoke.checks,
       hash: smoke.hash,
       userAgent: smoke.userAgent,
@@ -220,7 +241,7 @@ async function runBrowserSmoke(baseUrl) {
 }
 
 async function main() {
-  const { reportPath } = parseArgs(process.argv.slice(2));
+  const { browserName, reportPath } = parseArgs(process.argv.slice(2));
   const rootDir = resolve(".");
   const server = createStaticServer(rootDir);
 
@@ -234,10 +255,11 @@ async function main() {
       throw new Error("Unable to resolve browser smoke server address");
     }
 
-    const smoke = await runBrowserSmoke(`http://127.0.0.1:${String(address.port)}`);
+    const smoke = await runBrowserSmoke(`http://127.0.0.1:${String(address.port)}`, browserName);
     const report = {
       suite: "browser-runtime-smoke",
       timestamp: new Date().toISOString(),
+      browser: smoke.browserName,
       runtime: "browser",
       ok: smoke.ok,
       version: smoke.version,
@@ -254,7 +276,7 @@ async function main() {
     if (!report.ok) {
       throw new Error("browser runtime smoke checks failed");
     }
-    process.stdout.write(`browser runtime smoke passed: ${reportPath}\n`);
+    process.stdout.write(`browser runtime smoke passed for ${browserName}: ${reportPath}\n`);
   } finally {
     await new Promise((resolvePromise, rejectPromise) => {
       server.close((error) => {
