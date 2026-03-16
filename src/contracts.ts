@@ -99,7 +99,7 @@ export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter
 /**
  * Observation strategy used to produce the current text evidence.
  */
-export type PdfObservationStrategy = "heuristic-literal-scan";
+export type PdfObservationStrategy = "decoded-text-operators" | "heuristic-literal-scan";
 
 /**
  * How page ordering for the current page shell or observation page was resolved.

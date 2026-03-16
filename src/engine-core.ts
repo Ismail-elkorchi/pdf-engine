@@ -1,4 +1,4 @@
-import { analyzePdfShell, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
+import { analyzePdfShell, extractTextOperatorRuns, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
 
 import type {
   PdfAdmissionArtifact,
@@ -444,7 +444,7 @@ function buildObservationStage(
 
   const observation: PdfObservedDocument = {
     kind: "shell",
-    strategy: "heuristic-literal-scan",
+    strategy: "decoded-text-operators",
     extractedText,
     pages,
     knownLimits: collectObservationKnownLimits(inspection),
@@ -503,7 +503,7 @@ function buildObservedPage(
       continue;
     }
 
-    const extractedRuns = extractTextRuns(contentStream.streamText);
+    const extractedRuns = extractTextOperatorRuns(contentStream.streamText);
     for (const runText of extractedRuns) {
       const glyphIds: string[] = [];
       const codePoints = Array.from(runText);
@@ -519,7 +519,7 @@ function buildObservedPage(
           text,
           unicodeCodePoint: text.codePointAt(0) ?? 0,
           hidden: false,
-          origin: "heuristic-text",
+          origin: "native-text",
           contentStreamRef,
           objectRef: contentStreamRef,
         });
@@ -531,7 +531,7 @@ function buildObservedPage(
         contentOrder,
         text: runText,
         glyphIds,
-        origin: "heuristic-text",
+        origin: "native-text",
         contentStreamRef,
         objectRef: contentStreamRef,
       });
@@ -861,221 +861,6 @@ function detectFeatureSignals(text: string, policy: PdfNormalizedAdmissionPolicy
         : `No ${entry.kind.replaceAll("-", " ")} detected in the scanned shell input.`,
     };
   });
-}
-
-function extractTextRuns(text: string): string[] {
-  const runs: string[] = [];
-
-  for (let index = 0; index < text.length; index += 1) {
-    const current = text[index];
-
-    if (current === "(") {
-      const literal = readPdfLiteralToken(text, index);
-      if (!literal) {
-        continue;
-      }
-
-      const operatorStart = skipPdfWhitespace(text, literal.nextIndex);
-      if (text.startsWith("Tj", operatorStart)) {
-        runs.push(decodePdfLiteral(literal.token));
-        index = operatorStart + 1;
-        continue;
-      }
-
-      index = literal.nextIndex - 1;
-      continue;
-    }
-
-    if (current === "[") {
-      const array = readPdfArrayToken(text, index);
-      if (!array) {
-        continue;
-      }
-
-      const operatorStart = skipPdfWhitespace(text, array.nextIndex);
-      if (text.startsWith("TJ", operatorStart)) {
-        runs.push(array.strings.map((token) => decodePdfLiteral(token)).join(""));
-        index = operatorStart + 1;
-        continue;
-      }
-
-      index = array.nextIndex - 1;
-    }
-  }
-
-  return runs.map((value) => value.trim()).filter((value) => value.length > 0);
-}
-
-function readPdfLiteralToken(
-  text: string,
-  startIndex: number,
-): { token: string; nextIndex: number } | undefined {
-  if (text[startIndex] !== "(") {
-    return undefined;
-  }
-
-  let depth = 0;
-
-  for (let index = startIndex; index < text.length; index += 1) {
-    const current = text[index];
-
-    if (current === "\\") {
-      index += 1;
-      continue;
-    }
-
-    if (current === "(") {
-      depth += 1;
-      continue;
-    }
-
-    if (current === ")") {
-      depth -= 1;
-      if (depth === 0) {
-        return {
-          token: text.slice(startIndex, index + 1),
-          nextIndex: index + 1,
-        };
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function readPdfArrayToken(
-  text: string,
-  startIndex: number,
-): { strings: string[]; nextIndex: number } | undefined {
-  if (text[startIndex] !== "[") {
-    return undefined;
-  }
-
-  const strings: string[] = [];
-  let depth = 1;
-
-  for (let index = startIndex + 1; index < text.length; index += 1) {
-    const current = text[index];
-
-    if (current === "(") {
-      const literal = readPdfLiteralToken(text, index);
-      if (!literal) {
-        return undefined;
-      }
-
-      strings.push(literal.token);
-      index = literal.nextIndex - 1;
-      continue;
-    }
-
-    if (current === "[") {
-      depth += 1;
-      continue;
-    }
-
-    if (current === "]") {
-      depth -= 1;
-      if (depth === 0) {
-        return {
-          strings,
-          nextIndex: index + 1,
-        };
-      }
-    }
-  }
-
-  return undefined;
-}
-
-function skipPdfWhitespace(text: string, startIndex: number): number {
-  let index = startIndex;
-
-  while (index < text.length) {
-    const current = text[index];
-    if (
-      current !== " " &&
-      current !== "\t" &&
-      current !== "\n" &&
-      current !== "\r" &&
-      current !== "\f" &&
-      current !== "\0"
-    ) {
-      break;
-    }
-
-    index += 1;
-  }
-
-  return index;
-}
-
-function decodePdfLiteral(token: string): string {
-  const source = token.startsWith("(") && token.endsWith(")") ? token.slice(1, -1) : token;
-  let result = "";
-
-  for (let index = 0; index < source.length; index += 1) {
-    const current = source[index];
-
-    if (current !== "\\") {
-      result += current;
-      continue;
-    }
-
-    const next = source[index + 1];
-    if (next === undefined) {
-      break;
-    }
-
-    if (/[0-7]/.test(next)) {
-      let octal = next;
-      if (/[0-7]/.test(source[index + 2] ?? "")) {
-        octal += source[index + 2];
-      }
-      if (/[0-7]/.test(source[index + 3] ?? "")) {
-        octal += source[index + 3];
-      }
-      result += String.fromCharCode(Number.parseInt(octal, 8));
-      index += octal.length;
-      continue;
-    }
-
-    switch (next) {
-      case "n":
-        result += "\n";
-        break;
-      case "r":
-        result += "\r";
-        break;
-      case "t":
-        result += "\t";
-        break;
-      case "b":
-        result += "\b";
-        break;
-      case "f":
-        result += "\f";
-        break;
-      case "(":
-      case ")":
-      case "\\":
-        result += next;
-        break;
-      case "\n":
-        break;
-      case "\r":
-        if (source[index + 2] === "\n") {
-          index += 1;
-        }
-        break;
-      default:
-        result += next;
-        break;
-    }
-
-    index += 1;
-  }
-
-  return result;
 }
 
 function dedupeDiagnostics(diagnostics: readonly PdfDiagnostic[]): PdfDiagnostic[] {
