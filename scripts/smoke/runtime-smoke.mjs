@@ -140,6 +140,21 @@ function buildPdfWithPageContents(pageContents) {
   return template.replace("__STARTXREF__", String(xrefOffset));
 }
 
+function buildVerticalWordColumnsPdf() {
+  return buildPdfWithPageContents([
+    [
+      "BT",
+      "1 0 0 1 90.264 697.18 Tm",
+      "(Test) Tj",
+      "1 0 0 1 117.74 681.82 Tm",
+      "(Vertical) Tj",
+      "1 0 0 1 145.34 685.9 Tm",
+      "(Layout) Tj",
+      "ET",
+    ].join("\n"),
+  ]);
+}
+
 function buildObjectStreamMembers(memberTexts) {
   const headerParts = [];
   let bodyOffset = 0;
@@ -228,6 +243,8 @@ const encryptedPdfTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+
+const verticalWordColumnsPdf = buildVerticalWordColumnsPdf();
 
 const flateStreamBytes = decodeBase64("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
 const flatePdfPrefix = [
@@ -743,6 +760,13 @@ const identityVCidFontResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const verticalWordColumnsResult = await engine.run({
+  source: {
+    bytes: encodeText(verticalWordColumnsPdf),
+    fileName: "vertical-word-columns.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const objectStreamResult = await engine.run({
   source: {
     bytes: objectStreamPdfBytes,
@@ -1112,6 +1136,18 @@ assert(
     page.runs.some((run) => run.textEncodingKind === "cid"),
   ),
   "Identity-V fixture did not preserve cid text encoding on observed runs.",
+);
+assert(
+  verticalWordColumnsResult.observation.value?.pages[0]?.runs.every((run) => run.writingMode === "vertical"),
+  "Vertical word columns fixture did not mark observed runs as vertical.",
+);
+assert(
+  verticalWordColumnsResult.layout.value?.pages[0]?.blocks.every((block) => block.writingMode === "vertical"),
+  "Vertical word columns fixture did not mark layout blocks as vertical.",
+);
+assert(
+  verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") === "Layout Vertical Test",
+  `Unexpected vertical word column order: ${JSON.stringify(verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text) ?? null)}.`,
 );
 assert(objectStreamResult.ir.value?.expandedObjectStreams === true, "Object stream expansion was not marked as enabled.");
 assert(

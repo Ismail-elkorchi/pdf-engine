@@ -8,6 +8,7 @@ import type {
   PdfObservedDocument,
   PdfObservedPage,
   PdfObservedTextRun,
+  PdfWritingMode,
 } from "./contracts.ts";
 
 interface RepeatedBoundarySets {
@@ -23,6 +24,7 @@ interface GroupedBlockSeed {
   readonly startsParagraph: boolean;
   readonly runIds: readonly string[];
   readonly glyphIds: readonly string[];
+  readonly writingMode?: PdfWritingMode;
   readonly resolutionMethod: PdfObservedPage["resolutionMethod"];
   readonly pageRef?: PdfObjectRef;
   readonly anchor?: PdfPoint;
@@ -59,6 +61,7 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
 }
 
 function groupPageIntoBlocks(page: PdfObservedPage): PdfLayoutPage {
+  const pageWritingMode = resolvePageWritingMode(page);
   const lineBlocks: GroupedBlockSeed[] = [];
   let currentRuns: PdfObservedTextRun[] = [];
 
@@ -77,6 +80,7 @@ function groupPageIntoBlocks(page: PdfObservedPage): PdfLayoutPage {
       startsParagraph: blockIndex === 1,
       runIds: currentRuns.map((run) => run.id),
       glyphIds: currentRuns.flatMap((run) => run.glyphIds),
+      ...(pageWritingMode !== undefined ? { writingMode: pageWritingMode } : {}),
       resolutionMethod: page.resolutionMethod,
       ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
       ...(firstRun.anchor !== undefined ? { anchor: firstRun.anchor } : {}),
@@ -92,15 +96,16 @@ function groupPageIntoBlocks(page: PdfObservedPage): PdfLayoutPage {
     }
 
     const previousRun = currentRuns[currentRuns.length - 1] as PdfObservedTextRun;
-    if (shouldStartNewBlock(previousRun, run)) {
+    if (shouldStartNewBlock(previousRun, run, pageWritingMode)) {
       flushCurrentRuns();
     }
     currentRuns.push(run);
   }
 
   flushCurrentRuns();
-  const mergedBlocks = mergeAdjacentBlocks(lineBlocks);
-  const paragraphBlocks = annotateParagraphStarts(mergedBlocks);
+  const mergedBlocks = mergeAdjacentBlocks(lineBlocks, pageWritingMode);
+  const orderedBlocks = orderPageBlocks(mergedBlocks, pageWritingMode);
+  const paragraphBlocks = annotateParagraphStarts(orderedBlocks, pageWritingMode);
 
   return {
     pageNumber: page.pageNumber,
@@ -108,19 +113,34 @@ function groupPageIntoBlocks(page: PdfObservedPage): PdfLayoutPage {
     ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
     blocks: paragraphBlocks.map((block) => ({
       ...block,
+      ...(pageWritingMode !== undefined ? { writingMode: pageWritingMode } : {}),
       role: "unknown" as const,
       roleConfidence: 0.4,
     })),
   };
 }
 
-function shouldStartNewBlock(previousRun: PdfObservedTextRun, currentRun: PdfObservedTextRun): boolean {
+function shouldStartNewBlock(
+  previousRun: PdfObservedTextRun,
+  currentRun: PdfObservedTextRun,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
   if (currentRun.startsNewLine) {
     return true;
   }
 
   if (previousRun.anchor && currentRun.anchor) {
     const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
+    if (writingMode === "vertical") {
+      if (Math.abs(previousRun.anchor.x - currentRun.anchor.x) > Math.max(6, fontSize * 0.6)) {
+        return true;
+      }
+      if (currentRun.anchor.y > previousRun.anchor.y + Math.max(8, fontSize * 0.75)) {
+        return true;
+      }
+      return false;
+    }
+
     if (Math.abs(previousRun.anchor.y - currentRun.anchor.y) > Math.max(3, fontSize * 0.5)) {
       return true;
     }
@@ -132,12 +152,15 @@ function shouldStartNewBlock(previousRun: PdfObservedTextRun, currentRun: PdfObs
   return false;
 }
 
-function mergeAdjacentBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
+function mergeAdjacentBlocks(
+  blocks: readonly GroupedBlockSeed[],
+  writingMode: PdfWritingMode | undefined,
+): readonly GroupedBlockSeed[] {
   const mergedBlocks: GroupedBlockSeed[] = [];
 
   for (const block of blocks) {
     const previousBlock = mergedBlocks.at(-1);
-    if (!previousBlock || !shouldMergeAdjacentBlocks(previousBlock, block)) {
+    if (!previousBlock || !shouldMergeAdjacentBlocks(previousBlock, block, writingMode)) {
       mergedBlocks.push({
         ...block,
         readingOrder: mergedBlocks.length,
@@ -147,7 +170,7 @@ function mergeAdjacentBlocks(blocks: readonly GroupedBlockSeed[]): readonly Grou
 
     mergedBlocks[mergedBlocks.length - 1] = {
       ...previousBlock,
-      text: `${previousBlock.text} ${block.text}`.replaceAll(/\s+/g, " ").trim(),
+      text: joinBlockText(previousBlock.text, block.text, writingMode),
       startsParagraph: previousBlock.startsParagraph,
       runIds: [...previousBlock.runIds, ...block.runIds],
       glyphIds: [...previousBlock.glyphIds, ...block.glyphIds],
@@ -157,14 +180,71 @@ function mergeAdjacentBlocks(blocks: readonly GroupedBlockSeed[]): readonly Grou
   return mergedBlocks;
 }
 
-function annotateParagraphStarts(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
-  return blocks.map((block, blockIndex) => ({
+function orderPageBlocks(
+  blocks: readonly GroupedBlockSeed[],
+  writingMode: PdfWritingMode | undefined,
+): readonly GroupedBlockSeed[] {
+  if (writingMode !== "vertical") {
+    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
+  }
+
+  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
+  const unanchoredBlocks = blocks.filter((block) => block.anchor === undefined);
+  if (anchoredBlocks.length < 2) {
+    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
+  }
+
+  const columns: GroupedBlockSeed[][] = [];
+  const sortedBlocks = [...anchoredBlocks].sort((left, right) => {
+    const leftAnchor = left.anchor as PdfPoint;
+    const rightAnchor = right.anchor as PdfPoint;
+    if (leftAnchor.x !== rightAnchor.x) {
+      return rightAnchor.x - leftAnchor.x;
+    }
+    return rightAnchor.y - leftAnchor.y;
+  });
+
+  for (const block of sortedBlocks) {
+    const anchor = block.anchor as PdfPoint;
+    const fontSize = block.fontSize ?? 12;
+    const threshold = Math.max(14, fontSize * 1.4);
+    const column = columns.find((candidate) => {
+      const candidateAnchor = candidate[0]?.anchor;
+      return candidateAnchor !== undefined && Math.abs(candidateAnchor.x - anchor.x) <= threshold;
+    });
+    if (column) {
+      column.push(block);
+      continue;
+    }
+    columns.push([block]);
+  }
+
+  const orderedBlocks = columns
+    .map((column) => [...column].sort((left, right) => (right.anchor as PdfPoint).y - (left.anchor as PdfPoint).y))
+    .flat();
+  orderedBlocks.push(...unanchoredBlocks);
+
+  return orderedBlocks.map((block, blockIndex) => ({
     ...block,
-    startsParagraph: blockIndex === 0 || shouldStartParagraph(blocks[blockIndex - 1] as GroupedBlockSeed, block),
+    readingOrder: blockIndex,
   }));
 }
 
-function shouldMergeAdjacentBlocks(previousBlock: GroupedBlockSeed, currentBlock: GroupedBlockSeed): boolean {
+function annotateParagraphStarts(
+  blocks: readonly GroupedBlockSeed[],
+  writingMode: PdfWritingMode | undefined,
+): readonly GroupedBlockSeed[] {
+  return blocks.map((block, blockIndex) => ({
+    ...block,
+    startsParagraph: blockIndex === 0 || shouldStartParagraph(blocks[blockIndex - 1] as GroupedBlockSeed, block, writingMode),
+  }));
+}
+
+function shouldMergeAdjacentBlocks(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
   if (/^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentBlock.text)) {
     return false;
   }
@@ -179,6 +259,21 @@ function shouldMergeAdjacentBlocks(previousBlock: GroupedBlockSeed, currentBlock
     return previousBlock.text.length < 40 && currentBlock.text.length < 40;
   }
 
+  if (writingMode === "vertical") {
+    const verticalGap = previousBlock.anchor.y - currentBlock.anchor.y;
+    const horizontalGap = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
+    if (horizontalGap > Math.max(10, previousFontSize * 0.9)) {
+      return false;
+    }
+    if (verticalGap < -Math.max(10, previousFontSize)) {
+      return false;
+    }
+    if (verticalGap > Math.max(28, previousFontSize * 2.6)) {
+      return false;
+    }
+    return previousBlock.text.length < 30 || !/[.!?:]$/.test(previousBlock.text);
+  }
+
   const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
   const horizontalDrift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
   if (verticalGap > Math.max(20, previousFontSize * 2.5)) {
@@ -191,7 +286,11 @@ function shouldMergeAdjacentBlocks(previousBlock: GroupedBlockSeed, currentBlock
   return previousBlock.text.length < 60 || !/[.!?:]$/.test(previousBlock.text);
 }
 
-function shouldStartParagraph(previousBlock: GroupedBlockSeed, currentBlock: GroupedBlockSeed): boolean {
+function shouldStartParagraph(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
   const previousText = normalizeBlockText(previousBlock.text);
   const currentText = normalizeBlockText(currentBlock.text);
   if (previousText.length === 0 || currentText.length === 0) {
@@ -216,6 +315,20 @@ function shouldStartParagraph(previousBlock: GroupedBlockSeed, currentBlock: Gro
 
   const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
   const currentFontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  if (writingMode === "vertical") {
+    if (!previousBlock.anchor || !currentBlock.anchor) {
+      return true;
+    }
+
+    const columnShift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
+    if (columnShift > Math.max(10, currentFontSize)) {
+      return true;
+    }
+
+    const verticalGap = previousBlock.anchor.y - currentBlock.anchor.y;
+    return verticalGap > Math.max(36, currentFontSize * 3.5);
+  }
+
   const endsSentence = /[.!?]["')\]]*$/u.test(previousText);
   const startsSentence = startsLikeSentence(currentText);
   const hasShortTail = previousText.length <= 8;
@@ -246,6 +359,23 @@ function shouldStartParagraph(previousBlock: GroupedBlockSeed, currentBlock: Gro
   }
 
   return hasShortTail;
+}
+
+function resolvePageWritingMode(page: PdfObservedPage): PdfWritingMode | undefined {
+  if (page.runs.some((run) => run.writingMode === "vertical")) {
+    return "vertical";
+  }
+
+  return undefined;
+}
+
+function joinBlockText(
+  previousText: string,
+  currentText: string,
+  writingMode: PdfWritingMode | undefined,
+): string {
+  const separator = writingMode === "vertical" ? "\n" : " ";
+  return `${previousText}${separator}${currentText}`.replaceAll(/[ \t]+/g, " ").trim();
 }
 
 function buildRepeatedBoundarySets(pages: readonly PdfLayoutPage[]): RepeatedBoundarySets {

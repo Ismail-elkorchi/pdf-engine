@@ -47,6 +47,7 @@ import type {
   PdfStageResult,
   PdfTextEncodingKind,
   PdfUnicodeMappingSource,
+  PdfWritingMode,
 } from "./contracts.ts";
 
 const DEFAULT_POLICY: PdfNormalizedAdmissionPolicy = {
@@ -684,6 +685,7 @@ function buildObservedPage(
           ...(observedRun.unicodeMappingSource !== undefined
             ? { unicodeMappingSource: observedRun.unicodeMappingSource }
             : {}),
+          ...(observedRun.writingMode !== undefined ? { writingMode: observedRun.writingMode } : {}),
           objectRef: contentStreamRef,
           ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
           ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
@@ -702,6 +704,7 @@ function buildObservedPage(
         ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
         ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
         ...(observedRun.unicodeMappingSource !== undefined ? { unicodeMappingSource: observedRun.unicodeMappingSource } : {}),
+        ...(observedRun.writingMode !== undefined ? { writingMode: observedRun.writingMode } : {}),
         objectRef: contentStreamRef,
         ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
         ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
@@ -712,13 +715,21 @@ function buildObservedPage(
     }
   }
 
+  const pageWritingMode = inferObservedPageWritingMode(runs);
+  const normalizedRuns = pageWritingMode === undefined ? runs : runs.map((run) => (
+    run.writingMode !== undefined ? run : { ...run, writingMode: pageWritingMode }
+  ));
+  const normalizedGlyphs = pageWritingMode === undefined ? glyphs : glyphs.map((glyph) => (
+    glyph.writingMode !== undefined ? glyph : { ...glyph, writingMode: pageWritingMode }
+  ));
+
   return {
     page: {
       pageNumber,
       resolutionMethod,
       ...(pageEntry.pageRef !== undefined ? { pageRef: pageEntry.pageRef } : {}),
-      glyphs,
-      runs,
+      glyphs: normalizedGlyphs,
+      runs: normalizedRuns,
     },
     hasFontMappingGap,
   };
@@ -736,6 +747,7 @@ function observeParsedTextRun(
   fontRef?: PdfObjectRef;
   textEncodingKind?: PdfTextEncodingKind;
   unicodeMappingSource?: PdfUnicodeMappingSource;
+  writingMode?: PdfWritingMode;
   anchor?: { readonly x: number; readonly y: number };
   fontSize?: number;
   startsNewLine: boolean;
@@ -750,6 +762,7 @@ function observeParsedTextRun(
   const embeddedFontMapping = fontRef
     ? resolveEmbeddedFontMappingForFont(fontRef, embeddedFontMappingByFontKey, inspection)
     : undefined;
+  const writingMode = fontRef ? resolveWritingModeForFont(fontRef, inspection) : undefined;
 
   for (const operand of parsedRun.operands) {
     if (operand.kind === "literal") {
@@ -786,6 +799,7 @@ function observeParsedTextRun(
     ...(fontRef !== undefined ? { fontRef } : {}),
     ...(textEncodingKind !== undefined ? { textEncodingKind } : {}),
     ...(unicodeMappingSource !== undefined ? { unicodeMappingSource } : {}),
+    ...(writingMode !== undefined ? { writingMode } : {}),
     ...(parsedRun.anchor !== undefined ? { anchor: parsedRun.anchor } : {}),
     ...(parsedRun.fontSize !== undefined ? { fontSize: parsedRun.fontSize } : {}),
   };
@@ -913,6 +927,73 @@ function inferHexTextEncodingKind(
   }
 
   return "hex";
+}
+
+function resolveWritingModeForFont(
+  fontRef: PdfObjectRef,
+  inspection: PdfShellInspection,
+): PdfWritingMode | undefined {
+  const fontObject = inspection.analysis.objectIndex.get(keyOfObjectRef(fontRef));
+  const encodingValue = fontObject?.dictionaryEntries.get("Encoding")?.trim();
+  if (encodingValue === "/Identity-V") {
+    return "vertical";
+  }
+
+  const descendantFontObject = resolveDescendantFontObject(fontRef, inspection);
+  const descendantEncodingValue = descendantFontObject?.dictionaryEntries.get("Encoding")?.trim();
+  if (descendantEncodingValue === "/Identity-V") {
+    return "vertical";
+  }
+
+  return undefined;
+}
+
+function inferObservedPageWritingMode(
+  runs: readonly PdfObservedTextRun[],
+): PdfWritingMode | undefined {
+  if (runs.some((run) => run.writingMode === "vertical")) {
+    return "vertical";
+  }
+
+  const anchoredRuns = runs.filter((run) => run.anchor !== undefined);
+  if (anchoredRuns.length < 3 || !anchoredRuns.every((run) => run.startsNewLine === true)) {
+    return undefined;
+  }
+
+  const averageTextLength = anchoredRuns.reduce((sum, run) => sum + run.text.length, 0) / anchoredRuns.length;
+  if (averageTextLength > 20) {
+    return undefined;
+  }
+
+  let horizontalTransitions = 0;
+  let verticalTransitions = 0;
+
+  for (let index = 1; index < anchoredRuns.length; index += 1) {
+    const previousRun = anchoredRuns[index - 1] as PdfObservedTextRun;
+    const currentRun = anchoredRuns[index] as PdfObservedTextRun;
+    const previousAnchor = previousRun.anchor;
+    const currentAnchor = currentRun.anchor;
+    if (!previousAnchor || !currentAnchor) {
+      continue;
+    }
+
+    const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
+    const deltaX = Math.abs(currentAnchor.x - previousAnchor.x);
+    const deltaY = Math.abs(currentAnchor.y - previousAnchor.y);
+    const lateralThreshold = Math.max(10, fontSize * 1.2);
+    const stackThreshold = Math.max(16, fontSize * 1.4);
+
+    if (deltaX >= lateralThreshold && deltaY <= stackThreshold) {
+      horizontalTransitions += 1;
+      continue;
+    }
+
+    if (deltaY >= lateralThreshold && deltaX <= stackThreshold) {
+      verticalTransitions += 1;
+    }
+  }
+
+  return horizontalTransitions >= 2 && horizontalTransitions > verticalTransitions ? "vertical" : undefined;
 }
 
 function resolveCidCollectionForFont(
