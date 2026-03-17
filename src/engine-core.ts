@@ -1,3 +1,7 @@
+import {
+  decodePdfCidHexTextWithKnownCollectionMap,
+  type PdfCidCollectionIdentifier,
+} from "./cid-collection-unicode.ts";
 import { decodePdfHexTextWithUnicodeCMap, parsePdfUnicodeCMap } from "./cmap.ts";
 import { buildKnowledgeDocument } from "./knowledge.ts";
 import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts";
@@ -8,6 +12,7 @@ import {
   parseTextOperatorRuns,
   type PdfShellAnalysis,
 } from "./shell-parse.ts";
+import { parseTrueTypeGlyphUnicodeMap } from "./truetype-cmap.ts";
 
 import type {
   PdfAdmissionArtifact,
@@ -41,6 +46,7 @@ import type {
   PdfRuntimeDescriptor,
   PdfStageResult,
   PdfTextEncodingKind,
+  PdfUnicodeMappingSource,
 } from "./contracts.ts";
 
 const DEFAULT_POLICY: PdfNormalizedAdmissionPolicy = {
@@ -94,6 +100,18 @@ interface PdfShellInspection {
   readonly featureSignals: readonly PdfFeatureSignal[];
   readonly isEncrypted: boolean;
   readonly policy: PdfNormalizedAdmissionPolicy;
+}
+
+interface PdfEmbeddedFontMapping {
+  readonly glyphUnicodeByGlyphId: ReadonlyMap<number, string>;
+  readonly cidToGidByCid?: ReadonlyMap<number, number>;
+  readonly requiresExplicitCidToGidMap: boolean;
+}
+
+interface PdfTextDecodeResult {
+  readonly text: string;
+  readonly complete: boolean;
+  readonly mappingSource: PdfUnicodeMappingSource;
 }
 
 /**
@@ -623,6 +641,7 @@ function buildObservedPage(
   let hasFontMappingGap = false;
   const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
   const unicodeCMapByFontKey = new Map<string, ReturnType<typeof parsePdfUnicodeCMap>>();
+  const embeddedFontMappingByFontKey = new Map<string, PdfEmbeddedFontMapping | undefined>();
 
   for (const contentStreamRef of pageEntry.contentStreamRefs) {
     const contentStream = inspection.analysis.objectIndex.get(keyOfObjectRef(contentStreamRef));
@@ -632,7 +651,13 @@ function buildObservedPage(
 
     const parsedRuns = parseTextOperatorRuns(contentStream.streamText);
     for (const parsedRun of parsedRuns) {
-      const observedRun = observeParsedTextRun(parsedRun, fontRefByResourceName, unicodeCMapByFontKey, inspection);
+      const observedRun = observeParsedTextRun(
+        parsedRun,
+        fontRefByResourceName,
+        unicodeCMapByFontKey,
+        embeddedFontMappingByFontKey,
+        inspection,
+      );
       hasFontMappingGap = hasFontMappingGap || observedRun.hasFontMappingGap;
       if (observedRun.text.length === 0) {
         continue;
@@ -656,6 +681,9 @@ function buildObservedPage(
           contentStreamRef,
           ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
           ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
+          ...(observedRun.unicodeMappingSource !== undefined
+            ? { unicodeMappingSource: observedRun.unicodeMappingSource }
+            : {}),
           objectRef: contentStreamRef,
           ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
           ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
@@ -673,6 +701,7 @@ function buildObservedPage(
         contentStreamRef,
         ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
         ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
+        ...(observedRun.unicodeMappingSource !== undefined ? { unicodeMappingSource: observedRun.unicodeMappingSource } : {}),
         objectRef: contentStreamRef,
         ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
         ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
@@ -699,12 +728,14 @@ function observeParsedTextRun(
   parsedRun: ReturnType<typeof parseTextOperatorRuns>[number],
   fontRefByResourceName: ReadonlyMap<string, PdfObjectRef>,
   unicodeCMapByFontKey: Map<string, ReturnType<typeof parsePdfUnicodeCMap>>,
+  embeddedFontMappingByFontKey: Map<string, PdfEmbeddedFontMapping | undefined>,
   inspection: PdfShellInspection,
 ): {
   text: string;
   hasFontMappingGap: boolean;
   fontRef?: PdfObjectRef;
   textEncodingKind?: PdfTextEncodingKind;
+  unicodeMappingSource?: PdfUnicodeMappingSource;
   anchor?: { readonly x: number; readonly y: number };
   fontSize?: number;
   startsNewLine: boolean;
@@ -712,27 +743,40 @@ function observeParsedTextRun(
   let text = "";
   let hasFontMappingGap = false;
   let textEncodingKind: PdfTextEncodingKind | undefined;
+  let unicodeMappingSource: PdfUnicodeMappingSource | undefined;
   const fontRef = parsedRun.fontResourceName ? fontRefByResourceName.get(parsedRun.fontResourceName) : undefined;
   const unicodeCMap = fontRef ? resolveUnicodeCMapForFont(fontRef, unicodeCMapByFontKey, inspection) : undefined;
+  const cidCollection = fontRef ? resolveCidCollectionForFont(fontRef, inspection) : undefined;
+  const embeddedFontMapping = fontRef
+    ? resolveEmbeddedFontMappingForFont(fontRef, embeddedFontMappingByFontKey, inspection)
+    : undefined;
 
   for (const operand of parsedRun.operands) {
     if (operand.kind === "literal") {
       text += decodePdfLiteral(operand.token);
       textEncodingKind = textEncodingKind ?? "literal";
+      unicodeMappingSource = unicodeMappingSource ?? "literal";
       continue;
     }
 
     textEncodingKind = textEncodingKind ?? inferHexTextEncodingKind(fontRef, inspection);
-    if (!unicodeCMap) {
+    const decodedText = decodeHexTextOperand(
+      operand.token,
+      textEncodingKind,
+      unicodeCMap,
+      cidCollection,
+      embeddedFontMapping,
+    );
+    if (!decodedText) {
       hasFontMappingGap = true;
       continue;
     }
 
-    const decodedText = decodePdfHexTextWithUnicodeCMap(operand.token, unicodeCMap);
     if (!decodedText.complete) {
       hasFontMappingGap = true;
     }
     text += decodedText.text;
+    unicodeMappingSource = unicodeMappingSource ?? decodedText.mappingSource;
   }
 
   return {
@@ -741,9 +785,46 @@ function observeParsedTextRun(
     startsNewLine: parsedRun.startsNewLine,
     ...(fontRef !== undefined ? { fontRef } : {}),
     ...(textEncodingKind !== undefined ? { textEncodingKind } : {}),
+    ...(unicodeMappingSource !== undefined ? { unicodeMappingSource } : {}),
     ...(parsedRun.anchor !== undefined ? { anchor: parsedRun.anchor } : {}),
     ...(parsedRun.fontSize !== undefined ? { fontSize: parsedRun.fontSize } : {}),
   };
+}
+
+function decodeHexTextOperand(
+  hexToken: string,
+  textEncodingKind: PdfTextEncodingKind,
+  unicodeCMap: ReturnType<typeof parsePdfUnicodeCMap> | undefined,
+  cidCollection: PdfCidCollectionIdentifier | undefined,
+  embeddedFontMapping: PdfEmbeddedFontMapping | undefined,
+): PdfTextDecodeResult | undefined {
+  if (unicodeCMap) {
+    const decodedText = decodePdfHexTextWithUnicodeCMap(hexToken, unicodeCMap);
+    return {
+      text: decodedText.text,
+      complete: decodedText.complete,
+      mappingSource: "tounicode-cmap",
+    };
+  }
+
+  if (textEncodingKind !== "cid") {
+    return undefined;
+  }
+
+  const collectionDecodedText = decodePdfCidHexTextWithKnownCollectionMap(hexToken, cidCollection);
+  if (collectionDecodedText) {
+    return {
+      text: collectionDecodedText.text,
+      complete: collectionDecodedText.complete,
+      mappingSource: "cid-collection-ucs2",
+    };
+  }
+
+  if (!embeddedFontMapping) {
+    return undefined;
+  }
+
+  return decodePdfCidHexTextWithEmbeddedFont(hexToken, embeddedFontMapping);
 }
 
 function resolveUnicodeCMapForFont(
@@ -764,6 +845,52 @@ function resolveUnicodeCMapForFont(
   const unicodeCMap = typeof unicodeStreamText === "string" ? parsePdfUnicodeCMap(unicodeStreamText) : undefined;
   unicodeCMapByFontKey.set(fontKey, unicodeCMap);
   return unicodeCMap;
+}
+
+function resolveEmbeddedFontMappingForFont(
+  fontRef: PdfObjectRef,
+  embeddedFontMappingByFontKey: Map<string, PdfEmbeddedFontMapping | undefined>,
+  inspection: PdfShellInspection,
+): PdfEmbeddedFontMapping | undefined {
+  const fontKey = keyOfObjectRef(fontRef);
+  if (embeddedFontMappingByFontKey.has(fontKey)) {
+    return embeddedFontMappingByFontKey.get(fontKey);
+  }
+
+  const descendantFontObject = resolveDescendantFontObject(fontRef, inspection);
+  const fontDescriptorRef = descendantFontObject
+    ? readOptionalObjectRef(descendantFontObject.dictionaryEntries.get("FontDescriptor"))
+    : undefined;
+  const fontDescriptorObject = fontDescriptorRef
+    ? inspection.analysis.objectIndex.get(keyOfObjectRef(fontDescriptorRef))
+    : undefined;
+  const fontFileRef = fontDescriptorObject
+    ? readOptionalObjectRef(fontDescriptorObject.dictionaryEntries.get("FontFile2"))
+    : undefined;
+  const fontFileObject = fontFileRef
+    ? inspection.analysis.objectIndex.get(keyOfObjectRef(fontFileRef))
+    : undefined;
+  const glyphUnicodeByGlyphId = fontFileObject?.decodedStreamBytes
+    ? parseTrueTypeGlyphUnicodeMap(fontFileObject.decodedStreamBytes)
+    : undefined;
+
+  if (!glyphUnicodeByGlyphId || glyphUnicodeByGlyphId.size === 0) {
+    embeddedFontMappingByFontKey.set(fontKey, undefined);
+    return undefined;
+  }
+
+  const cidToGidByCid = descendantFontObject
+    ? resolveCidToGidMap(descendantFontObject.dictionaryEntries.get("CIDToGIDMap"), inspection)
+    : undefined;
+  const requiresExplicitCidToGidMap = hasExplicitCidToGidMap(descendantFontObject?.dictionaryEntries.get("CIDToGIDMap"));
+
+  const mapping: PdfEmbeddedFontMapping = {
+    glyphUnicodeByGlyphId,
+    requiresExplicitCidToGidMap,
+    ...(cidToGidByCid !== undefined ? { cidToGidByCid } : {}),
+  };
+  embeddedFontMappingByFontKey.set(fontKey, mapping);
+  return mapping;
 }
 
 function inferHexTextEncodingKind(
@@ -788,6 +915,159 @@ function inferHexTextEncodingKind(
   return "hex";
 }
 
+function resolveCidCollectionForFont(
+  fontRef: PdfObjectRef,
+  inspection: PdfShellInspection,
+): PdfCidCollectionIdentifier | undefined {
+  const descendantFontObject = resolveDescendantFontObject(fontRef, inspection);
+  const cidSystemInfoValue = descendantFontObject?.dictionaryEntries.get("CIDSystemInfo");
+  if (!cidSystemInfoValue) {
+    return undefined;
+  }
+
+  const registryMatch = cidSystemInfoValue.match(/\/Registry\s*\(([^)]+)\)/);
+  const orderingMatch = cidSystemInfoValue.match(/\/Ordering\s*\(([^)]+)\)/);
+  const registry = registryMatch?.[1];
+  const ordering = orderingMatch?.[1];
+  if (!registry || !ordering) {
+    return undefined;
+  }
+
+  return {
+    registry,
+    ordering,
+  };
+}
+
+function resolveDescendantFontObject(
+  fontRef: PdfObjectRef,
+  inspection: PdfShellInspection,
+) {
+  const fontObject = inspection.analysis.objectIndex.get(keyOfObjectRef(fontRef));
+  if (!fontObject) {
+    return undefined;
+  }
+
+  if (fontObject.dictionaryEntries.get("Subtype")?.trim() === "/CIDFontType2") {
+    return fontObject;
+  }
+
+  const descendantFontRefs = readOptionalObjectRefs(fontObject.dictionaryEntries.get("DescendantFonts"));
+  const descendantFontRef = descendantFontRefs[0];
+  return descendantFontRef ? inspection.analysis.objectIndex.get(keyOfObjectRef(descendantFontRef)) : fontObject;
+}
+
+function resolveCidToGidMap(
+  value: string | undefined,
+  inspection: PdfShellInspection,
+): ReadonlyMap<number, number> | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  if (trimmedValue === "/Identity") {
+    return undefined;
+  }
+
+  const objectRef = readOptionalObjectRef(trimmedValue);
+  if (!objectRef) {
+    return undefined;
+  }
+
+  const objectShell = inspection.analysis.objectIndex.get(keyOfObjectRef(objectRef));
+  return objectShell?.decodedStreamBytes ? parseCidToGidMap(objectShell.decodedStreamBytes) : undefined;
+}
+
+function hasExplicitCidToGidMap(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const trimmedValue = value.trim();
+  return trimmedValue.length > 0 && trimmedValue !== "/Identity";
+}
+
+function parseCidToGidMap(decodedStreamBytes: Uint8Array): ReadonlyMap<number, number> | undefined {
+  if (decodedStreamBytes.byteLength < 2) {
+    return undefined;
+  }
+
+  const cidToGidByCid = new Map<number, number>();
+  const pairCount = Math.floor(decodedStreamBytes.byteLength / 2);
+  for (let cid = 0; cid < pairCount; cid += 1) {
+    const offset = cid * 2;
+    const highByte = decodedStreamBytes[offset];
+    const lowByte = decodedStreamBytes[offset + 1];
+    if (highByte === undefined || lowByte === undefined) {
+      continue;
+    }
+
+    const glyphId = (highByte << 8) | lowByte;
+    cidToGidByCid.set(cid, glyphId);
+  }
+
+  return cidToGidByCid;
+}
+
+function decodePdfCidHexTextWithEmbeddedFont(
+  hexToken: string,
+  embeddedFontMapping: PdfEmbeddedFontMapping,
+): PdfTextDecodeResult {
+  const normalizedHex = normalizePdfHexToken(hexToken);
+  if (normalizedHex.length === 0 || normalizedHex.length % 4 !== 0) {
+    return {
+      text: "",
+      complete: false,
+      mappingSource: "embedded-font-cmap",
+    };
+  }
+
+  let text = "";
+  let complete = true;
+
+  for (let offset = 0; offset < normalizedHex.length; offset += 4) {
+    const cid = Number.parseInt(normalizedHex.slice(offset, offset + 4), 16);
+    const glyphId = resolveGlyphIdForCid(cid, embeddedFontMapping);
+    const glyphText = glyphId === undefined ? undefined : embeddedFontMapping.glyphUnicodeByGlyphId.get(glyphId);
+    if (glyphText === undefined) {
+      complete = false;
+      continue;
+    }
+    text += glyphText;
+  }
+
+  return {
+    text,
+    complete,
+    mappingSource: "embedded-font-cmap",
+  };
+}
+
+function resolveGlyphIdForCid(
+  cid: number,
+  embeddedFontMapping: PdfEmbeddedFontMapping,
+): number | undefined {
+  if (embeddedFontMapping.cidToGidByCid) {
+    return embeddedFontMapping.cidToGidByCid.get(cid);
+  }
+
+  if (embeddedFontMapping.requiresExplicitCidToGidMap) {
+    return undefined;
+  }
+
+  return cid;
+}
+
+function normalizePdfHexToken(value: string): string {
+  const trimmedValue = value.trim();
+  const bracketlessValue = trimmedValue.startsWith("<") && trimmedValue.endsWith(">")
+    ? trimmedValue.slice(1, -1)
+    : trimmedValue;
+  const normalizedHex = bracketlessValue.replaceAll(/\s+/g, "");
+  return normalizedHex.length % 2 === 0 ? normalizedHex : `${normalizedHex}0`;
+}
+
 function readOptionalObjectRef(value: string | undefined): PdfObjectRef | undefined {
   if (!value) {
     return undefined;
@@ -803,6 +1083,17 @@ function readOptionalObjectRef(value: string | undefined): PdfObjectRef | undefi
     objectNumber: Number(match[1]),
     generationNumber: Number(match[2]),
   };
+}
+
+function readOptionalObjectRefs(value: string | undefined): readonly PdfObjectRef[] {
+  if (!value) {
+    return [];
+  }
+
+  return Array.from(value.matchAll(/(\d+)\s+(\d+)\s+R/g), (match) => ({
+    objectNumber: Number(match[1]),
+    generationNumber: Number(match[2]),
+  }));
 }
 
 function canAdvance(admission: PdfStageResult<PdfAdmissionArtifact>): boolean {

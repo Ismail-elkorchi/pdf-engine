@@ -1,3 +1,5 @@
+import { decodeFixturePdfBytes, publicSmokeFixtures } from "./fixture-data.mjs";
+
 function getArgs() {
   if (typeof Deno !== "undefined") {
     return Deno.args;
@@ -727,6 +729,20 @@ const cidToUnicodeResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const identityHCidFontResult = await engine.run({
+  source: {
+    bytes: decodeFixturePdfBytes(publicSmokeFixtures.identityHCidFont.bytesBase64),
+    fileName: publicSmokeFixtures.identityHCidFont.fileName,
+    mediaType: "application/pdf",
+  },
+});
+const identityVCidFontResult = await engine.run({
+  source: {
+    bytes: decodeFixturePdfBytes(publicSmokeFixtures.identityVCidFont.bytesBase64),
+    fileName: publicSmokeFixtures.identityVCidFont.fileName,
+    mediaType: "application/pdf",
+  },
+});
 const objectStreamResult = await engine.run({
   source: {
     bytes: objectStreamPdfBytes,
@@ -1052,6 +1068,50 @@ assert(
 assert(
   cidToUnicodeResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind === "cid",
   `CID ToUnicode text encoding kind was ${cidToUnicodeResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind ?? "missing"}.`,
+);
+for (const marker of publicSmokeFixtures.identityHCidFont.expectedMarkers) {
+  assert(
+    identityHCidFontResult.observation.value?.extractedText.includes(marker),
+    `Identity-H fixture did not include marker ${JSON.stringify(marker)}.`,
+  );
+}
+assert(
+  identityHCidFontResult.observation.value?.pages.some((page) =>
+    page.runs.some((run) => run.unicodeMappingSource === "cid-collection-ucs2"),
+  ),
+  "Identity-H fixture did not preserve cid-collection-ucs2 provenance on observed runs.",
+);
+assert(
+  !identityHCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "Identity-H fixture still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  identityHCidFontResult.observation.value?.pages.some((page) =>
+    page.runs.some((run) => run.textEncodingKind === "cid"),
+  ),
+  "Identity-H fixture did not preserve cid text encoding on observed runs.",
+);
+for (const marker of publicSmokeFixtures.identityVCidFont.expectedMarkers) {
+  assert(
+    identityVCidFontResult.observation.value?.extractedText.includes(marker),
+    `Identity-V fixture did not include marker ${JSON.stringify(marker)}.`,
+  );
+}
+assert(
+  identityVCidFontResult.observation.value?.pages.some((page) =>
+    page.runs.some((run) => run.unicodeMappingSource === "cid-collection-ucs2"),
+  ),
+  "Identity-V fixture did not preserve cid-collection-ucs2 provenance on observed runs.",
+);
+assert(
+  !identityVCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "Identity-V fixture still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  identityVCidFontResult.observation.value?.pages.some((page) =>
+    page.runs.some((run) => run.textEncodingKind === "cid"),
+  ),
+  "Identity-V fixture did not preserve cid text encoding on observed runs.",
 );
 assert(objectStreamResult.ir.value?.expandedObjectStreams === true, "Object stream expansion was not marked as enabled.");
 assert(
