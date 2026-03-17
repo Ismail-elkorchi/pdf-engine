@@ -82,6 +82,11 @@ export type PdfUnicodeMappingSource =
   | "embedded-font-cmap";
 
 /**
+ * Writing mode recovered for observed or grouped text when the shell can identify it.
+ */
+export type PdfWritingMode = "horizontal" | "vertical";
+
+/**
  * Cross-reference organization detected for a PDF file.
  */
 export type PdfCrossReferenceKind = "classic" | "xref-stream" | "hybrid" | "unknown";
@@ -570,6 +575,8 @@ export interface PdfObservedGlyph {
   readonly textEncodingKind?: PdfTextEncodingKind;
   /** Unicode mapping path used to recover this glyph when known. */
   readonly unicodeMappingSource?: PdfUnicodeMappingSource;
+  /** Writing mode active for this glyph when the shell can recover it. */
+  readonly writingMode?: PdfWritingMode;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Approximate text anchor when the shell can recover one. */
@@ -606,6 +613,8 @@ export interface PdfObservedTextRun {
   readonly textEncodingKind?: PdfTextEncodingKind;
   /** Unicode mapping path used to recover this run when known. */
   readonly unicodeMappingSource?: PdfUnicodeMappingSource;
+  /** Writing mode active for this run when the shell can recover it. */
+  readonly writingMode?: PdfWritingMode;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Approximate text anchor when the shell can recover one. */
@@ -682,6 +691,8 @@ export interface PdfLayoutBlock {
   readonly runIds: readonly string[];
   /** Observation glyph identifiers grouped into this block. */
   readonly glyphIds: readonly string[];
+  /** Writing mode assigned to the block when the shell can recover it. */
+  readonly writingMode?: PdfWritingMode;
   /** How page ordering for this layout block was resolved. */
   readonly resolutionMethod: PdfPageResolutionMethod;
   /** Page object reference when known. */

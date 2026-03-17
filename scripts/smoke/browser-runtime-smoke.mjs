@@ -108,6 +108,61 @@ async function runBrowserSmoke(baseUrl, browserName) {
         const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
         return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
       };
+      const buildPdfWithPageContents = (pageContents) => {
+        const lines = [
+          "%PDF-1.4",
+          "1 0 obj",
+          "<< /Type /Catalog /Pages 2 0 R >>",
+          "endobj",
+          "2 0 obj",
+          `<< /Type /Pages /Kids [${pageContents.map((_, index) => `${String(3 + index * 2)} 0 R`).join(" ")}] /Count ${String(pageContents.length)} >>`,
+          "endobj"
+        ];
+
+        for (const [index, contentStreamText] of pageContents.entries()) {
+          const pageObjectNumber = 3 + index * 2;
+          const contentObjectNumber = pageObjectNumber + 1;
+          lines.push(
+            `${String(pageObjectNumber)} 0 obj`,
+            `<< /Type /Page /Parent 2 0 R /Contents ${String(contentObjectNumber)} 0 R >>`,
+            "endobj",
+            `${String(contentObjectNumber)} 0 obj`,
+            `<< /Length ${String(encodeText(contentStreamText).byteLength)} >>`,
+            "stream",
+            contentStreamText,
+            "endstream",
+            "endobj"
+          );
+        }
+
+        lines.push(
+          "xref",
+          `0 ${String(3 + pageContents.length * 2)}`,
+          "0000000000 65535 f",
+          "trailer",
+          `<< /Root 1 0 R /Size ${String(3 + pageContents.length * 2)} >>`,
+          "startxref",
+          "__STARTXREF__",
+          "%%EOF",
+          ""
+        );
+
+        const template = lines.join("\n");
+        const xrefOffset = template.indexOf("\nxref\n") + 1;
+        return encodeText(template.replace("__STARTXREF__", String(xrefOffset)));
+      };
+      const verticalWordColumnsPdf = buildPdfWithPageContents([
+        [
+          "BT",
+          "1 0 0 1 90.264 697.18 Tm",
+          "(Test) Tj",
+          "1 0 0 1 117.74 681.82 Tm",
+          "(Vertical) Tj",
+          "1 0 0 1 145.34 685.9 Tm",
+          "(Layout) Tj",
+          "ET"
+        ].join("\n")
+      ]);
 
       const plainPdfTemplate = [
         "%PDF-1.4",
@@ -205,6 +260,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: decodeFixturePdfBytes(publicSmokeFixtures.identityVCidFont.bytesBase64)
           }
         });
+        const verticalWordColumnsResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: verticalWordColumnsPdf
+          }
+        });
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
@@ -227,7 +288,10 @@ async function runBrowserSmoke(baseUrl, browserName) {
             page.runs.some((run) => run.unicodeMappingSource === "cid-collection-ucs2" && run.textEncodingKind === "cid")
           ) === true,
           identityHLimitCleared: !identityHCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
-          identityVLimitCleared: !identityVCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented")
+          identityVLimitCleared: !identityVCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+          verticalObservedMode: verticalWordColumnsResult.observation.value?.pages[0]?.runs.every((run) => run.writingMode === "vertical") === true,
+          verticalLayoutMode: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.every((block) => block.writingMode === "vertical") === true,
+          verticalLayoutOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") === "Layout Vertical Test"
         };
         const stablePayload = {
           runtime: plainResult.runtime.kind,
@@ -235,7 +299,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
           flateText: flateResult.observation.value?.extractedText ?? null,
           strategy: plainResult.observation.value?.strategy ?? null,
           identityHText: identityHCidFontResult.observation.value?.extractedText ?? null,
-          identityVText: identityVCidFontResult.observation.value?.extractedText ?? null
+          identityVText: identityVCidFontResult.observation.value?.extractedText ?? null,
+          verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null
         };
 
         return {
