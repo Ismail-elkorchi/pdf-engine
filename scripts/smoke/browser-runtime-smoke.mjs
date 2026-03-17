@@ -7,6 +7,7 @@ import { chromium, firefox, webkit } from "playwright";
 const MIME_TYPES = {
   ".html": "text/html; charset=utf-8",
   ".js": "text/javascript; charset=utf-8",
+  ".mjs": "text/javascript; charset=utf-8",
   ".json": "application/json; charset=utf-8",
   ".map": "application/json; charset=utf-8",
   ".txt": "text/plain; charset=utf-8"
@@ -88,15 +89,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
 
     const smoke = await page.evaluate(async () => {
       const { createPdfEngine } = await import("/dist/index.js");
+      const { publicSmokeFixtures, decodeFixturePdfBytes } = await import("/scripts/smoke/fixture-data.mjs");
 
       const encodeText = (value) => new TextEncoder().encode(value);
-      const decodeBase64 = (value) => {
-        if (typeof Uint8Array.fromBase64 === "function") {
-          return Uint8Array.fromBase64(value);
-        }
-
-        return Uint8Array.from(globalThis.atob(value), (character) => character.charCodeAt(0));
-      };
       const joinBytes = (parts) => {
         const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
         const joined = new Uint8Array(totalLength);
@@ -146,7 +141,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
       const plainStartXref = plainPdfTemplate.indexOf("xref\n0 5");
       const plainPdf = plainPdfTemplate.replace("__STARTXREF__", String(plainStartXref));
 
-      const flateStreamBytes = decodeBase64("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
+      const flateStreamBytes = decodeFixturePdfBytes("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
       const flatePdfPrefix = [
         "%PDF-1.4",
         "1 0 obj",
@@ -198,6 +193,18 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: flatePdf
           }
         });
+        const identityHCidFontResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: decodeFixturePdfBytes(publicSmokeFixtures.identityHCidFont.bytesBase64)
+          }
+        });
+        const identityVCidFontResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: decodeFixturePdfBytes(publicSmokeFixtures.identityVCidFont.bytesBase64)
+          }
+        });
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
@@ -206,13 +213,29 @@ async function runBrowserSmoke(baseUrl, browserName) {
           plainText: plainResult.observation.value?.extractedText === "Browser Hello",
           flateText: flateResult.observation.value?.extractedText === "Hello Flate",
           observationStrategy: plainResult.observation.value?.strategy === "decoded-text-operators",
-          flateDecoded: flateResult.ir.value?.decodedStreams === true
+          flateDecoded: flateResult.ir.value?.decodedStreams === true,
+          identityHMarkers: publicSmokeFixtures.identityHCidFont.expectedMarkers.every((marker) =>
+            identityHCidFontResult.observation.value?.extractedText.includes(marker)
+          ),
+          identityVMarkers: publicSmokeFixtures.identityVCidFont.expectedMarkers.every((marker) =>
+            identityVCidFontResult.observation.value?.extractedText.includes(marker)
+          ),
+          identityHProvenance: identityHCidFontResult.observation.value?.pages.some((page) =>
+            page.runs.some((run) => run.unicodeMappingSource === "cid-collection-ucs2" && run.textEncodingKind === "cid")
+          ) === true,
+          identityVProvenance: identityVCidFontResult.observation.value?.pages.some((page) =>
+            page.runs.some((run) => run.unicodeMappingSource === "cid-collection-ucs2" && run.textEncodingKind === "cid")
+          ) === true,
+          identityHLimitCleared: !identityHCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+          identityVLimitCleared: !identityVCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented")
         };
         const stablePayload = {
           runtime: plainResult.runtime.kind,
           plainText: plainResult.observation.value?.extractedText ?? null,
           flateText: flateResult.observation.value?.extractedText ?? null,
-          strategy: plainResult.observation.value?.strategy ?? null
+          strategy: plainResult.observation.value?.strategy ?? null,
+          identityHText: identityHCidFontResult.observation.value?.extractedText ?? null,
+          identityVText: identityVCidFontResult.observation.value?.extractedText ?? null
         };
 
         return {

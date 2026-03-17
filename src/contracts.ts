@@ -73,6 +73,15 @@ export type PdfObservationOrigin = "native-text" | "heuristic-text" | "ocr" | "u
 export type PdfTextEncodingKind = "literal" | "hex" | "cid";
 
 /**
+ * Unicode mapping path used to recover text from an observed operand.
+ */
+export type PdfUnicodeMappingSource =
+  | "literal"
+  | "tounicode-cmap"
+  | "cid-collection-ucs2"
+  | "embedded-font-cmap";
+
+/**
  * Cross-reference organization detected for a PDF file.
  */
 export type PdfCrossReferenceKind = "classic" | "xref-stream" | "hybrid" | "unknown";
@@ -559,6 +568,8 @@ export interface PdfObservedGlyph {
   readonly fontRef?: PdfObjectRef;
   /** Text operand encoding form used to decode this glyph when known. */
   readonly textEncodingKind?: PdfTextEncodingKind;
+  /** Unicode mapping path used to recover this glyph when known. */
+  readonly unicodeMappingSource?: PdfUnicodeMappingSource;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Approximate text anchor when the shell can recover one. */
@@ -593,6 +604,8 @@ export interface PdfObservedTextRun {
   readonly fontRef?: PdfObjectRef;
   /** Text operand encoding form used to decode this run when known. */
   readonly textEncodingKind?: PdfTextEncodingKind;
+  /** Unicode mapping path used to recover this run when known. */
+  readonly unicodeMappingSource?: PdfUnicodeMappingSource;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
   /** Approximate text anchor when the shell can recover one. */
