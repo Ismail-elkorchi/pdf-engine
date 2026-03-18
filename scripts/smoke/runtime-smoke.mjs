@@ -449,6 +449,32 @@ const paragraphPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const headingParagraphPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "72 720 Td",
+    "(ABSTRACT) Tj",
+    "0 -18 Td",
+    "/F1 12 Tf",
+    "(Dense retrieval starts here.) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const numberedHeadingParagraphPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "72 720 Td",
+    "(Introduction) Tj",
+    "0 -18 Td",
+    "/F1 12 Tf",
+    "(1. This paragraph starts here.) Tj",
+    "0 -14 Td",
+    "(It continues onto the next line.) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const compactLabelClusterPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1518,6 +1544,20 @@ const paragraphResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const headingParagraphResult = await engine.run({
+  source: {
+    bytes: encodeText(headingParagraphPdf),
+    fileName: "heading-paragraph.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const numberedHeadingParagraphResult = await engine.run({
+  source: {
+    bytes: encodeText(numberedHeadingParagraphPdf),
+    fileName: "numbered-heading-paragraph.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const compactLabelClusterResult = await engine.run({
   source: {
     bytes: encodeText(compactLabelClusterPdf),
@@ -1766,6 +1806,15 @@ assert(
   `Paragraph-aware knowledge text was ${JSON.stringify(paragraphResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
 );
 assert(
+  headingParagraphResult.observation.value?.extractedText === "ABSTRACT\n\nDense retrieval starts here.",
+  `Heading-paragraph observation text was ${JSON.stringify(headingParagraphResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  numberedHeadingParagraphResult.observation.value?.extractedText ===
+    "Introduction\n\n1.\n\nThis paragraph starts here.\n\nIt continues onto the next line.",
+  `Numbered heading-paragraph observation text was ${JSON.stringify(numberedHeadingParagraphResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
   compactLabelClusterResult.observation.value?.extractedText ===
     "Source: Person Of Impact Page 1 of 1\n\nFirst Name: Last Name: Country: Planet: Occupation: Date Of Birth:",
   `Compact label-cluster observation text was ${JSON.stringify(compactLabelClusterResult.observation.value?.extractedText ?? null)}.`,
@@ -1838,7 +1887,7 @@ assert(
 );
 assert(
   continuedNumberedBodyResult.observation.value?.extractedText ===
-    "Introduction\n\n1. This is a numbered body paragraph that should stay in the body flow even when it wraps onto a second line without becoming a new paragraph.\n\n2. Another numbered body paragraph follows as a separate paragraph.",
+    "Introduction\n\n1.\n\nThis is a numbered body paragraph that should stay in the body flow even when it wraps onto a second line without becoming a new paragraph.\n\n2. Another numbered body paragraph follows as a separate paragraph.",
   `Continued numbered-body observation text was ${JSON.stringify(continuedNumberedBodyResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(
