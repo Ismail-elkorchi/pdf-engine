@@ -163,6 +163,44 @@ async function runBrowserSmoke(baseUrl, browserName) {
           "ET"
         ].join("\n")
       ]);
+      const buildDelayedContentPdf = () => {
+        const delayedContentStreamText = [
+          "BT",
+          "(Delayed Content) Tj",
+          "ET"
+        ].join("\n");
+        const fillerText = "% filler block to force full structure recovery\n".repeat(34000);
+        const template = [
+          "%PDF-1.4",
+          "1 0 obj",
+          "<< /Type /Catalog /Pages 2 0 R >>",
+          "endobj",
+          "2 0 obj",
+          "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+          "endobj",
+          "3 0 obj",
+          "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+          "endobj",
+          fillerText,
+          "4 0 obj",
+          `<< /Length ${String(encodeText(delayedContentStreamText).byteLength)} >>`,
+          "stream",
+          delayedContentStreamText,
+          "endstream",
+          "endobj",
+          "xref",
+          "0 5",
+          "0000000000 65535 f",
+          "trailer",
+          "<< /Root 1 0 R /Size 5 >>",
+          "startxref",
+          "__DELAYED_STARTXREF__",
+          "%%EOF",
+          ""
+        ].join("\n");
+        const startXref = template.indexOf("\nxref\n0 5") + 1;
+        return encodeText(template.replace("__DELAYED_STARTXREF__", String(startXref)));
+      };
       const gridTablePdf = buildPdfWithPageContents([
         [
           "BT",
@@ -232,6 +270,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
       const singleByteEncodedPdf = encodeText(
         singleByteEncodedPdfTemplate.replace("__SINGLE_BYTE_STARTXREF__", String(singleByteStartXref))
       );
+      const delayedContentPdf = buildDelayedContentPdf();
 
       const plainPdfTemplate = [
         "%PDF-1.4",
@@ -341,6 +380,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: gridTablePdf
           }
         });
+        const delayedContentResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: delayedContentPdf
+          }
+        });
         const singleByteEncodedResult = await engine.run({
           source: {
             kind: "bytes",
@@ -383,6 +428,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
             cell.citations.length > 0
           ) === true,
           gridTableLimit: gridTableResult.knowledge.value?.knownLimits.includes("table-projection-heuristic") === true,
+          delayedContentText: delayedContentResult.observation.value?.extractedText === "Delayed Content",
+          delayedContentOrder: delayedContentResult.observation.value?.pages[0]?.resolutionMethod === "page-tree",
           singleByteText: singleByteEncodedResult.observation.value?.extractedText === "Encoded Text",
           singleByteMapping: singleByteEncodedResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
           singleByteLimitCleared:
@@ -397,6 +444,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
           identityVText: identityVCidFontResult.observation.value?.extractedText ?? null,
           verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null,
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
+          delayedContentText: delayedContentResult.observation.value?.extractedText ?? null,
           singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null
         };
 

@@ -166,6 +166,46 @@ function buildVerticalWordColumnsPdf() {
   ]);
 }
 
+function buildDelayedContentPdf() {
+  const delayedContentStreamText = [
+    "BT",
+    "(Delayed Content) Tj",
+    "ET",
+  ].join("\n");
+  const fillerText = "% filler block to force full structure recovery\n".repeat(34_000);
+  const template = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+    "endobj",
+    fillerText,
+    "4 0 obj",
+    `<< /Length ${String(encodeText(delayedContentStreamText).byteLength)} >>`,
+    "stream",
+    delayedContentStreamText,
+    "endstream",
+    "endobj",
+    "xref",
+    "0 5",
+    "0000000000 65535 f",
+    "trailer",
+    "<< /Root 1 0 R /Size 5 >>",
+    "startxref",
+    "__DELAYED_STARTXREF__",
+    "%%EOF",
+    "",
+  ].join("\n");
+  const startXrefOffset = template.indexOf("\nxref\n0 5") + 1;
+  assert(startXrefOffset > 0, "Delayed-content synthetic PDF did not contain an xref section.");
+  return encodeText(template.replace("__DELAYED_STARTXREF__", String(startXrefOffset)));
+}
+
 function buildObjectStreamMembers(memberTexts) {
   const headerParts = [];
   let bodyOffset = 0;
@@ -256,6 +296,7 @@ const encryptedPdfTemplate = [
 ].join("\n");
 
 const verticalWordColumnsPdf = buildVerticalWordColumnsPdf();
+const delayedContentPdfBytes = buildDelayedContentPdf();
 
 const flateStreamBytes = decodeBase64("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
 const flatePdfPrefix = [
@@ -864,6 +905,13 @@ const inheritedResourceResult = await engine.run({
   source: {
     bytes: inheritedResourcePdfBytes,
     fileName: "inherited-resources.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const delayedContentResult = await engine.run({
+  source: {
+    bytes: delayedContentPdfBytes,
+    fileName: "delayed-content.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -1483,14 +1531,26 @@ assert(
   !singleByteEncodedTextResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
   "Single-byte encoded-text observation still reported font-unicode-mapping-not-implemented.",
 );
+assert(
+  delayedContentResult.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4,
+  `Delayed-content IR did not recover the content stream ref: ${JSON.stringify(delayedContentResult.ir.value?.pages[0]?.contentStreamRefs ?? null)}.`,
+);
+assert(
+  delayedContentResult.observation.value?.pages[0]?.resolutionMethod === "page-tree",
+  "Delayed-content observation did not preserve page-tree ordering.",
+);
+assert(
+  delayedContentResult.observation.value?.extractedText === "Delayed Content",
+  `Unexpected delayed-content extraction: ${JSON.stringify(delayedContentResult.observation.value?.extractedText ?? null)}.`,
+);
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
 assert(recoveredResult.admission.value?.repairState === "recovered", `Recovered repair state was ${recoveredResult.admission.value?.repairState ?? "missing"}.`);
-assert(recoveredResult.ir.value?.pages[0]?.resolutionMethod === "recovered-page-order", "Recovered IR page resolution method was not preserved.");
-assert(recoveredResult.observation.value?.pages[0]?.resolutionMethod === "recovered-page-order", "Recovered observation page resolution method was not preserved.");
+assert(recoveredResult.ir.value?.pages[0]?.resolutionMethod === "page-tree", "Recovered IR page resolution method was not preserved.");
+assert(recoveredResult.observation.value?.pages[0]?.resolutionMethod === "page-tree", "Recovered observation page resolution method was not preserved.");
 assert(
-  recoveredResult.observation.value?.knownLimits.includes("page-order-heuristic"),
-  "Recovered observation known limits did not include page-order-heuristic.",
+  !recoveredResult.observation.value?.knownLimits.includes("page-order-heuristic"),
+  "Recovered observation still reported page-order heuristics after page-tree recovery.",
 );
 assert(recoveredResult.observation.value?.extractedText === "Recovered", "Recovered observation text was not preserved.");
 assert(
