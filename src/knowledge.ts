@@ -169,7 +169,9 @@ function buildKnowledgeTables(
     }
 
     const fieldLabelCandidate =
-      observationPage === undefined ? undefined : projectFieldLabelFormTable(page, observationPage, runToBlock);
+      observationPage === undefined
+        ? undefined
+        : projectFieldLabelFormTable(page, observationPage, runToBlock, fieldValueCandidate !== undefined);
     if (
       fieldLabelCandidate &&
       !candidates.some((candidate) => projectedTableOverlap(candidate, fieldLabelCandidate))
@@ -483,6 +485,7 @@ function projectFieldLabelFormTable(
   page: PdfLayoutPage,
   observationPage: PdfObservedPage,
   runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+  hasFieldValueTable: boolean,
 ): ProjectedTableCandidate | undefined {
   const headerBlock = selectFormHeaderBlock(page.blocks);
   if (!headerBlock) {
@@ -502,10 +505,17 @@ function projectFieldLabelFormTable(
     },
   ];
   const blockIds = new Set<string>([headerBlock.id]);
+  const canReuseHeadingFieldLabels = !hasFieldValueTable;
 
   for (const run of observationPage.runs) {
     const block = runToBlock.get(run.id);
-    if (!block || block.id === headerBlock.id || block.role === "header" || block.role === "footer") {
+    if (
+      !block ||
+      block.id === headerBlock.id ||
+      block.role === "header" ||
+      (block.role === "heading" && !(canReuseHeadingFieldLabels && looksLikeCompactHeadingFieldLabel(block.text))) ||
+      (block.role === "footer" && !looksLikeFormFooterFieldCluster(block.text))
+    ) {
       continue;
     }
 
@@ -1015,6 +1025,10 @@ function normalizeStandaloneFormFieldLabel(text: string): string | undefined {
     return undefined;
   }
 
+  if (looksLikeNumberedFormPromptLabel(normalizedText)) {
+    return undefined;
+  }
+
   if (normalizedText.endsWith(":")) {
     const fieldText = stripFieldPrefix(normalizedText.slice(0, -1));
     return fieldText.length === 0 ? undefined : `${fieldText}:`;
@@ -1038,6 +1052,42 @@ function normalizeStandaloneFormFieldLabel(text: string): string | undefined {
   }
 
   return normalizedText;
+}
+
+function looksLikeNumberedFormPromptLabel(text: string): boolean {
+  return /^\d+(?:\.\d+)*[.)]\s+/u.test(text);
+}
+
+function looksLikeCompactHeadingFieldLabel(text: string): boolean {
+  const normalizedText = normalizeCellText(text);
+  if (
+    !normalizedText.endsWith(":") ||
+    normalizedText.length > 32 ||
+    looksLikeNumberedFormPromptLabel(normalizedText) ||
+    looksLikeFormMetadataText(normalizedText) ||
+    looksLikePageMarkerText(normalizedText)
+  ) {
+    return false;
+  }
+
+  const words = normalizedText
+    .slice(0, -1)
+    .split(/\s+/u)
+    .filter((word) => /\p{L}|\p{N}/u.test(word));
+  return words.length >= 1 && words.length <= 3;
+}
+
+function looksLikeFormFooterFieldCluster(text: string): boolean {
+  const lines = text
+    .split(/\n+/u)
+    .map((line) => normalizeCellText(line))
+    .filter((line) => line.length > 0);
+  if (lines.length < 2) {
+    return false;
+  }
+
+  return lines.some((line) => parseFieldLabel(line) !== undefined) &&
+    lines.some((line) => FORM_OPTION_TEXTS.has(line.toLowerCase()));
 }
 
 function looksLikeFormMetadataText(text: string): boolean {
