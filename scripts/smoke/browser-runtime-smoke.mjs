@@ -163,6 +163,24 @@ async function runBrowserSmoke(baseUrl, browserName) {
           "ET"
         ].join("\n")
       ]);
+      const sectionHeadingPdf = buildPdfWithPageContents([
+        [
+          "BT",
+          "/F1 18 Tf",
+          "1 0 0 1 72 720 Tm",
+          "(1 INTRODUCTION) Tj",
+          "1 0 0 1 72 700 Tm",
+          "(Retrieval Architecture) Tj",
+          "/F1 12 Tf",
+          "1 0 0 1 72 670 Tm",
+          "(Search engine architectures often follow a) Tj",
+          "1 0 0 1 278 670 Tm",
+          "(cascading architecture.) Tj",
+          "1 0 0 1 72 642 Tm",
+          "(Second paragraph starts here.) Tj",
+          "ET"
+        ].join("\n")
+      ]);
       const buildDelayedContentPdf = () => {
         const delayedContentStreamText = [
           "BT",
@@ -374,6 +392,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: verticalWordColumnsPdf
           }
         });
+        const sectionHeadingResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: sectionHeadingPdf
+          }
+        });
         const gridTableResult = await engine.run({
           source: {
             kind: "bytes",
@@ -418,6 +442,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
           verticalObservedMode: verticalWordColumnsResult.observation.value?.pages[0]?.runs.every((run) => run.writingMode === "vertical") === true,
           verticalLayoutMode: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.every((block) => block.writingMode === "vertical") === true,
           verticalLayoutOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") === "Layout Vertical Test",
+          sectionHeadingRole: sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.role === "heading",
+          sectionHeadingText: sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.text === "1 INTRODUCTION Retrieval Architecture",
+          sectionInlineFlow:
+            sectionHeadingResult.layout.value?.pages[0]?.blocks[1]?.text ===
+            "Search engine architectures often follow a cascading architecture.",
+          sectionParagraphBreak: sectionHeadingResult.layout.value?.pages[0]?.blocks[2]?.startsParagraph === true,
           gridTableProjected: gridTableResult.knowledge.value?.tables.length === 1,
           gridTableHeuristic: gridTableResult.knowledge.value?.tables[0]?.heuristic === "layout-grid",
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Quarter,Revenue,Profit",
@@ -443,6 +473,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
           identityHText: identityHCidFontResult.observation.value?.extractedText ?? null,
           identityVText: identityVCidFontResult.observation.value?.extractedText ?? null,
           verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null,
+          sectionHeadingText: sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.text ?? null,
+          sectionInlineFlow: sectionHeadingResult.layout.value?.pages[0]?.blocks[1]?.text ?? null,
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           delayedContentText: delayedContentResult.observation.value?.extractedText ?? null,
           singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null
