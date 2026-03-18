@@ -756,6 +756,7 @@ function observeParsedTextRun(
   let hasFontMappingGap = false;
   let textEncodingKind: PdfTextEncodingKind | undefined;
   let unicodeMappingSource: PdfUnicodeMappingSource | undefined;
+  let pendingTextAdjustment: number | undefined;
   const fontRef = parsedRun.fontResourceName ? fontRefByResourceName.get(parsedRun.fontResourceName) : undefined;
   const unicodeCMap = fontRef ? resolveUnicodeCMapForFont(fontRef, unicodeCMapByFontKey, inspection) : undefined;
   const cidCollection = fontRef ? resolveCidCollectionForFont(fontRef, inspection) : undefined;
@@ -765,8 +766,14 @@ function observeParsedTextRun(
   const writingMode = fontRef ? resolveWritingModeForFont(fontRef, inspection) : undefined;
 
   for (const operand of parsedRun.operands) {
+    if (operand.kind === "adjustment") {
+      pendingTextAdjustment = operand.value;
+      continue;
+    }
+
     if (operand.kind === "literal") {
-      text += decodePdfLiteral(operand.token);
+      text = appendObservedOperandText(text, decodePdfLiteral(operand.token), pendingTextAdjustment, parsedRun.fontSize);
+      pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
       unicodeMappingSource = unicodeMappingSource ?? "literal";
       continue;
@@ -788,7 +795,8 @@ function observeParsedTextRun(
     if (!decodedText.complete) {
       hasFontMappingGap = true;
     }
-    text += decodedText.text;
+    text = appendObservedOperandText(text, decodedText.text, pendingTextAdjustment, parsedRun.fontSize);
+    pendingTextAdjustment = undefined;
     unicodeMappingSource = unicodeMappingSource ?? decodedText.mappingSource;
   }
 
@@ -803,6 +811,60 @@ function observeParsedTextRun(
     ...(parsedRun.anchor !== undefined ? { anchor: parsedRun.anchor } : {}),
     ...(parsedRun.fontSize !== undefined ? { fontSize: parsedRun.fontSize } : {}),
   };
+}
+
+function appendObservedOperandText(
+  currentText: string,
+  operandText: string,
+  adjustment: number | undefined,
+  fontSize: number | undefined,
+): string {
+  if (operandText.length === 0) {
+    return currentText;
+  }
+
+  if (!shouldInsertSyntheticSpace(currentText, operandText, adjustment, fontSize)) {
+    return `${currentText}${operandText}`;
+  }
+
+  return `${currentText} ${operandText}`;
+}
+
+function shouldInsertSyntheticSpace(
+  currentText: string,
+  operandText: string,
+  adjustment: number | undefined,
+  fontSize: number | undefined,
+): boolean {
+  if (currentText.length === 0 || operandText.length === 0 || adjustment === undefined) {
+    return false;
+  }
+
+  const currentTail = currentText.trimEnd();
+  const operandHead = operandText.trimStart();
+  if (currentTail.length === 0 || operandHead.length === 0) {
+    return false;
+  }
+
+  const currentTailCharacter = currentTail.at(-1);
+  const operandHeadCharacter = operandHead[0];
+  if (currentTailCharacter === undefined || operandHeadCharacter === undefined) {
+    return false;
+  }
+
+  if (currentTailCharacter === "-" || currentTailCharacter === "'" || currentTailCharacter === "/" || currentTailCharacter === "(") {
+    return false;
+  }
+  if (operandHeadCharacter === "-" || operandHeadCharacter === "'" || operandHeadCharacter === ")" || operandHeadCharacter === "," || operandHeadCharacter === "." || operandHeadCharacter === ":" || operandHeadCharacter === ";" || operandHeadCharacter === "%" || operandHeadCharacter === "]") {
+    return false;
+  }
+
+  const spaceThreshold = -Math.max(120, (fontSize ?? 10) * 12);
+  if (adjustment > spaceThreshold) {
+    return false;
+  }
+
+  return /\S$/u.test(currentTail) && /^\S/u.test(operandHead);
 }
 
 function decodeHexTextOperand(
