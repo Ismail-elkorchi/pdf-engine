@@ -112,13 +112,11 @@ function buildKnowledgeTables(
   layout: PdfLayoutDocument,
   observation?: PdfObservedDocument,
 ): readonly PdfKnowledgeTable[] {
-  const tables: PdfKnowledgeTable[] = [];
   const observationPages = new Map((observation?.pages ?? []).map((page) => [page.pageNumber, page]));
   const runToBlock = buildRunToBlockIndex(layout);
-  let tableIndex = 0;
+  const candidates: ProjectedTableCandidate[] = [];
 
   for (const page of layout.pages) {
-    const candidates: ProjectedTableCandidate[] = [];
     const layoutGridCandidate = projectLayoutGridTable(page);
     if (layoutGridCandidate) {
       candidates.push(layoutGridCandidate);
@@ -133,14 +131,11 @@ function buildKnowledgeTables(
     ) {
       candidates.push(rowSequenceCandidate);
     }
-
-    for (const candidate of candidates) {
-      tableIndex += 1;
-      tables.push(finalizeProjectedTable(tableIndex, candidate));
-    }
   }
 
-  return tables;
+  return dedupeProjectedTableCandidates(candidates).map((candidate, candidateIndex) =>
+    finalizeProjectedTable(candidateIndex + 1, candidate)
+  );
 }
 
 function shouldStartNewChunk(
@@ -412,7 +407,11 @@ function clusterBlocksIntoRows(blocks: readonly AnchoredLayoutBlock[]): readonly
   for (const block of sortedBlocks) {
     const previousRow = rows.at(-1);
     const threshold = Math.max(8, (block.fontSize ?? 12) * 0.9);
-    if (previousRow && Math.abs(previousRow.centerY - block.anchor.y) <= threshold) {
+    if (
+      previousRow &&
+      Math.abs(previousRow.centerY - block.anchor.y) <= threshold &&
+      !rowHasCompetingColumn(previousRow.blocks, block)
+    ) {
       previousRow.blocks.push(block);
       previousRow.centerY =
         previousRow.blocks.reduce((sum, currentBlock) => sum + currentBlock.anchor.y, 0) / previousRow.blocks.length;
@@ -431,49 +430,144 @@ function clusterBlocksIntoRows(blocks: readonly AnchoredLayoutBlock[]): readonly
   }));
 }
 
+function rowHasCompetingColumn(
+  rowBlocks: readonly AnchoredLayoutBlock[],
+  candidateBlock: AnchoredLayoutBlock,
+): boolean {
+  const columnThreshold = Math.max(14, (candidateBlock.fontSize ?? 12) * 1.2);
+  const baselineThreshold = Math.max(4, (candidateBlock.fontSize ?? 12) * 0.35);
+
+  return rowBlocks.some((rowBlock) =>
+    Math.abs(rowBlock.anchor.x - candidateBlock.anchor.x) <= columnThreshold &&
+    Math.abs(rowBlock.anchor.y - candidateBlock.anchor.y) > baselineThreshold
+  );
+}
+
 function matchBlocksToColumns(
   blocks: readonly AnchoredLayoutBlock[],
   columnAnchors: readonly number[],
 ): readonly ProjectedTableCellSeed[] {
+  const sortedBlocks = [...blocks].sort(compareBlocksByX);
+  const assignments = assignBlocksToColumns(sortedBlocks, columnAnchors);
   const matchedCells = new Map<number, ProjectedTableCellSeed>();
 
-  for (const block of [...blocks].sort(compareBlocksByX)) {
-    const nearestColumnIndex = findNearestColumnIndex(block.anchor.x, columnAnchors);
-    if (nearestColumnIndex < 0) {
-      continue;
-    }
-
-    const columnAnchor = columnAnchors[nearestColumnIndex];
-    if (columnAnchor === undefined) {
-      continue;
-    }
-
-    const nearestDistance = Math.abs(columnAnchor - block.anchor.x);
-    const threshold = Math.max(18, (block.fontSize ?? 12) * 1.6);
-    if (nearestDistance > threshold) {
-      continue;
-    }
-
-    const existingCell = matchedCells.get(nearestColumnIndex);
+  for (const assignment of assignments) {
+    const existingCell = matchedCells.get(assignment.columnIndex);
     if (!existingCell) {
-      matchedCells.set(nearestColumnIndex, {
-        columnIndex: nearestColumnIndex,
-        text: normalizeCellText(block.text),
-        blocks: [block],
+      matchedCells.set(assignment.columnIndex, {
+        columnIndex: assignment.columnIndex,
+        text: normalizeCellText(assignment.block.text),
+        blocks: [assignment.block],
       });
       continue;
     }
 
-    matchedCells.set(nearestColumnIndex, {
-      columnIndex: nearestColumnIndex,
-      text: joinCellText(existingCell.text, block.text),
-      blocks: [...existingCell.blocks, block],
+    matchedCells.set(assignment.columnIndex, {
+      columnIndex: assignment.columnIndex,
+      text: joinCellText(existingCell.text, assignment.block.text),
+      blocks: [...existingCell.blocks, assignment.block],
     });
   }
 
   return [...matchedCells.values()]
     .filter((cell) => cell.text.length > 0)
     .sort((left, right) => left.columnIndex - right.columnIndex);
+}
+
+interface ColumnAssignment {
+  readonly columnIndex: number;
+  readonly block: AnchoredLayoutBlock;
+}
+
+function assignBlocksToColumns(
+  blocks: readonly AnchoredLayoutBlock[],
+  columnAnchors: readonly number[],
+): readonly ColumnAssignment[] {
+  if (blocks.length === 0 || columnAnchors.length === 0 || blocks.length > columnAnchors.length) {
+    return [];
+  }
+
+  const blockCount = blocks.length;
+  const columnCount = columnAnchors.length;
+  const costs = Array.from({ length: blockCount + 1 }, () =>
+    Array.from({ length: columnCount + 1 }, () => Number.POSITIVE_INFINITY),
+  );
+  const decisions = Array.from({ length: blockCount + 1 }, () =>
+    Array.from({ length: columnCount + 1 }, () => false),
+  );
+
+  for (let columnIndex = 0; columnIndex <= columnCount; columnIndex += 1) {
+    costs[0]![columnIndex] = 0;
+  }
+
+  for (let blockIndex = 1; blockIndex <= blockCount; blockIndex += 1) {
+    const remainingBlocks = blockCount - blockIndex;
+    for (let columnIndex = blockIndex; columnIndex <= columnCount - remainingBlocks; columnIndex += 1) {
+      const skipCost = costs[blockIndex]![columnIndex - 1]!;
+      let bestCost = skipCost;
+      let assignCurrentBlock = false;
+
+      const assignCost = costs[blockIndex - 1]![columnIndex - 1]!;
+      if (Number.isFinite(assignCost)) {
+        const block = blocks[blockIndex - 1]!;
+        const columnAnchor = columnAnchors[columnIndex - 1];
+        if (columnAnchor !== undefined) {
+          const totalCost = assignCost + scoreColumnAssignment(block, columnAnchor, columnIndex - 1, columnAnchors.length);
+          if (totalCost < bestCost) {
+            bestCost = totalCost;
+            assignCurrentBlock = true;
+          }
+        }
+      }
+
+      costs[blockIndex]![columnIndex] = bestCost;
+      decisions[blockIndex]![columnIndex] = assignCurrentBlock;
+    }
+  }
+
+  const assignments: ColumnAssignment[] = [];
+  let blockIndex = blockCount;
+  let columnIndex = columnCount;
+  while (blockIndex > 0 && columnIndex > 0) {
+    if (decisions[blockIndex]![columnIndex]) {
+      assignments.push({
+        columnIndex: columnIndex - 1,
+        block: blocks[blockIndex - 1]!,
+      });
+      blockIndex -= 1;
+      columnIndex -= 1;
+      continue;
+    }
+    columnIndex -= 1;
+  }
+
+  if (blockIndex > 0) {
+    return [];
+  }
+
+  return assignments.reverse();
+}
+
+function scoreColumnAssignment(
+  block: AnchoredLayoutBlock,
+  columnAnchor: number,
+  columnIndex: number,
+  columnCount: number,
+): number {
+  const text = normalizeCellText(block.text);
+  const distance = Math.abs(columnAnchor - block.anchor.x);
+
+  let penalty = distance;
+  if (looksLikeNumericCell(text)) {
+    const leadingTextColumnCount = Math.min(2, columnCount);
+    if (columnIndex < leadingTextColumnCount) {
+      penalty += 40;
+    }
+  } else if (columnIndex >= Math.max(2, columnCount - 3)) {
+    penalty += 22;
+  }
+
+  return penalty;
 }
 
 function looksLikeGridHeaderRow(blocks: readonly AnchoredLayoutBlock[]): boolean {
@@ -570,26 +664,64 @@ function projectedTableOverlap(
   return right.blockIds.some((blockId) => leftIds.has(blockId));
 }
 
+function dedupeProjectedTableCandidates(
+  candidates: readonly ProjectedTableCandidate[],
+): readonly ProjectedTableCandidate[] {
+  const bestBySignature = new Map<string, ProjectedTableCandidate>();
+
+  for (const candidate of candidates) {
+    const signature = projectedTableSignature(candidate);
+    const currentBest = bestBySignature.get(signature);
+    if (!currentBest || compareProjectedTableCandidates(candidate, currentBest) < 0) {
+      bestBySignature.set(signature, candidate);
+    }
+  }
+
+  return [...bestBySignature.values()].sort((left, right) => {
+    if (left.pageNumber !== right.pageNumber) {
+      return left.pageNumber - right.pageNumber;
+    }
+    return compareProjectedTableCandidates(left, right);
+  });
+}
+
+function projectedTableSignature(candidate: ProjectedTableCandidate): string {
+  return candidate.headers
+    .map((header) => normalizeCellText(header).toLowerCase())
+    .join("|");
+}
+
+function compareProjectedTableCandidates(
+  left: ProjectedTableCandidate,
+  right: ProjectedTableCandidate,
+): number {
+  const leftCellCount = left.rows.reduce((sum, row) => sum + row.cells.length, 0);
+  const rightCellCount = right.rows.reduce((sum, row) => sum + row.cells.length, 0);
+
+  if (left.pageNumber !== right.pageNumber) {
+    return left.pageNumber - right.pageNumber;
+  }
+
+  if (left.headers.length !== right.headers.length) {
+    return right.headers.length - left.headers.length;
+  }
+
+  if (leftCellCount !== rightCellCount) {
+    return rightCellCount - leftCellCount;
+  }
+
+  if (left.confidence !== right.confidence) {
+    return right.confidence - left.confidence;
+  }
+
+  return 0;
+}
+
 function compareBlocksByX(left: AnchoredLayoutBlock, right: AnchoredLayoutBlock): number {
   if (left.anchor.x !== right.anchor.x) {
     return left.anchor.x - right.anchor.x;
   }
   return right.anchor.y - left.anchor.y;
-}
-
-function findNearestColumnIndex(x: number, columnAnchors: readonly number[]): number {
-  let bestIndex = -1;
-  let bestDistance = Number.POSITIVE_INFINITY;
-
-  for (const [columnIndex, columnAnchor] of columnAnchors.entries()) {
-    const distance = Math.abs(columnAnchor - x);
-    if (distance < bestDistance) {
-      bestDistance = distance;
-      bestIndex = columnIndex;
-    }
-  }
-
-  return bestIndex;
 }
 
 function isHeaderRunText(text: string): boolean {

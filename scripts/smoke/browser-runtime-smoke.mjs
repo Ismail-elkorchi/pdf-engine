@@ -245,6 +245,31 @@ async function runBrowserSmoke(baseUrl, browserName) {
           "ET",
         ].join("\n"),
       ]);
+      const denseGridTablePdf = buildPdfWithPageContents([
+        [
+          "BT",
+          "/F1 12 Tf",
+          "1 0 0 1 72 720 Tm",
+          "(Code) Tj",
+          "1 0 0 1 180 720 Tm",
+          "(Label) Tj",
+          "1 0 0 1 320 720 Tm",
+          "(Amount) Tj",
+          "1 0 0 1 72 711 Tm",
+          "(100040) Tj",
+          "1 0 0 1 180 711 Tm",
+          "(Base Salary) Tj",
+          "1 0 0 1 320 711 Tm",
+          "(1820.04) Tj",
+          "1 0 0 1 72 702 Tm",
+          "(109510) Tj",
+          "1 0 0 1 180 702 Tm",
+          "(Hours 25%) Tj",
+          "1 0 0 1 320 702 Tm",
+          "(259.95) Tj",
+          "ET"
+        ].join("\n")
+      ]);
       const singleByteEncodedContentStreamText = [
         "BT",
         "/F1 12 Tf",
@@ -404,6 +429,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: gridTablePdf
           }
         });
+        const denseGridTableResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: denseGridTablePdf
+          }
+        });
         const delayedContentResult = await engine.run({
           source: {
             kind: "bytes",
@@ -458,6 +489,14 @@ async function runBrowserSmoke(baseUrl, browserName) {
             cell.citations.length > 0
           ) === true,
           gridTableLimit: gridTableResult.knowledge.value?.knownLimits.includes("table-projection-heuristic") === true,
+          denseGridProjected: denseGridTableResult.knowledge.value?.tables.length === 1,
+          denseGridHeaders: denseGridTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Code,Label,Amount",
+          denseGridFirstRow: denseGridTableResult.knowledge.value?.tables[0]?.cells.some((cell) =>
+            cell.rowIndex === 1 && cell.columnIndex === 1 && cell.text === "Base Salary"
+          ) === true,
+          denseGridSecondRow: denseGridTableResult.knowledge.value?.tables[0]?.cells.some((cell) =>
+            cell.rowIndex === 2 && cell.columnIndex === 1 && cell.text === "Hours 25%"
+          ) === true,
           delayedContentText: delayedContentResult.observation.value?.extractedText === "Delayed Content",
           delayedContentOrder: delayedContentResult.observation.value?.pages[0]?.resolutionMethod === "page-tree",
           singleByteText: singleByteEncodedResult.observation.value?.extractedText === "Encoded Text",
@@ -476,6 +515,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
           sectionHeadingText: sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.text ?? null,
           sectionInlineFlow: sectionHeadingResult.layout.value?.pages[0]?.blocks[1]?.text ?? null,
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
+          denseGridHeaders: denseGridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           delayedContentText: delayedContentResult.observation.value?.extractedText ?? null,
           singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null
         };
