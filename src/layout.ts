@@ -125,6 +125,10 @@ function shouldStartNewBlock(
   currentRun: PdfObservedTextRun,
   writingMode: PdfWritingMode | undefined,
 ): boolean {
+  if (continuesRunOnSameLine(previousRun, currentRun, writingMode)) {
+    return false;
+  }
+
   if (currentRun.startsNewLine) {
     return true;
   }
@@ -150,6 +154,22 @@ function shouldStartNewBlock(
   }
 
   return false;
+}
+
+function continuesRunOnSameLine(
+  previousRun: PdfObservedTextRun,
+  currentRun: PdfObservedTextRun,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousRun.anchor || !currentRun.anchor) {
+    return false;
+  }
+
+  const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
+  const baselineGap = Math.abs(previousRun.anchor.y - currentRun.anchor.y);
+  const forwardAdvance = currentRun.anchor.x - previousRun.anchor.x;
+
+  return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(3, fontSize * 0.35);
 }
 
 function mergeAdjacentBlocks(
@@ -252,6 +272,14 @@ function shouldMergeAdjacentBlocks(
     return false;
   }
 
+  if (isSameLineBlockContinuation(previousBlock, currentBlock, writingMode)) {
+    return true;
+  }
+
+  if (isHeadingContinuation(previousBlock, currentBlock, writingMode)) {
+    return true;
+  }
+
   if (writingMode !== "vertical" && endsWithHyphenatedContinuation(previousText) && startsWithContinuation(currentText)) {
     return true;
   }
@@ -318,6 +346,14 @@ function shouldStartParagraph(
 
   if (looksLikeHeading(previousText, previousBlock.fontSize)) {
     return true;
+  }
+
+  if (isSameLineBlockContinuation(previousBlock, currentBlock, writingMode)) {
+    return false;
+  }
+
+  if (isHeadingContinuation(previousBlock, currentBlock, writingMode)) {
+    return false;
   }
 
   if (endsWithHyphenatedContinuation(previousText) || startsWithContinuation(currentText)) {
@@ -459,11 +495,11 @@ function classifyLayoutBlock(
     };
   }
 
-  if (blockIndex === 0 && looksLikeHeading(block.text, block.fontSize)) {
+  if (looksLikeHeading(block.text, block.fontSize) || continuesHeadingBlock(blocks, blockIndex)) {
     return {
       ...block,
       role: "heading",
-      roleConfidence: 0.58,
+      roleConfidence: 0.62,
     };
   }
 
@@ -484,6 +520,19 @@ function looksLikeHeading(text: string, fontSize: number | undefined): boolean {
     return false;
   }
 
+  if (/^\d+(?:\.\d+)*\s+\p{Lu}/u.test(normalized)) {
+    return true;
+  }
+
+  if (
+    normalized.length >= 3 &&
+    normalized.length <= 48 &&
+    /\p{Lu}/u.test(normalized) &&
+    /^[\p{Lu}\p{N}][\p{Lu}\p{N}\s&/'’().:-]*$/u.test(normalized)
+  ) {
+    return true;
+  }
+
   if (fontSize !== undefined && fontSize >= 16) {
     return true;
   }
@@ -499,6 +548,79 @@ function looksLikeHeading(text: string, fontSize: number | undefined): boolean {
 
   const uppercaseRatio = letters.filter((character) => character === character.toUpperCase()).length / letters.length;
   return uppercaseRatio > 0.6 || normalized === normalized.toUpperCase();
+}
+
+function isSameLineBlockContinuation(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  const baselineGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
+  const forwardAdvance = currentBlock.anchor.x - previousBlock.anchor.x;
+
+  return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(6, fontSize * 0.55);
+}
+
+function isHeadingContinuation(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  const previousText = normalizeBlockText(previousBlock.text);
+  const currentText = normalizeBlockText(currentBlock.text);
+  const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
+  const currentFontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
+  const horizontalShift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
+
+  if (Math.abs(previousFontSize - currentFontSize) > 1) {
+    return false;
+  }
+
+  if (verticalGap > Math.max(26, currentFontSize * 1.8)) {
+    return false;
+  }
+
+  if (horizontalShift > Math.max(80, currentFontSize * 6)) {
+    return false;
+  }
+
+  if (/[.!?]$/.test(previousText) || /[.!?]$/.test(currentText)) {
+    return false;
+  }
+
+  if (previousText.length > 80 || currentText.length > 80) {
+    return false;
+  }
+
+  return looksLikeHeading(previousText, previousBlock.fontSize) && currentText.length > 0;
+}
+
+function continuesHeadingBlock(
+  blocks: readonly PdfLayoutBlock[],
+  blockIndex: number,
+): boolean {
+  if (blockIndex === 0) {
+    return false;
+  }
+
+  const previousBlock = blocks[blockIndex - 1];
+  const currentBlock = blocks[blockIndex];
+  if (!previousBlock || !currentBlock) {
+    return false;
+  }
+
+  return isHeadingContinuation(previousBlock, currentBlock, currentBlock.writingMode) &&
+    looksLikeHeading(previousBlock.text, previousBlock.fontSize);
 }
 
 function dedupeKnownLimits(values: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {

@@ -425,6 +425,24 @@ const scientificTextFlowPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const sectionHeadingPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(1 INTRODUCTION) Tj",
+    "1 0 0 1 72 700 Tm",
+    "(Retrieval Architecture) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 670 Tm",
+    "(Search engine architectures often follow a) Tj",
+    "1 0 0 1 278 670 Tm",
+    "(cascading architecture.) Tj",
+    "1 0 0 1 72 642 Tm",
+    "(Second paragraph starts here.) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const regulatoryTextRecoveryPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1037,6 +1055,13 @@ const scientificTextFlowResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const sectionHeadingResult = await engine.run({
+  source: {
+    bytes: encodeText(sectionHeadingPdf),
+    fileName: "section-heading.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const regulatoryTextRecoveryResult = await engine.run({
   source: {
     bytes: encodeText(regulatoryTextRecoveryPdf),
@@ -1200,6 +1225,23 @@ assert(
   scientificTextFlowResult.knowledge.value?.chunks[0]?.text ===
     "Dense retrieval, which describes the use of contextualised language models such as BERT, is represented here.\n\nSecond paragraph starts here.",
   `Scientific text-flow knowledge text was ${JSON.stringify(scientificTextFlowResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
+);
+assert(
+  sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.text === "1 INTRODUCTION Retrieval Architecture",
+  `Section-heading layout text was ${JSON.stringify(sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.text ?? null)}.`,
+);
+assert(
+  sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.role === "heading",
+  `Section-heading layout role was ${sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.role ?? "missing"}.`,
+);
+assert(
+  sectionHeadingResult.layout.value?.pages[0]?.blocks[1]?.text ===
+    "Search engine architectures often follow a cascading architecture.",
+  `Section-heading first body block was ${JSON.stringify(sectionHeadingResult.layout.value?.pages[0]?.blocks[1]?.text ?? null)}.`,
+);
+assert(
+  sectionHeadingResult.layout.value?.pages[0]?.blocks[2]?.startsParagraph === true,
+  "Section-heading second body block was not marked as a paragraph start.",
 );
 assert(
   regulatoryTextRecoveryResult.observation.value?.extractedText === "Introduction Readable text",
