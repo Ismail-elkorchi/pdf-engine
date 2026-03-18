@@ -119,6 +119,8 @@ interface PdfTextDecodeResult {
   readonly text: string;
   readonly complete: boolean;
   readonly mappingSource: PdfUnicodeMappingSource;
+  readonly sourceUnitCount: number;
+  readonly mappedUnitCount: number;
 }
 
 /**
@@ -804,6 +806,7 @@ function observeParsedTextRun(
     (signal) => signal.kind === "hidden-text" && signal.detected,
   );
   const fontEncodingSpacingProfile = resolveFontEncodingSpacingProfile(parsedRun);
+  const shouldSuppressCompactSpacing = !hasHiddenTextFeature;
 
   for (const operand of parsedRun.operands) {
     if (operand.kind === "adjustment") {
@@ -844,12 +847,13 @@ function observeParsedTextRun(
             pendingTextAdjustment,
             parsedRun.fontSize,
             decodedLiteralText ? fontEncodingSpacingProfile : "default",
+            shouldSuppressCompactSpacing,
           );
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
           unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
           hasLiteralFontEncodingGap = hasLiteralFontEncodingGap ||
-            (decodedLiteralText?.complete === false && shouldReportTextMappingGap(parsedRun));
+            shouldReportMaterialDecodeGap(decodedLiteralText, parsedRun);
           continue;
         }
 
@@ -867,12 +871,13 @@ function observeParsedTextRun(
         pendingTextAdjustment,
         parsedRun.fontSize,
         decodedLiteralText ? fontEncodingSpacingProfile : "default",
+        shouldSuppressCompactSpacing,
       );
       pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
       unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
       hasLiteralFontEncodingGap = hasLiteralFontEncodingGap ||
-        (decodedLiteralText?.complete === false && shouldReportTextMappingGap(parsedRun));
+        shouldReportMaterialDecodeGap(decodedLiteralText, parsedRun);
       continue;
     }
 
@@ -890,7 +895,7 @@ function observeParsedTextRun(
       continue;
     }
 
-    if (!decodedText.complete && shouldReportTextMappingGap(parsedRun)) {
+    if (shouldReportMaterialDecodeGap(decodedText, parsedRun)) {
       hasFontMappingGap = true;
     }
     text = appendObservedOperandText(
@@ -899,6 +904,7 @@ function observeParsedTextRun(
       pendingTextAdjustment,
       parsedRun.fontSize,
       decodedText.mappingSource === "font-encoding" ? fontEncodingSpacingProfile : "default",
+      shouldSuppressCompactSpacing,
     );
     pendingTextAdjustment = undefined;
     unicodeMappingSource = unicodeMappingSource ?? decodedText.mappingSource;
@@ -925,12 +931,20 @@ function appendObservedOperandText(
   adjustment: number | undefined,
   fontSize: number | undefined,
   spacingProfile: "default" | "font-encoding-compact" | "font-encoding-wide" = "default",
+  shouldSuppressCompactWordSplit = true,
 ): string {
   if (operandText.length === 0) {
     return currentText;
   }
 
-  if (!shouldInsertSyntheticSpace(currentText, operandText, adjustment, fontSize, spacingProfile)) {
+  if (!shouldInsertSyntheticSpace(
+    currentText,
+    operandText,
+    adjustment,
+    fontSize,
+    spacingProfile,
+    shouldSuppressCompactWordSplit,
+  )) {
     return `${currentText}${operandText}`;
   }
 
@@ -943,6 +957,7 @@ function shouldInsertSyntheticSpace(
   adjustment: number | undefined,
   fontSize: number | undefined,
   spacingProfile: "default" | "font-encoding-compact" | "font-encoding-wide",
+  shouldSuppressCompactWordSplit: boolean,
 ): boolean {
   if (currentText.length === 0 || operandText.length === 0 || adjustment === undefined) {
     return false;
@@ -964,6 +979,14 @@ function shouldInsertSyntheticSpace(
     return false;
   }
   if (operandHeadCharacter === "-" || operandHeadCharacter === "'" || operandHeadCharacter === ")" || operandHeadCharacter === "," || operandHeadCharacter === "." || operandHeadCharacter === ":" || operandHeadCharacter === ";" || operandHeadCharacter === "%" || operandHeadCharacter === "]") {
+    return false;
+  }
+
+  if (
+    shouldSuppressCompactWordSplit &&
+    spacingProfile === "font-encoding-compact" &&
+    shouldSuppressCompactFontEncodingWordSplit(currentTail, operandHead, fontSize)
+  ) {
     return false;
   }
 
@@ -989,6 +1012,58 @@ function resolveFontEncodingSpacingProfile(
     }
   }
   return minimumAdjustment <= -100 ? "font-encoding-wide" : "font-encoding-compact";
+}
+
+const COMPACT_FONT_ENCODING_WORD_BOUNDARIES = new Set([
+  "a",
+  "an",
+  "and",
+  "as",
+  "at",
+  "be",
+  "by",
+  "for",
+  "in",
+  "of",
+  "on",
+  "or",
+  "the",
+  "to",
+]);
+
+function shouldSuppressCompactFontEncodingWordSplit(
+  currentTail: string,
+  operandHead: string,
+  fontSize: number | undefined,
+): boolean {
+  if ((fontSize ?? 10) > 4) {
+    return false;
+  }
+
+  const currentTailWord = currentTail.match(/([\p{L}]+)$/u)?.[1];
+  const operandHeadWord = operandHead.match(/^([\p{L}]+)/u)?.[1];
+  if (!currentTailWord || !operandHeadWord) {
+    return false;
+  }
+
+  const currentTailCharacter = currentTailWord.at(-1);
+  const operandHeadCharacter = operandHeadWord[0];
+  if (!currentTailCharacter || !operandHeadCharacter) {
+    return false;
+  }
+
+  if (!/\p{Ll}/u.test(currentTailCharacter) || !/\p{Ll}/u.test(operandHeadCharacter)) {
+    return false;
+  }
+
+  if (
+    COMPACT_FONT_ENCODING_WORD_BOUNDARIES.has(currentTailWord.toLowerCase()) ||
+    COMPACT_FONT_ENCODING_WORD_BOUNDARIES.has(operandHeadWord.toLowerCase())
+  ) {
+    return false;
+  }
+
+  return currentTailWord.length <= 3 || operandHeadWord.length <= 3;
 }
 
 function resolvePreferredActualText(actualText: string | undefined, observedText: string): string | undefined {
@@ -1059,6 +1134,31 @@ function shouldReportTextMappingGap(
   return parsedRun.markedContentKind !== "artifact";
 }
 
+function shouldReportMaterialDecodeGap(
+  decodedText:
+    | {
+      readonly complete: boolean;
+      readonly sourceUnitCount: number;
+      readonly mappedUnitCount: number;
+    }
+    | undefined,
+  parsedRun: ReturnType<typeof parseTextOperatorRuns>[number],
+): boolean {
+  if (!decodedText || decodedText.complete || !shouldReportTextMappingGap(parsedRun)) {
+    return false;
+  }
+
+  if (decodedText.mappedUnitCount === 0 || decodedText.sourceUnitCount === 0) {
+    return true;
+  }
+
+  if (decodedText.mappedUnitCount < 4) {
+    return true;
+  }
+
+  return decodedText.mappedUnitCount / decodedText.sourceUnitCount < 0.9;
+}
+
 function decodeHexTextOperand(
   hexToken: string,
   textEncodingKind: PdfTextEncodingKind,
@@ -1073,6 +1173,8 @@ function decodeHexTextOperand(
       text: decodedText.text,
       complete: decodedText.complete,
       mappingSource: "tounicode-cmap",
+      sourceUnitCount: decodedText.sourceUnitCount,
+      mappedUnitCount: decodedText.mappedUnitCount,
     };
   }
 
@@ -1086,6 +1188,8 @@ function decodeHexTextOperand(
       text: decodedText.text,
       complete: decodedText.complete,
       mappingSource: "font-encoding",
+      sourceUnitCount: decodedText.sourceUnitCount,
+      mappedUnitCount: decodedText.mappedUnitCount,
     };
   }
 
@@ -1095,6 +1199,8 @@ function decodeHexTextOperand(
       text: collectionDecodedText.text,
       complete: collectionDecodedText.complete,
       mappingSource: "cid-collection-ucs2",
+      sourceUnitCount: collectionDecodedText.sourceUnitCount,
+      mappedUnitCount: collectionDecodedText.mappedUnitCount,
     };
   }
 
@@ -1449,13 +1555,18 @@ function decodePdfCidHexTextWithEmbeddedFont(
       text: "",
       complete: false,
       mappingSource: "embedded-font-cmap",
+      sourceUnitCount: 0,
+      mappedUnitCount: 0,
     };
   }
 
   let text = "";
   let complete = true;
+  let sourceUnitCount = 0;
+  let mappedUnitCount = 0;
 
   for (let offset = 0; offset < normalizedHex.length; offset += 4) {
+    sourceUnitCount += 1;
     const cid = Number.parseInt(normalizedHex.slice(offset, offset + 4), 16);
     const glyphId = resolveGlyphIdForCid(cid, embeddedFontMapping);
     const glyphText = glyphId === undefined ? undefined : embeddedFontMapping.glyphUnicodeByGlyphId.get(glyphId);
@@ -1464,12 +1575,15 @@ function decodePdfCidHexTextWithEmbeddedFont(
       continue;
     }
     text += glyphText;
+    mappedUnitCount += 1;
   }
 
   return {
     text,
     complete,
     mappingSource: "embedded-font-cmap",
+    sourceUnitCount,
+    mappedUnitCount,
   };
 }
 

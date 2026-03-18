@@ -923,6 +923,84 @@ const extendedNamedGlyphPdfTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+const partialSingleByteEncodedTextContentStreamText = [
+  "BT",
+  "/F1 12 Tf",
+  "<0102030405060708090A0B0C> Tj",
+  "ET",
+].join("\n");
+const partialSingleByteEncodedTextPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(partialSingleByteEncodedTextContentStreamText).byteLength)} >>`,
+  "stream",
+  partialSingleByteEncodedTextContentStreamText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+  "endobj",
+  "6 0 obj",
+  "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /A /l /m /o /s /t /space /d /o /n /e /.notdef] >>",
+  "endobj",
+  "xref",
+  "0 7",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 7 >>",
+  "startxref",
+  "__PARTIAL_SINGLE_BYTE_ENCODED_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
+const compactSpacingEncodedTextContentStreamText = [
+  "BT",
+  "/F1 12 Tf",
+  "[<010203> -20 <0405> -120 <060708090A>] TJ",
+  "ET",
+].join("\n");
+const compactSpacingEncodedTextPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(compactSpacingEncodedTextContentStreamText).byteLength)} >>`,
+  "stream",
+  compactSpacingEncodedTextContentStreamText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+  "endobj",
+  "6 0 obj",
+  "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /H 2 /e 3 /l 4 /l 5 /o 6 /W 7 /o 8 /r 9 /l 10 /d] >>",
+  "endobj",
+  "xref",
+  "0 7",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 7 >>",
+  "startxref",
+  "__COMPACT_SPACING_ENCODED_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
 const toUnicodeCMapFlateBytes = decodeBase64(
   "eJxdkM1qxCAQx+8+xRy3h0UT2qUHCZSUQA79oGkfwOgkFRoVYw55+0502UIPOr9h5j9fvO2fe2cT8Pfo9YAJJutMxNVvUSOMOFvHqhqM1enq5V8vKjBO4mFfEy69mzxICfyDgmuKO5yejB/xDvhbNBitm+H01Q7kD1sIP7igSyCgacDgRIVeVHhVCwLPsnNvKG7TfibNX8bnHhDq7FdlGO0NrkFpjMrNyKQQDciuaxg68y92KYpx0t8qMnn/SJlCkGHy8pCZDHFbuD24K0z1ZC0ykyGuCle5z7Xi0fE4ym0VvcVIW+TL5fGPwa3D23GDD4cqv18KDXoH",
 );
@@ -978,6 +1056,10 @@ const ligatureEncodedTextStartXrefOffset = ligatureEncodedTextPdfTemplate.indexO
 assert(ligatureEncodedTextStartXrefOffset >= 0, "Ligature encoded-text PDF did not contain an xref section.");
 const extendedNamedGlyphStartXrefOffset = extendedNamedGlyphPdfTemplate.indexOf("xref\n0 7");
 assert(extendedNamedGlyphStartXrefOffset >= 0, "Extended named-glyph PDF did not contain an xref section.");
+const partialSingleByteEncodedTextStartXrefOffset = partialSingleByteEncodedTextPdfTemplate.indexOf("xref\n0 7");
+assert(partialSingleByteEncodedTextStartXrefOffset >= 0, "Partial single-byte encoded-text PDF did not contain an xref section.");
+const compactSpacingEncodedTextStartXrefOffset = compactSpacingEncodedTextPdfTemplate.indexOf("xref\n0 7");
+assert(compactSpacingEncodedTextStartXrefOffset >= 0, "Compact-spacing encoded-text PDF did not contain an xref section.");
 
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
 const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
@@ -994,6 +1076,14 @@ const ligatureEncodedTextPdf = ligatureEncodedTextPdfTemplate.replace(
 const extendedNamedGlyphPdf = extendedNamedGlyphPdfTemplate.replace(
   "__EXTENDED_NAMED_GLYPH_STARTXREF__",
   String(extendedNamedGlyphStartXrefOffset),
+);
+const partialSingleByteEncodedTextPdf = partialSingleByteEncodedTextPdfTemplate.replace(
+  "__PARTIAL_SINGLE_BYTE_ENCODED_STARTXREF__",
+  String(partialSingleByteEncodedTextStartXrefOffset),
+);
+const compactSpacingEncodedTextPdf = compactSpacingEncodedTextPdfTemplate.replace(
+  "__COMPACT_SPACING_ENCODED_STARTXREF__",
+  String(compactSpacingEncodedTextStartXrefOffset),
 );
 const flateXrefOffset = encodeText(flatePdfPrefix).byteLength + flateStreamBytes.byteLength + encodeText(flatePdfMiddle).byteLength;
 const flatePdfSuffix = [
@@ -1273,6 +1363,20 @@ const extendedNamedGlyphResult = await engine.run({
   source: {
     bytes: encodeText(extendedNamedGlyphPdf),
     fileName: "extended-named-glyphs.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const partialSingleByteEncodedTextResult = await engine.run({
+  source: {
+    bytes: encodeText(partialSingleByteEncodedTextPdf),
+    fileName: "partial-single-byte-encoded-text.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const compactSpacingEncodedTextResult = await engine.run({
+  source: {
+    bytes: encodeText(compactSpacingEncodedTextPdf),
+    fileName: "compact-spacing-encoded-text.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2208,6 +2312,30 @@ assert(
 assert(
   !extendedNamedGlyphResult.observation.value?.knownLimits.includes("literal-font-encoding-not-implemented"),
   "Extended named-glyph observation still reported literal-font-encoding-not-implemented.",
+);
+assert(
+  partialSingleByteEncodedTextResult.observation.status === "completed",
+  `Partial single-byte encoded-text observation status was ${partialSingleByteEncodedTextResult.observation.status}.`,
+);
+assert(
+  partialSingleByteEncodedTextResult.observation.value?.extractedText === "Almost done",
+  `Unexpected partial single-byte encoded-text extraction: ${JSON.stringify(partialSingleByteEncodedTextResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  !partialSingleByteEncodedTextResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "Partial single-byte encoded-text observation still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  compactSpacingEncodedTextResult.observation.status === "completed",
+  `Compact-spacing encoded-text observation status was ${compactSpacingEncodedTextResult.observation.status}.`,
+);
+assert(
+  compactSpacingEncodedTextResult.observation.value?.extractedText === "Hello World",
+  `Unexpected compact-spacing encoded-text extraction: ${JSON.stringify(compactSpacingEncodedTextResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  !compactSpacingEncodedTextResult.observation.value?.knownLimits.includes("literal-font-encoding-not-implemented"),
+  "Compact-spacing encoded-text observation still reported literal-font-encoding-not-implemented.",
 );
 assert(
   delayedContentResult.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4,

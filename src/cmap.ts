@@ -25,6 +25,8 @@ export interface PdfUnicodeCMap {
 export interface PdfUnicodeDecodeResult {
   readonly text: string;
   readonly complete: boolean;
+  readonly sourceUnitCount: number;
+  readonly mappedUnitCount: number;
 }
 
 export function parsePdfUnicodeCMap(text: string): PdfUnicodeCMap | undefined {
@@ -50,11 +52,12 @@ export function decodePdfHexTextWithUnicodeCMap(
   const normalizedHex = normalizePdfHexToken(hexToken);
   const codeLengths = collectCandidateCodeLengths(unicodeCMap);
   if (normalizedHex.length === 0 || codeLengths.length === 0) {
-    return { text: "", complete: false };
+    return { text: "", complete: false, sourceUnitCount: 0, mappedUnitCount: 0 };
   }
 
   let offset = 0;
   let text = "";
+  let mappedUnitCount = 0;
 
   while (offset < normalizedHex.length) {
     let matched = false;
@@ -77,16 +80,27 @@ export function decodePdfHexTextWithUnicodeCMap(
 
       text += mappedText;
       offset = nextOffset;
+      mappedUnitCount += 1;
       matched = true;
       break;
     }
 
     if (!matched) {
-      return { text, complete: false };
+      return {
+        text,
+        complete: false,
+        sourceUnitCount: mappedUnitCount + 1,
+        mappedUnitCount,
+      };
     }
   }
 
-  return { text, complete: true };
+  return {
+    text,
+    complete: true,
+    sourceUnitCount: mappedUnitCount,
+    mappedUnitCount,
+  };
 }
 
 function parseCodeSpaceRanges(text: string): PdfCodeSpaceRange[] {

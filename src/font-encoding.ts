@@ -5,6 +5,8 @@ export interface PdfSingleByteFontEncoding {
 export interface PdfSingleByteDecodeResult {
   readonly text: string;
   readonly complete: boolean;
+  readonly sourceUnitCount: number;
+  readonly mappedUnitCount: number;
 }
 
 const DIGIT_NAMES = new Map([
@@ -273,13 +275,16 @@ export function decodePdfSingleByteHexText(
 ): PdfSingleByteDecodeResult {
   const normalizedHex = normalizePdfHexToken(hexToken);
   if (normalizedHex.length === 0) {
-    return { text: "", complete: true };
+    return { text: "", complete: true, sourceUnitCount: 0, mappedUnitCount: 0 };
   }
 
   let text = "";
   let complete = true;
+  let sourceUnitCount = 0;
+  let mappedUnitCount = 0;
 
   for (let offset = 0; offset < normalizedHex.length; offset += 2) {
+    sourceUnitCount += 1;
     const byteValue = Number.parseInt(normalizedHex.slice(offset, offset + 2), 16);
     const decodedCharacter = encoding.unicodeByCharCode[byteValue];
     if (decodedCharacter === undefined) {
@@ -287,9 +292,10 @@ export function decodePdfSingleByteHexText(
       continue;
     }
     text += decodedCharacter;
+    mappedUnitCount += 1;
   }
 
-  return { text, complete };
+  return { text, complete, sourceUnitCount, mappedUnitCount };
 }
 
 export function decodePdfSingleByteLiteralText(
@@ -297,14 +303,17 @@ export function decodePdfSingleByteLiteralText(
   encoding: PdfSingleByteFontEncoding,
 ): PdfSingleByteDecodeResult {
   if (text.length === 0) {
-    return { text: "", complete: true };
+    return { text: "", complete: true, sourceUnitCount: 0, mappedUnitCount: 0 };
   }
 
   let decodedText = "";
   let complete = true;
+  let sourceUnitCount = 0;
+  let mappedUnitCount = 0;
 
   for (const character of text) {
     const byteValue = character.codePointAt(0);
+    sourceUnitCount += 1;
     if (byteValue === undefined || byteValue > 0xff) {
       complete = false;
       continue;
@@ -317,9 +326,10 @@ export function decodePdfSingleByteLiteralText(
     }
 
     decodedText += decodedCharacter;
+    mappedUnitCount += 1;
   }
 
-  return { text: decodedText, complete };
+  return { text: decodedText, complete, sourceUnitCount, mappedUnitCount };
 }
 
 function buildBaseUnicodeByCharCode(
