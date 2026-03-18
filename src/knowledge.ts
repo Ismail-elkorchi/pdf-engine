@@ -24,7 +24,10 @@ const ROW_SEQUENCE_MIN_HEADERS = 3;
 const ROW_SEQUENCE_MIN_ROWS = 2;
 const FIELD_VALUE_MIN_ROWS = 2;
 const FIELD_LABEL_MIN_ROWS = 4;
+const FIELD_LABEL_MAX_X_SPAN = 240;
 const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
+const CONTRACT_AWARD_HEADERS = ["Serial No.", "Contract Description", "Contractor", "Amount", "Remarks"] as const;
+const CONTRACT_AWARD_MIN_ROWS = 2;
 
 interface ProjectedTableCellSeed {
   readonly columnIndex: number;
@@ -144,6 +147,17 @@ function buildKnowledgeTables(
       !candidates.some((candidate) => projectedTableOverlap(candidate, stackedHeaderCandidate))
     ) {
       candidates.push(stackedHeaderCandidate);
+    }
+
+    const contractAwardCandidate =
+      observationPage === undefined
+        ? undefined
+        : projectContractAwardSequenceTable(page, observationPage, runToBlock);
+    if (
+      contractAwardCandidate &&
+      !candidates.some((candidate) => projectedTableOverlap(candidate, contractAwardCandidate))
+    ) {
+      candidates.push(contractAwardCandidate);
     }
 
     const fieldValueCandidate = projectFieldValueFormTable(page);
@@ -517,6 +531,19 @@ function projectFieldLabelFormTable(
     return undefined;
   }
 
+  const labelAnchors = rows
+    .slice(1)
+    .flatMap((row) => row.cells)
+    .flatMap((cell) => cell.blocks)
+    .filter((block): block is AnchoredLayoutBlock => block.anchor !== undefined)
+    .map((block) => block.anchor.x);
+  if (labelAnchors.length > 0) {
+    const xSpan = Math.max(...labelAnchors) - Math.min(...labelAnchors);
+    if (xSpan > FIELD_LABEL_MAX_X_SPAN) {
+      return undefined;
+    }
+  }
+
   const headerText = normalizeCellText(headerBlock.text);
   return {
     pageNumber: page.pageNumber,
@@ -524,6 +551,61 @@ function projectFieldLabelFormTable(
     headers: [headerText],
     blockIds: [...blockIds],
     confidence: Number(Math.min(0.76, 0.48 + (rows.length - 1) * 0.03).toFixed(2)),
+    rows,
+  };
+}
+
+function projectContractAwardSequenceTable(
+  layoutPage: PdfLayoutPage,
+  observationPage: PdfObservedPage,
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): ProjectedTableCandidate | undefined {
+  const headerEndIndex = findContractAwardHeaderEndIndex(observationPage.runs);
+  if (headerEndIndex === undefined) {
+    return undefined;
+  }
+
+  const bodyRows = collectContractAwardRows(observationPage.runs.slice(headerEndIndex + 1));
+  if (bodyRows.length < CONTRACT_AWARD_MIN_ROWS) {
+    return undefined;
+  }
+
+  const headerBlocks = toRunBlocks(observationPage.runs.slice(0, headerEndIndex + 1), runToBlock);
+  const rows: ProjectedTableRowSeed[] = [
+    {
+      cells: CONTRACT_AWARD_HEADERS.map((header, columnIndex) => ({
+        columnIndex,
+        text: header,
+        blocks: headerBlocks,
+      })),
+    },
+  ];
+  const blockIds = new Set<string>(headerBlocks.map((block) => block.id));
+
+  for (const bodyRow of bodyRows) {
+    const projectedRow = projectContractAwardRow(bodyRow, runToBlock);
+    if (!projectedRow) {
+      continue;
+    }
+
+    rows.push(projectedRow);
+    for (const cell of projectedRow.cells) {
+      for (const block of cell.blocks) {
+        blockIds.add(block.id);
+      }
+    }
+  }
+
+  if (rows.length - 1 < CONTRACT_AWARD_MIN_ROWS) {
+    return undefined;
+  }
+
+  return {
+    pageNumber: layoutPage.pageNumber,
+    heuristic: "contract-award-sequence",
+    headers: [...CONTRACT_AWARD_HEADERS],
+    blockIds: [...blockIds],
+    confidence: Number(Math.min(0.81, 0.54 + (rows.length - 1) * 0.03).toFixed(2)),
     rows,
   };
 }
@@ -565,6 +647,128 @@ function findBestHeaderRunGroup(
   }
 
   return bestGroup;
+}
+
+function findContractAwardHeaderEndIndex(runs: readonly PdfObservedTextRun[]): number | undefined {
+  const headerWindow = runs.slice(0, 32).map((run) => normalizeCellText(run.text)).join(" ").toLowerCase();
+  if (
+    !headerWindow.includes("serial no.") ||
+    !headerWindow.includes("contract description") ||
+    !headerWindow.includes("remarks")
+  ) {
+    return undefined;
+  }
+
+  const firstRowIndex = runs.findIndex((run, index) =>
+    index > 0 && looksLikeContractAwardRowStart(normalizeCellText(run.text))
+  );
+  return firstRowIndex <= 0 ? undefined : firstRowIndex - 1;
+}
+
+function collectContractAwardRows(
+  runs: readonly PdfObservedTextRun[],
+): readonly (readonly PdfObservedTextRun[])[] {
+  const rows: PdfObservedTextRun[][] = [];
+  let currentRow: PdfObservedTextRun[] = [];
+
+  for (const run of runs) {
+    const text = normalizeCellText(run.text);
+    if (text.length === 0) {
+      continue;
+    }
+
+    if (looksLikeContractAwardRowStart(text)) {
+      if (currentRow.length > 0) {
+        rows.push(currentRow);
+      }
+      currentRow = [run];
+      continue;
+    }
+
+    if (currentRow.length === 0) {
+      continue;
+    }
+
+    currentRow.push(run);
+  }
+
+  if (currentRow.length > 0) {
+    rows.push(currentRow);
+  }
+
+  return rows.filter((row) => row.length >= 4);
+}
+
+function projectContractAwardRow(
+  rowRuns: readonly PdfObservedTextRun[],
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): ProjectedTableRowSeed | undefined {
+  const rowStartText = normalizeCellText(rowRuns[0]?.text ?? "");
+  const rowStartParts = rowStartText.split(/\s+/u);
+  const serialNumber = rowStartParts[0];
+  const descriptionStart = rowStartParts.slice(1).join(" ");
+  if (!serialNumber || !/^\d{1,3}$/u.test(serialNumber) || descriptionStart.length === 0) {
+    return undefined;
+  }
+
+  const descriptionParts = [descriptionStart];
+  let runIndex = 1;
+  while (runIndex < rowRuns.length) {
+    const text = normalizeCellText(rowRuns[runIndex]?.text ?? "");
+    if (text.length === 0) {
+      runIndex += 1;
+      continue;
+    }
+
+    if (looksLikeContractCodeRun(text) || looksLikeAwardAmountRun(text)) {
+      break;
+    }
+
+    descriptionParts.push(text);
+    runIndex += 1;
+  }
+
+  while (runIndex < rowRuns.length && looksLikeContractCodeRun(normalizeCellText(rowRuns[runIndex]?.text ?? ""))) {
+    runIndex += 1;
+  }
+
+  const contractorRuns: PdfObservedTextRun[] = [];
+  while (runIndex < rowRuns.length) {
+    const text = normalizeCellText(rowRuns[runIndex]?.text ?? "");
+    if (text.length === 0) {
+      runIndex += 1;
+      continue;
+    }
+
+    if (looksLikeAwardAmountRun(text) || looksLikeContractAwardRemark(text)) {
+      break;
+    }
+
+    contractorRuns.push(rowRuns[runIndex] as PdfObservedTextRun);
+    runIndex += 1;
+  }
+
+  const trailerText = rowRuns.slice(runIndex).map((run) => normalizeCellText(run.text)).join(" ");
+  const descriptionText = normalizeCellText(descriptionParts.join(" "));
+  const contractorText = normalizeContractAwardContractor(
+    contractorRuns.map((run) => normalizeCellText(run.text)).join(" "),
+  );
+  const amountText = extractContractAwardAmount(trailerText);
+  const remarkText = extractContractAwardRemark(trailerText);
+  if (!descriptionText || !contractorText || !amountText || !remarkText) {
+    return undefined;
+  }
+
+  const rowBlocks = toRunBlocks(rowRuns, runToBlock);
+  return {
+    cells: [
+      { columnIndex: 0, text: serialNumber, blocks: rowBlocks },
+      { columnIndex: 1, text: descriptionText, blocks: rowBlocks },
+      { columnIndex: 2, text: contractorText, blocks: rowBlocks },
+      { columnIndex: 3, text: amountText, blocks: rowBlocks },
+      { columnIndex: 4, text: remarkText, blocks: rowBlocks },
+    ],
+  };
 }
 
 function collectSequenceDataRuns(
@@ -765,8 +969,10 @@ function selectFormHeaderBlock(blocks: readonly PdfLayoutBlock[]): PdfLayoutBloc
     }
 
     if (
+      looksLikeNumericCell(normalizedText) ||
       looksLikePageMarkerText(normalizedText) ||
       looksLikeFormMetadataText(normalizedText) ||
+      normalizedText.split(/\s+/u).filter((word) => /\p{L}/u.test(word)).length < 2 ||
       ((block.fontSize ?? 0) < 18 && normalizeStandaloneFormFieldLabel(normalizedText) !== undefined)
     ) {
       return false;
@@ -865,6 +1071,19 @@ function looksLikeSentenceCaseFormFieldLabel(words: readonly string[]): boolean 
 function startsWithUppercaseLetter(word: string): boolean {
   const normalized = word.replaceAll(/^[("'[]+|[)"'\].,:;!?]+$/gu, "");
   return /^[\p{Lu}\p{Lt}]/u.test(normalized);
+}
+
+function normalizeContractAwardContractor(text: string): string {
+  let normalizedText = normalizeCellText(text).replace(/^Shopping\s+/u, "");
+  normalizedText = normalizedText.replace(/\b(?:P\.?\s?O\.?\s?Box|PR Box|Box)\b.*$/iu, "").trim();
+  const companyMatch = normalizedText.match(
+    /^(.+?\b(?:Limited|Ltd|Ltd\.|Company|Companies|Enterprise|Enterprises|Centre|Services|Systems|Press)\b)/u,
+  );
+  if (companyMatch?.[1]) {
+    return companyMatch[1];
+  }
+
+  return normalizedText;
 }
 
 function createFieldValueRow(
@@ -1199,9 +1418,9 @@ function dedupeProjectedTableCandidates(
 }
 
 function projectedTableSignature(candidate: ProjectedTableCandidate): string {
-  return candidate.headers
+  return `${candidate.pageNumber}:${candidate.headers
     .map((header) => normalizeCellText(header).toLowerCase())
-    .join("|");
+    .join("|")}`;
 }
 
 function compareProjectedTableCandidates(
@@ -1240,6 +1459,32 @@ function compareBlocksByX(left: AnchoredLayoutBlock, right: AnchoredLayoutBlock)
 function isHeaderRunText(text: string): boolean {
   const normalized = normalizeCellText(text);
   return normalized.length > 0 && normalized.length <= 24 && !normalized.includes(":") && !looksLikeNumericCell(normalized);
+}
+
+function looksLikeContractAwardRowStart(text: string): boolean {
+  return /^\d{1,3}\s+\S/u.test(text);
+}
+
+function looksLikeContractCodeRun(text: string): boolean {
+  return /^(?:[A-Z]{2,}\/){2,}[A-Z0-9/‐-]+$/u.test(text) || /^[‐-][A-Z0-9/\s]+$/u.test(text);
+}
+
+function looksLikeAwardAmountRun(text: string): boolean {
+  return /\d[\d,.]*\s*(?:GHS|GHȻ|GBP|USD|EUR|£)/u.test(text);
+}
+
+function extractContractAwardAmount(text: string): string | undefined {
+  const match = text.match(/\d[\d,.]*\s*(?:GHS|GHȻ|GBP|USD|EUR|£)/u);
+  return match?.[0];
+}
+
+function extractContractAwardRemark(text: string): string | undefined {
+  const match = text.match(/\b(?:Completed|Awarded|Cancelled|Ongoing)\b/iu);
+  return match?.[0];
+}
+
+function looksLikeContractAwardRemark(text: string): boolean {
+  return extractContractAwardRemark(text) !== undefined;
 }
 
 function isSequenceDataRunText(text: string): boolean {
