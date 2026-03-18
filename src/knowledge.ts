@@ -893,7 +893,7 @@ function parseInlineFieldValueRow(
 
   const field = stripFieldPrefix(normalizedText.slice(0, colonIndex));
   const value = normalizeCellText(normalizedText.slice(colonIndex + 1));
-  if (!field || !value || !looksLikeFieldValueText(value)) {
+  if (!field || !value || looksLikeUrlSchemeField(field) || !looksLikeFieldValueText(value)) {
     return undefined;
   }
 
@@ -916,6 +916,11 @@ function parseFieldLabel(text: string): string | undefined {
 
 function stripFieldPrefix(text: string): string {
   return text.replace(/^\*\s*/u, "").trim();
+}
+
+function looksLikeUrlSchemeField(text: string): boolean {
+  const compact = normalizeCellText(text).toLowerCase().replaceAll(/[^a-z0-9]+/gu, "");
+  return /^(?:https?|ftp)$/u.test(compact);
 }
 
 function looksLikeFieldValuePair(

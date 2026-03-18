@@ -780,6 +780,19 @@ const legalMetadataRolePdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const spacedLegalMetadataRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Neut ral Cit at ion Number: [2017] EWHC 3175 (IPEC)) Tj",
+    "1 0 0 1 72 690 Tm",
+    "(IN THE HIGH COURT OF JUSTICE) Tj",
+    "1 0 0 1 72 660 Tm",
+    "(Body paragraph starts here.) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const metricHeadingRolePdf = buildPdfWithPageContents([
   [
     "BT",
@@ -830,6 +843,38 @@ const repeatedFieldGroupHeadingPdf = buildPdfWithPageContents([
     "(Type of Applicant 3: Select Applicant Type:) Tj",
     "1 0 0 1 72 636 Tm",
     "(* Other (specify):) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const leafletTitleRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 9 Tf",
+    "1 0 0 1 72 736 Tm",
+    "(1 13.03.2017 124X640 GI-375-1216-02-P 400406041/0318467 /V1) Tj",
+    "1 0 0 1 72 722 Tm",
+    "(Pr. Name: Example Product 6 mg/ml) Tj",
+    "1 0 0 1 72 708 Tm",
+    "(ACTAVIS NERVIANO PIL EXAMPLE) Tj",
+    "1 0 0 1 72 690 Tm",
+    "(GEBRAUCHSINFORMATION: INFORMATION FÜR ANWENDER Example Product 6 mg/ml) Tj",
+    "1 0 0 1 72 672 Tm",
+    "(1. What is Example?) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const fieldValueFalsePositivePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Judge Hacon :) Tj",
+    "1 0 0 1 72 692 Tm",
+    "(Introduction) Tj",
+    "1 0 0 1 72 664 Tm",
+    "(ht t p://www.example.com) Tj",
+    "1 0 0 1 72 636 Tm",
+    "(Body paragraph starts here.) Tj",
     "ET",
   ].join("\n"),
 ]);
@@ -1998,6 +2043,13 @@ const legalMetadataRoleResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const spacedLegalMetadataRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(spacedLegalMetadataRolePdf),
+    fileName: "spaced-legal-metadata-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const metricHeadingRoleResult = await engine.run({
   source: {
     bytes: encodeText(metricHeadingRolePdf),
@@ -2016,6 +2068,20 @@ const repeatedFieldGroupHeadingResult = await engine.run({
   source: {
     bytes: encodeText(repeatedFieldGroupHeadingPdf),
     fileName: "repeated-field-group-heading.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const leafletTitleRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(leafletTitleRolePdf),
+    fileName: "leaflet-title-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const fieldValueFalsePositiveResult = await engine.run({
+  source: {
+    bytes: encodeText(fieldValueFalsePositivePdf),
+    fileName: "field-value-false-positive.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2425,6 +2491,10 @@ assert(
   `Regulatory layout-flow heading block was ${JSON.stringify(regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[2]?.text ?? null)}.`,
 );
 assert(
+  regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[2]?.role === "heading",
+  `Regulatory layout-flow heading role was ${JSON.stringify(regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[2]?.role ?? null)}.`,
+);
+assert(
   regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[3]?.text === "Body paragraph starts here.",
   `Regulatory layout-flow body block was ${JSON.stringify(regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[3]?.text ?? null)}.`,
 );
@@ -2551,6 +2621,10 @@ assert(
   "Field-value form projection did not recover the final field value.",
 );
 assert(
+  fieldValueFalsePositiveResult.knowledge.value?.tables.length === 0,
+  `Field-value false-positive projection emitted ${String(fieldValueFalsePositiveResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
   tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Qty")?.role === "heading",
   `Table-row header role was ${tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Qty")?.role ?? "missing"}.`,
 );
@@ -2573,6 +2647,11 @@ assert(
   `Legal-metadata roles were ${JSON.stringify(legalMetadataRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
 );
 assert(
+  spacedLegalMetadataRoleResult.layout.value?.pages[0]?.blocks[0]?.role === "heading" &&
+    spacedLegalMetadataRoleResult.layout.value?.pages[0]?.blocks[0]?.text.includes("Neut ral Cit at ion Number"),
+  `Spaced legal-metadata roles were ${JSON.stringify(spacedLegalMetadataRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
   (metricHeadingRoleResult.layout.value?.pages[0]?.blocks ?? []).some(
     (block) => block.role === "heading" && block.text.includes("2024 Generating Capacity"),
   ),
@@ -2589,8 +2668,17 @@ assert(
   (repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks ?? []).some(
     (block) => block.role === "heading" && block.text.includes("Type of Applicant 2: Select Applicant Type:"),
   ) &&
-    findBlockRole(repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks ?? [], "Type of Applicant 3: Select Applicant Type:") === "heading",
+    findBlockRole(repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks ?? [], "Type of Applicant 3: Select Applicant Type:") === "heading" &&
+    findBlockRole(repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks ?? [], "* Other (specify):") === "heading",
   `Repeated field-group roles were ${JSON.stringify(repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  (leafletTitleRoleResult.layout.value?.pages[0]?.blocks ?? []).some(
+    (block) => block.role === "heading" &&
+      block.text.includes("GEBRAUCHSINFORMATION: INFORMATION") &&
+      block.text.includes("Example Product 6 mg/ml"),
+  ),
+  `Leaflet-title roles were ${JSON.stringify(leafletTitleRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(
