@@ -23,6 +23,8 @@ const GRID_ROW_CELL_MIN_COUNT = 2;
 const ROW_SEQUENCE_MIN_HEADERS = 3;
 const ROW_SEQUENCE_MIN_ROWS = 2;
 const FIELD_VALUE_MIN_ROWS = 2;
+const FIELD_LABEL_MIN_ROWS = 4;
+const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
 
 interface ProjectedTableCellSeed {
   readonly columnIndex: number;
@@ -150,6 +152,15 @@ function buildKnowledgeTables(
       !candidates.some((candidate) => projectedTableOverlap(candidate, fieldValueCandidate))
     ) {
       candidates.push(fieldValueCandidate);
+    }
+
+    const fieldLabelCandidate =
+      observationPage === undefined ? undefined : projectFieldLabelFormTable(page, observationPage, runToBlock);
+    if (
+      fieldLabelCandidate &&
+      !candidates.some((candidate) => projectedTableOverlap(candidate, fieldLabelCandidate))
+    ) {
+      candidates.push(fieldLabelCandidate);
     }
   }
 
@@ -454,6 +465,69 @@ function projectFieldValueFormTable(page: PdfLayoutPage): ProjectedTableCandidat
   };
 }
 
+function projectFieldLabelFormTable(
+  page: PdfLayoutPage,
+  observationPage: PdfObservedPage,
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): ProjectedTableCandidate | undefined {
+  const headerBlock = selectFormHeaderBlock(page.blocks);
+  if (!headerBlock) {
+    return undefined;
+  }
+
+  const seenLabels = new Set<string>();
+  const rows: ProjectedTableRowSeed[] = [
+    {
+      cells: [
+        {
+          columnIndex: 0,
+          text: normalizeCellText(headerBlock.text),
+          blocks: [headerBlock],
+        },
+      ],
+    },
+  ];
+  const blockIds = new Set<string>([headerBlock.id]);
+
+  for (const run of observationPage.runs) {
+    const block = runToBlock.get(run.id);
+    if (!block || block.id === headerBlock.id || block.role === "header" || block.role === "footer") {
+      continue;
+    }
+
+    const labelText = normalizeStandaloneFormFieldLabel(run.text);
+    if (!labelText || seenLabels.has(labelText)) {
+      continue;
+    }
+
+    seenLabels.add(labelText);
+    rows.push({
+      cells: [
+        {
+          columnIndex: 0,
+          text: labelText,
+          blocks: toRunBlocks([run], runToBlock),
+        },
+      ],
+    });
+    blockIds.add(block.id);
+  }
+
+  if (rows.length - 1 < FIELD_LABEL_MIN_ROWS) {
+    return undefined;
+  }
+
+  const headerText = normalizeCellText(headerBlock.text);
+  return {
+    pageNumber: page.pageNumber,
+    heuristic: "field-label-form",
+    headers: [headerText],
+    blockIds: [...blockIds],
+    confidence: Number(Math.min(0.76, 0.48 + (rows.length - 1) * 0.03).toFixed(2)),
+    rows,
+  };
+}
+
 function findBestHeaderRunGroup(
   runs: readonly PdfObservedTextRun[],
 ): { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined {
@@ -681,6 +755,116 @@ function looksLikeFieldValueText(text: string): boolean {
   }
 
   return !/^(?:\*?\s*)?(?:\d+\.\s+)?[A-Z][^:]{0,80}:$/u.test(normalizedText);
+}
+
+function selectFormHeaderBlock(blocks: readonly PdfLayoutBlock[]): PdfLayoutBlock | undefined {
+  const candidates = blocks.filter((block) => {
+    const normalizedText = normalizeCellText(block.text);
+    if (block.role !== "heading" || normalizedText.length === 0 || normalizedText.length > 80) {
+      return false;
+    }
+
+    if (
+      looksLikePageMarkerText(normalizedText) ||
+      looksLikeFormMetadataText(normalizedText) ||
+      ((block.fontSize ?? 0) < 18 && normalizeStandaloneFormFieldLabel(normalizedText) !== undefined)
+    ) {
+      return false;
+    }
+
+    return true;
+  });
+
+  return candidates.sort((left, right) => {
+    const leftFontSize = left.fontSize ?? 0;
+    const rightFontSize = right.fontSize ?? 0;
+    if (leftFontSize !== rightFontSize) {
+      return rightFontSize - leftFontSize;
+    }
+    return left.readingOrder - right.readingOrder;
+  })[0];
+}
+
+function normalizeStandaloneFormFieldLabel(text: string): string | undefined {
+  const normalizedText = normalizeCellText(text);
+  if (normalizedText.length === 0 || normalizedText.length > 64) {
+    return undefined;
+  }
+
+  if (
+    looksLikeFormMetadataText(normalizedText) ||
+    looksLikePageMarkerText(normalizedText) ||
+    looksLikeNumericCell(normalizedText)
+  ) {
+    return undefined;
+  }
+
+  const lowerText = normalizedText.toLowerCase();
+  if (FORM_OPTION_TEXTS.has(lowerText)) {
+    return undefined;
+  }
+
+  if (normalizedText.endsWith(":")) {
+    const fieldText = stripFieldPrefix(normalizedText.slice(0, -1));
+    return fieldText.length === 0 ? undefined : fieldText;
+  }
+
+  if (/[.!?]$/.test(normalizedText) || /\d/u.test(normalizedText)) {
+    return undefined;
+  }
+
+  const words = normalizedText.split(/\s+/u).filter((word) => /\p{L}/u.test(word));
+  if (words.length === 0 || words.length > 5 || !/[\p{Ll}]/u.test(normalizedText)) {
+    return undefined;
+  }
+
+  if (looksLikeSentenceCaseFormFieldLabel(words)) {
+    return normalizedText;
+  }
+
+  if (!words.every((word) => isHeadingWord(word))) {
+    return undefined;
+  }
+
+  return normalizedText;
+}
+
+function looksLikeFormMetadataText(text: string): boolean {
+  return /^(?:created:|optimized\b|pdfcpu:|pr\. name:|source:|testdata\/)/iu.test(text);
+}
+
+function looksLikePageMarkerText(text: string): boolean {
+  return /^page \d+ of \d+$/iu.test(text);
+}
+
+function isHeadingWord(word: string): boolean {
+  const normalized = word.replaceAll(/^[("'[]+|[)"'\].,:;!?]+$/gu, "");
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  return /^[\p{Lu}\p{Lt}\p{N}][\p{L}\p{N}'’/-]*$/u.test(normalized) ||
+    /^(?:a|an|and|as|at|by|de|for|from|in|into|of|on|or|the|to|und|von|with)$/iu.test(normalized);
+}
+
+function looksLikeSentenceCaseFormFieldLabel(words: readonly string[]): boolean {
+  const [firstWord, ...remainingWords] = words;
+  if (firstWord === undefined || !startsWithUppercaseLetter(firstWord)) {
+    return false;
+  }
+
+  return remainingWords.every((word) => {
+    if (/^(?:a|an|and|as|at|by|de|for|from|in|into|of|on|or|the|to|und|von|with)$/iu.test(word)) {
+      return true;
+    }
+
+    return /^[\p{Ll}][\p{L}\p{N}'’/-]*$/u.test(word) || isHeadingWord(word);
+  });
+}
+
+function startsWithUppercaseLetter(word: string): boolean {
+  const normalized = word.replaceAll(/^[("'[]+|[)"'\].,:;!?]+$/gu, "");
+  return /^[\p{Lu}\p{Lt}]/u.test(normalized);
 }
 
 function createFieldValueRow(
