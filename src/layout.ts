@@ -29,6 +29,18 @@ interface GroupedBlockSeed {
   readonly pageRef?: PdfObjectRef;
   readonly anchor?: PdfPoint;
   readonly fontSize?: number;
+  readonly hasGeneratorPathTrace?: boolean;
+}
+
+interface GroupedLayoutBlock extends PdfLayoutBlock {
+  readonly hasGeneratorPathTrace?: boolean;
+}
+
+interface GroupedLayoutPage {
+  readonly pageNumber: number;
+  readonly resolutionMethod: PdfObservedPage["resolutionMethod"];
+  readonly pageRef?: PdfObjectRef;
+  readonly blocks: readonly GroupedLayoutBlock[];
 }
 
 export function buildObservationParagraphText(observation: PdfObservedDocument): string {
@@ -38,8 +50,14 @@ export function buildObservationParagraphText(observation: PdfObservedDocument):
 
 export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayoutDocument {
   const groupedPages = observation.pages.map((page) => groupPageIntoBlocks(page));
-  const repeatedBoundarySets = buildRepeatedBoundarySets(groupedPages);
-  const pages = groupedPages.map((page) => ({
+  const publicGroupedPages = groupedPages.map((page) => ({
+    pageNumber: page.pageNumber,
+    resolutionMethod: page.resolutionMethod,
+    ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
+    blocks: page.blocks.map((block) => toPublicLayoutBlock(block)),
+  }));
+  const repeatedBoundarySets = buildRepeatedBoundarySets(publicGroupedPages);
+  const pages = publicGroupedPages.map((page) => ({
     pageNumber: page.pageNumber,
     resolutionMethod: page.resolutionMethod,
     ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
@@ -60,8 +78,15 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
   };
 }
 
-function groupPageIntoBlocks(page: PdfObservedPage): PdfLayoutPage {
+function toPublicLayoutBlock(block: GroupedLayoutBlock): PdfLayoutBlock {
+  const { hasGeneratorPathTrace, ...publicBlock } = block;
+  void hasGeneratorPathTrace;
+  return publicBlock;
+}
+
+function groupPageIntoBlocks(page: PdfObservedPage): GroupedLayoutPage {
   const pageWritingMode = resolvePageWritingMode(page);
+  const hasGeneratorPathTrace = page.runs.some((run) => looksLikeGeneratorPathTraceText(normalizeBlockText(run.text)));
   const lineBlocks: GroupedBlockSeed[] = [];
   let currentRuns: PdfObservedTextRun[] = [];
 
@@ -85,6 +110,7 @@ function groupPageIntoBlocks(page: PdfObservedPage): PdfLayoutPage {
       ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
       ...(firstRun.anchor !== undefined ? { anchor: firstRun.anchor } : {}),
       ...(firstRun.fontSize !== undefined ? { fontSize: firstRun.fontSize } : {}),
+      ...(hasGeneratorPathTrace ? { hasGeneratorPathTrace: true } : {}),
     });
     currentRuns = [];
   }
@@ -308,10 +334,31 @@ function splitStructuredBlocks(
     return blocks;
   }
 
-  return blocks.flatMap((block) => splitStructuredBlock(block));
+  const hasGeneratorPathTrace = blocks.some((block) => looksLikeGeneratorPathTraceText(normalizeBlockText(block.text)));
+  return blocks.flatMap((block) => splitStructuredBlock(block, hasGeneratorPathTrace));
 }
 
-function splitStructuredBlock(block: GroupedBlockSeed): readonly GroupedBlockSeed[] {
+function splitStructuredBlock(
+  block: GroupedBlockSeed,
+  hasGeneratorPathTrace: boolean,
+): readonly GroupedBlockSeed[] {
+  const generatorNoiseSplit = hasGeneratorPathTrace ? splitLeadingGeneratorStatusAndBody(block.text) : undefined;
+  if (generatorNoiseSplit) {
+    const noiseBlock: GroupedBlockSeed = {
+      ...block,
+      id: `${block.id}-noise`,
+      text: generatorNoiseSplit.noise,
+    };
+    const bodyBlock: GroupedBlockSeed = {
+      ...block,
+      id: `${block.id}-body`,
+      text: generatorNoiseSplit.body,
+      startsParagraph: true,
+    };
+
+    return [noiseBlock, bodyBlock];
+  }
+
   const split = splitInlineHeadingAndBody(block.text);
   if (!split) {
     return [block];
@@ -330,6 +377,37 @@ function splitStructuredBlock(block: GroupedBlockSeed): readonly GroupedBlockSee
   };
 
   return [headingBlock, bodyBlock];
+}
+
+function splitLeadingGeneratorStatusAndBody(
+  text: string,
+): { readonly noise: string; readonly body: string } | undefined {
+  const lines = text
+    .split(/\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length < 2) {
+    return undefined;
+  }
+
+  const [firstLine, ...remainingLines] = lines;
+  if (!firstLine || !looksLikeStandaloneGeneratorStatusText(firstLine)) {
+    return undefined;
+  }
+
+  const body = remainingLines.join("\n").trim();
+  if (
+    body.length === 0 ||
+    (!looksLikeFieldLikeClusterText(normalizeBlockText(body), undefined) &&
+      !/\b(?:gender|female|male|non-binary)\b/iu.test(body))
+  ) {
+    return undefined;
+  }
+
+  return {
+    noise: firstLine,
+    body,
+  };
 }
 
 function splitInlineHeadingAndBody(text: string): { readonly heading: string; readonly body: string } | undefined {
@@ -372,6 +450,13 @@ function filterPeripheralBlocks(blocks: readonly GroupedBlockSeed[]): readonly G
   );
   const filteredBlocks = blocks.filter((block, blockIndex) => {
     if (shouldFilterInlineNoiseBlock(block, blockIndex, blocks, hasContentsContext)) {
+      return false;
+    }
+
+    if (
+      looksLikeGeneratorPathTraceText(normalizeBlockText(block.text)) ||
+      looksLikeStandaloneGeneratorStatusText(normalizeBlockText(block.text))
+    ) {
       return false;
     }
 
@@ -427,6 +512,15 @@ function looksLikeBuildTraceText(text: string): boolean {
     /\bcreated:\b/iu.test(text) ||
     /\boptimized\s+for\b/iu.test(text) ||
     /(?:^|[\s(])(?:testdata|samples?|examples?)\/[^\s)]+/iu.test(text);
+}
+
+function looksLikeGeneratorPathTraceText(text: string): boolean {
+  return /(?:^|[\s(])(?:testdata|samples?|examples?)\/[^\s)]+/iu.test(text);
+}
+
+function looksLikeStandaloneGeneratorStatusText(text: string): boolean {
+  const normalized = normalizeBlockText(text).toLowerCase();
+  return normalized === "verified" || normalized === "unchecked" || normalized === "selected";
 }
 
 function shouldFilterInlineNoiseBlock(
@@ -501,7 +595,7 @@ function annotateParagraphStarts(
 ): readonly GroupedBlockSeed[] {
   return blocks.map((block, blockIndex) => ({
     ...block,
-    startsParagraph: blockIndex === 0 || shouldStartParagraph(blocks[blockIndex - 1] as GroupedBlockSeed, block, writingMode),
+    startsParagraph: blockIndex === 0 || shouldStartParagraph(blocks, blockIndex, writingMode),
   }));
 }
 
@@ -585,10 +679,12 @@ function shouldMergeAdjacentBlocks(
 }
 
 function shouldStartParagraph(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
+  blocks: readonly GroupedBlockSeed[],
+  blockIndex: number,
   writingMode: PdfWritingMode | undefined,
 ): boolean {
+  const previousBlock = blocks[blockIndex - 1] as GroupedBlockSeed;
+  const currentBlock = blocks[blockIndex] as GroupedBlockSeed;
   const previousText = normalizeBlockText(previousBlock.text);
   const currentText = normalizeBlockText(currentBlock.text);
   if (previousText.length === 0 || currentText.length === 0) {
@@ -604,6 +700,14 @@ function shouldStartParagraph(
     (looksLikePaginationLine(previousText) || looksLikeHeadingLikeText(previousText, previousBlock.fontSize))
   ) {
     return true;
+  }
+
+  if (looksLikeFieldChoiceParagraphStart(currentText)) {
+    return true;
+  }
+
+  if (shouldKeepHeadingLeadInParagraph(previousBlock, currentBlock, previousText, currentText, writingMode)) {
+    return false;
   }
 
   if (shouldKeepParagraphContinuation(previousBlock, currentBlock, previousText, currentText, writingMode)) {
@@ -698,6 +802,49 @@ function shouldStartParagraph(
   return hasShortTail;
 }
 
+function shouldKeepHeadingLeadInParagraph(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  previousText: string,
+  currentText: string,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  if (
+    currentText.length < 24 ||
+    !startsLikeSentence(currentText) ||
+    looksLikeExplicitParagraphBoundaryText(currentText, currentBlock.fontSize) ||
+    looksLikeExplicitParagraphBoundaryText(previousText, previousBlock.fontSize) ||
+    /^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentText)
+  ) {
+    return false;
+  }
+
+  if (/guide$/iu.test(previousText) && /^this guide\b/iu.test(currentText)) {
+    return true;
+  }
+
+  const looksLikeLeadHeading =
+    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) &&
+    /\b(?:guide|summary|overview|background|introduction)\b/iu.test(previousText) &&
+    previousText.length >= 6 &&
+    previousText.length <= 40 &&
+    !looksLikeSectionHeading(previousText) &&
+    !looksLikeStandaloneQuestionHeading(previousText) &&
+    !looksLikeNumberedQuestionHeading(previousText);
+  if (!looksLikeLeadHeading) {
+    return false;
+  }
+
+  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
+  const indentShift = Math.abs(currentBlock.anchor.x - previousBlock.anchor.x);
+  return verticalGap <= Math.max(18, fontSize * 1.4) && indentShift <= Math.max(120, fontSize * 1.2);
+}
+
 function shouldKeepParagraphContinuation(
   previousBlock: GroupedBlockSeed,
   currentBlock: GroupedBlockSeed,
@@ -755,6 +902,11 @@ function shouldKeepParagraphContinuation(
 
   return verticalGap <= Math.max(18, fontSize * 1.5) &&
     (startsWithContinuation(currentText) || startsLikeSentence(currentText));
+}
+
+function looksLikeFieldChoiceParagraphStart(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  return /\bgender:/iu.test(normalized) && /\b(?:female|male|non-binary)\b/iu.test(normalized);
 }
 
 function shouldKeepCompactBlocksInParagraph(
@@ -1957,16 +2109,16 @@ function serializeLayoutPages(pages: readonly PdfLayoutPage[]): string {
     .join("\n\n");
 }
 
-function serializeObservationPages(pages: readonly PdfLayoutPage[]): string {
+function serializeObservationPages(pages: readonly GroupedLayoutPage[]): string {
   return pages
     .map((page) => serializeObservationBlocks(page.blocks))
     .filter((text) => text.length > 0)
     .join("\n\n");
 }
 
-function serializeObservationBlocks(blocks: readonly PdfLayoutBlock[]): string {
+function serializeObservationBlocks(blocks: readonly GroupedLayoutBlock[]): string {
   let text = "";
-  let previousBlock: PdfLayoutBlock | undefined;
+  let previousBlock: GroupedLayoutBlock | undefined;
 
   for (const block of blocks) {
     const normalizedBlockText = formatObservationBlockText(previousBlock, block);
@@ -1976,7 +2128,9 @@ function serializeObservationBlocks(blocks: readonly PdfLayoutBlock[]): string {
 
     const separator = previousBlock === undefined
       ? ""
-      : (shouldSplitObservationAfterHeading(previousBlock, block) || block.startsParagraph ? "\n\n" : " ");
+      : (shouldOmitObservationSeparator(previousBlock, block)
+          ? ""
+          : (shouldSplitObservationAfterHeading(previousBlock, block) || block.startsParagraph ? "\n\n" : " "));
     text += `${separator}${normalizedBlockText}`;
     previousBlock = block;
   }
@@ -1999,12 +2153,17 @@ function serializeLayoutBlocks(blocks: readonly PdfLayoutBlock[]): string {
   return text;
 }
 
-function formatObservationBlockText(previousBlock: PdfLayoutBlock | undefined, block: PdfLayoutBlock): string {
-  const normalizedBlockText = normalizeBlockText(block.text);
+function formatObservationBlockText(
+  previousBlock: GroupedLayoutBlock | undefined,
+  block: GroupedLayoutBlock,
+): string {
+  const normalizedBlockText = normalizeObservationBlockText(block.text, block.hasGeneratorPathTrace === true);
   if (
     previousBlock !== undefined &&
     looksLikeHeadingLikeText(normalizeBlockText(previousBlock.text), previousBlock.fontSize) &&
-    /^\d+[.)]\s+/u.test(normalizedBlockText)
+    /^\d+[.)]\s+/u.test(normalizedBlockText) &&
+    !looksLikeNumberedQuestionHeading(normalizedBlockText) &&
+    !looksLikeNumberedListPrompt(normalizedBlockText)
   ) {
     return normalizedBlockText.replace(/^(?<label>\d+[.)])\s+/u, "$<label>\n\n");
   }
@@ -2012,9 +2171,24 @@ function formatObservationBlockText(previousBlock: PdfLayoutBlock | undefined, b
   return normalizedBlockText;
 }
 
+function shouldOmitObservationSeparator(previousBlock: GroupedLayoutBlock, block: GroupedLayoutBlock): boolean {
+  const previousText = normalizeBlockText(previousBlock.text);
+  const currentText = normalizeBlockText(block.text);
+  return /guide$/iu.test(previousText) && /^this guide\b/iu.test(currentText);
+}
+
+function normalizeObservationBlockText(text: string, hasGeneratorPathTrace: boolean): string {
+  void hasGeneratorPathTrace;
+  return normalizeBlockText(text);
+}
+
 function shouldSplitObservationAfterHeading(previousBlock: PdfLayoutBlock, block: PdfLayoutBlock): boolean {
   const previousText = normalizeBlockText(previousBlock.text);
   const currentText = normalizeBlockText(block.text);
+  if (shouldKeepHeadingLeadInParagraph(previousBlock, block, previousText, currentText, block.writingMode)) {
+    return false;
+  }
+
   return block.startsParagraph === false &&
     looksLikeHeadingLikeText(previousText, previousBlock.fontSize) &&
     looksLikeHeadingLikeText(currentText, block.fontSize) === false &&
