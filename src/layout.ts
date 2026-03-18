@@ -43,6 +43,8 @@ interface GroupedLayoutPage {
   readonly blocks: readonly GroupedLayoutBlock[];
 }
 
+const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
+
 export function buildObservationParagraphText(observation: PdfObservedDocument): string {
   const groupedPages = observation.pages.map((page) => groupPageIntoBlocks(page));
   return serializeObservationPages(groupedPages);
@@ -1096,6 +1098,14 @@ function classifyLayoutBlock(
 ): PdfLayoutBlock {
   const key = boundaryKey(block.text);
   if (key && repeatedBoundarySets.headers.has(key) && blockIndex === 0) {
+    if (shouldTreatRepeatedBoundaryAsBody(block, blockIndex, blocks)) {
+      return {
+        ...block,
+        role: "body",
+        roleConfidence: 0.62,
+      };
+    }
+
     if (shouldTreatRepeatedHeaderAsHeading(block, blockIndex, blocks)) {
       return {
         ...block,
@@ -1112,6 +1122,14 @@ function classifyLayoutBlock(
   }
 
   if (key && repeatedBoundarySets.footers.has(key) && blockIndex === blocks.length - 1) {
+    if (shouldTreatRepeatedBoundaryAsBody(block, blockIndex, blocks)) {
+      return {
+        ...block,
+        role: "body",
+        roleConfidence: 0.62,
+      };
+    }
+
     return {
       ...block,
       role: "footer",
@@ -2051,6 +2069,74 @@ function shouldTreatRepeatedHeaderAsHeading(
       looksLikeStandaloneQuestionHeading(normalized) ||
       /\b(?:abstract|acknowledg(?:e)?ments|appendix|contents|foreword|index|introduction|notes?|preface)\b/iu.test(normalized)
     );
+}
+
+function shouldTreatRepeatedBoundaryAsBody(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (!hasCompactFormBoundaryContext(blockIndex, blocks)) {
+    return false;
+  }
+
+  const normalized = normalizeBlockText(block.text);
+  if (blockIndex === 0) {
+    return looksLikeFormBoundaryMetadata(normalized);
+  }
+
+  if (blockIndex === blocks.length - 1) {
+    return looksLikeFormFooterFieldClusterText(normalized);
+  }
+
+  return false;
+}
+
+function hasCompactFormBoundaryContext(
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (blockIndex !== 0 && blockIndex !== blocks.length - 1) {
+    return false;
+  }
+
+  let fieldLabelCount = 0;
+  let promptCount = 0;
+  for (const block of blocks) {
+    const normalized = normalizeBlockText(block.text);
+    if (looksLikeShortFieldLabel(normalized, block.fontSize) || looksLikeFieldLikeClusterText(normalized, block.fontSize)) {
+      fieldLabelCount += 1;
+    }
+
+    if (looksLikeNumberedListPrompt(normalized)) {
+      promptCount += 1;
+    }
+  }
+
+  const firstBlock = blocks[0];
+  const lastBlock = blocks.at(-1);
+  const hasBoundaryMetadata = firstBlock !== undefined && looksLikeFormBoundaryMetadata(normalizeBlockText(firstBlock.text));
+  const hasFooterFieldCluster = lastBlock !== undefined && looksLikeFormFooterFieldClusterText(normalizeBlockText(lastBlock.text));
+
+  return fieldLabelCount >= 1 && (promptCount >= 1 || hasBoundaryMetadata || hasFooterFieldCluster);
+}
+
+function looksLikeFormBoundaryMetadata(text: string): boolean {
+  return /^(?:source:|created:|optimized\b|pdfcpu:|pr\. name:|testdata\/)/iu.test(text);
+}
+
+function looksLikeFormFooterFieldClusterText(text: string): boolean {
+  if (countLabelMarkers(text) === 0 || /[.!?]$/u.test(text)) {
+    return false;
+  }
+
+  const normalized = text.toLowerCase();
+  const hasOption = [...FORM_OPTION_TEXTS].some((option) => normalized.includes(option));
+  if (!hasOption) {
+    return false;
+  }
+
+  return /[\p{L}\p{N}][\p{L}\p{N}\s&/'’().-]{0,32}:/u.test(text);
 }
 
 function isEarlyPageHeadingContext(blockIndex: number, blocks: readonly PdfLayoutBlock[]): boolean {

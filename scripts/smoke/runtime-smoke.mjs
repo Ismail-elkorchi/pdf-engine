@@ -500,6 +500,64 @@ const compactLabelClusterPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const repeatedFormBoundaryPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Source:) Tj",
+    "/F1 18 Tf",
+    "1 0 0 1 72 700 Tm",
+    "(Demo Form) Tj",
+    "/F1 9 Tf",
+    "1 0 0 1 72 684 Tm",
+    "(Page 1 of 2) Tj",
+    "1 0 0 1 72 668 Tm",
+    "(pdfcpu: v0.4.0 dev Created: 2023-02-28 20:49 Optimized for A.Reader) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 638 Tm",
+    "(City: Favorite city:) Tj",
+    "1 0 0 1 72 620 Tm",
+    "(First Name:) Tj",
+    "1 0 0 1 220 620 Tm",
+    "(Last Name:) Tj",
+    "1 0 0 1 72 592 Tm",
+    "(1) Please tell us about yourself:) Tj",
+    "1 0 0 1 72 574 Tm",
+    "(2) How did you hear about pdfcpu:) Tj",
+    "1 0 0 1 72 96 Tm",
+    "(female male non-binary Gender:) Tj",
+    "ET",
+  ].join("\n"),
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Source:) Tj",
+    "/F1 18 Tf",
+    "1 0 0 1 72 700 Tm",
+    "(Demo Form) Tj",
+    "/F1 9 Tf",
+    "1 0 0 1 72 684 Tm",
+    "(Page 2 of 2) Tj",
+    "1 0 0 1 72 668 Tm",
+    "(pdfcpu: v0.4.0 dev Created: 2023-02-28 20:49 Optimized for A.Reader) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 638 Tm",
+    "(City: Favorite city:) Tj",
+    "1 0 0 1 72 620 Tm",
+    "(First Name:) Tj",
+    "1 0 0 1 220 620 Tm",
+    "(Last Name:) Tj",
+    "1 0 0 1 72 592 Tm",
+    "(1) Please tell us about yourself:) Tj",
+    "1 0 0 1 72 574 Tm",
+    "(2) How did you hear about pdfcpu:) Tj",
+    "1 0 0 1 72 96 Tm",
+    "(female male non-binary Gender:) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const fieldLabelFormPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1972,6 +2030,13 @@ const compactLabelClusterResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const repeatedFormBoundaryResult = await engine.run({
+  source: {
+    bytes: encodeText(repeatedFormBoundaryPdf),
+    fileName: "repeated-form-boundaries.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const fieldLabelFormResult = await engine.run({
   source: {
     bytes: encodeText(fieldLabelFormPdf),
@@ -2421,6 +2486,22 @@ assert(
 assert(
   compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role === "body",
   `Compact label-cluster body role was ${compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role ?? "missing"}.`,
+);
+assert(
+  repeatedFormBoundaryResult.layout.value?.pages[0]?.blocks[0]?.role === "body",
+  `Repeated form boundary header role was ${repeatedFormBoundaryResult.layout.value?.pages[0]?.blocks[0]?.role ?? "missing"}.`,
+);
+assert(
+  repeatedFormBoundaryResult.layout.value?.pages[0]?.blocks.at(-1)?.role === "body",
+  `Repeated form boundary footer role was ${repeatedFormBoundaryResult.layout.value?.pages[0]?.blocks.at(-1)?.role ?? "missing"}.`,
+);
+assert(
+  repeatedFormBoundaryResult.knowledge.value?.extractedText.includes("Source:"),
+  `Repeated form boundary knowledge text was ${JSON.stringify(repeatedFormBoundaryResult.knowledge.value?.extractedText ?? null)}.`,
+);
+assert(
+  repeatedFormBoundaryResult.knowledge.value?.extractedText.includes("female male non-binary Gender:"),
+  `Repeated form boundary knowledge text was ${JSON.stringify(repeatedFormBoundaryResult.knowledge.value?.extractedText ?? null)}.`,
 );
 assert(
   (fieldLabelFormResult.layout.value?.pages[0]?.blocks ?? []).some(
