@@ -163,6 +163,32 @@ async function runBrowserSmoke(baseUrl, browserName) {
           "ET"
         ].join("\n")
       ]);
+      const gridTablePdf = buildPdfWithPageContents([
+        [
+          "BT",
+          "/F1 16 Tf",
+          "1 0 0 1 72 720 Tm",
+          "(Quarter) Tj",
+          "1 0 0 1 220 720 Tm",
+          "(Revenue) Tj",
+          "1 0 0 1 360 720 Tm",
+          "(Profit) Tj",
+          "/F1 12 Tf",
+          "1 0 0 1 72 690 Tm",
+          "(Q1) Tj",
+          "1 0 0 1 220 690 Tm",
+          "($10) Tj",
+          "1 0 0 1 360 690 Tm",
+          "($2) Tj",
+          "1 0 0 1 72 670 Tm",
+          "(Q2) Tj",
+          "1 0 0 1 220 670 Tm",
+          "($12) Tj",
+          "1 0 0 1 360 670 Tm",
+          "($3) Tj",
+          "ET",
+        ].join("\n"),
+      ]);
 
       const plainPdfTemplate = [
         "%PDF-1.4",
@@ -266,6 +292,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: verticalWordColumnsPdf
           }
         });
+        const gridTableResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: gridTablePdf
+          }
+        });
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
@@ -291,7 +323,17 @@ async function runBrowserSmoke(baseUrl, browserName) {
           identityVLimitCleared: !identityVCidFontResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
           verticalObservedMode: verticalWordColumnsResult.observation.value?.pages[0]?.runs.every((run) => run.writingMode === "vertical") === true,
           verticalLayoutMode: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.every((block) => block.writingMode === "vertical") === true,
-          verticalLayoutOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") === "Layout Vertical Test"
+          verticalLayoutOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") === "Layout Vertical Test",
+          gridTableProjected: gridTableResult.knowledge.value?.tables.length === 1,
+          gridTableHeuristic: gridTableResult.knowledge.value?.tables[0]?.heuristic === "layout-grid",
+          gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Quarter,Revenue,Profit",
+          gridTableCell: gridTableResult.knowledge.value?.tables[0]?.cells.some((cell) =>
+            cell.rowIndex === 1 && cell.columnIndex === 1 && cell.text === "$10"
+          ) === true,
+          gridTableCitations: gridTableResult.knowledge.value?.tables[0]?.cells.every((cell) =>
+            cell.citations.length > 0
+          ) === true,
+          gridTableLimit: gridTableResult.knowledge.value?.knownLimits.includes("table-projection-heuristic") === true
         };
         const stablePayload = {
           runtime: plainResult.runtime.kind,
@@ -300,7 +342,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
           strategy: plainResult.observation.value?.strategy ?? null,
           identityHText: identityHCidFontResult.observation.value?.extractedText ?? null,
           identityVText: identityVCidFontResult.observation.value?.extractedText ?? null,
-          verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null
+          verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null,
+          gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null
         };
 
         return {

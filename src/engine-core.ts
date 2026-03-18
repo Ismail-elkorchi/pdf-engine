@@ -208,7 +208,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     );
     const observation = buildObservationStage(inspection, admission);
     const layout = buildLayoutStage(observation);
-    return buildKnowledgeStage(layout);
+    return buildKnowledgeStage(observation, layout);
   }
 
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
@@ -218,7 +218,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     const ir = buildIrStage(inspection, admission);
     const observation = buildObservationStage(inspection, admission);
     const layout = buildLayoutStage(observation);
-    const knowledge = buildKnowledgeStage(layout);
+    const knowledge = buildKnowledgeStage(observation, layout);
 
     return {
       engine: ENGINE_IDENTITY,
@@ -579,14 +579,15 @@ function buildLayoutStage(
 }
 
 function buildKnowledgeStage(
+  observation: PdfStageResult<PdfObservedDocument>,
   layout: PdfStageResult<PdfLayoutDocument>,
 ): PdfStageResult<PdfKnowledgeDocument> {
   if (layout.value === undefined) {
     return stageResult("knowledge", layout.status === "failed" ? "failed" : "blocked", layout.diagnostics);
   }
 
-  const diagnostics = createKnowledgeDiagnostics(layout);
-  const knowledge = buildKnowledgeDocument(layout.value);
+  const knowledge = buildKnowledgeDocument(layout.value, observation.value);
+  const diagnostics = createKnowledgeDiagnostics(layout, knowledge);
 
   return stageResult(
     "knowledge",
@@ -1624,7 +1625,10 @@ function createLayoutDiagnostics(observation: PdfStageResult<PdfObservedDocument
   return diagnostics;
 }
 
-function createKnowledgeDiagnostics(layout: PdfStageResult<PdfLayoutDocument>): PdfDiagnostic[] {
+function createKnowledgeDiagnostics(
+  layout: PdfStageResult<PdfLayoutDocument>,
+  knowledge: PdfKnowledgeDocument,
+): PdfDiagnostic[] {
   const diagnostics: PdfDiagnostic[] = [];
 
   diagnostics.push({
@@ -1633,12 +1637,21 @@ function createKnowledgeDiagnostics(layout: PdfStageResult<PdfLayoutDocument>): 
     level: "medium",
     message: "The current knowledge stage groups layout blocks into extractive chunks heuristically.",
   });
-  diagnostics.push({
-    code: "table-projection-not-implemented",
-    stage: "knowledge",
-    level: "medium",
-    message: "The current knowledge stage does not emit tables unless stronger structural evidence is available.",
-  });
+  diagnostics.push(
+    knowledge.tables.length === 0
+      ? {
+          code: "table-projection-not-implemented",
+          stage: "knowledge",
+          level: "medium",
+          message: "The current knowledge stage does not emit tables unless stronger structural evidence is available.",
+        }
+      : {
+          code: "table-projection-heuristic",
+          stage: "knowledge",
+          level: "medium",
+          message: "The current knowledge stage projects tables heuristically from recovered layout and observation evidence.",
+        },
+  );
 
   if (layout.value?.pages.every((page) => page.blocks.length === 0)) {
     diagnostics.push({

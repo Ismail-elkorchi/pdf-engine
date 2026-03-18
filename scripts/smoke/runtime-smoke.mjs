@@ -403,6 +403,70 @@ const regulatoryTextRecoveryPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const gridTablePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 16 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Quarter) Tj",
+    "1 0 0 1 220 720 Tm",
+    "(Revenue) Tj",
+    "1 0 0 1 360 720 Tm",
+    "(Profit) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 690 Tm",
+    "(Q1) Tj",
+    "1 0 0 1 220 690 Tm",
+    "($10) Tj",
+    "1 0 0 1 360 690 Tm",
+    "($2) Tj",
+    "1 0 0 1 72 670 Tm",
+    "(Q2) Tj",
+    "1 0 0 1 220 670 Tm",
+    "($12) Tj",
+    "1 0 0 1 360 670 Tm",
+    "($3) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const rowSequenceTablePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Q1) Tj",
+    "1 0 0 1 72 720 Tm",
+    "(Alpha) Tj",
+    "1 0 0 1 72 720 Tm",
+    "($10) Tj",
+    "1 0 0 1 72 720 Tm",
+    "($2) Tj",
+    "1 0 0 1 72 720 Tm",
+    "(Q2) Tj",
+    "1 0 0 1 72 720 Tm",
+    "(Beta) Tj",
+    "1 0 0 1 72 720 Tm",
+    "($12) Tj",
+    "1 0 0 1 72 720 Tm",
+    "($3) Tj",
+    "1 0 0 1 72 720 Tm",
+    "(Q3) Tj",
+    "1 0 0 1 72 720 Tm",
+    "(Gamma) Tj",
+    "1 0 0 1 72 720 Tm",
+    "($20) Tj",
+    "/F1 16 Tf",
+    "1 0 0 1 72 690 Tm",
+    "(Quarter) Tj",
+    "1 0 0 1 72 690 Tm",
+    "(Item) Tj",
+    "1 0 0 1 72 690 Tm",
+    "(Revenue) Tj",
+    "1 0 0 1 72 690 Tm",
+    "(Profit) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const repeatedBoundaryPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -880,6 +944,20 @@ const regulatoryTextRecoveryResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const gridTableResult = await engine.run({
+  source: {
+    bytes: encodeText(gridTablePdf),
+    fileName: "grid-table.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const rowSequenceTableResult = await engine.run({
+  source: {
+    bytes: encodeText(rowSequenceTablePdf),
+    fileName: "row-sequence-table.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const repeatedBoundaryResult = await engine.toLayout({
   source: {
     bytes: encodeText(repeatedBoundaryPdf),
@@ -1046,6 +1124,56 @@ assert(
 assert(
   !hasUnreadableControlCharacters(regulatoryTextRecoveryResult.observation.value?.extractedText ?? ""),
   `Regulatory observation text still contained unreadable control characters: ${JSON.stringify(regulatoryTextRecoveryResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  gridTableResult.knowledge.value?.tables.length === 1,
+  `Grid table projection emitted ${String(gridTableResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
+  gridTableResult.knowledge.value?.tables[0]?.heuristic === "layout-grid",
+  `Grid table heuristic was ${gridTableResult.knowledge.value?.tables[0]?.heuristic ?? "missing"}.`,
+);
+assert(
+  gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Quarter,Revenue,Profit",
+  `Grid table headers were ${JSON.stringify(gridTableResult.knowledge.value?.tables[0]?.headers ?? null)}.`,
+);
+assert(
+  gridTableResult.knowledge.value?.tables[0]?.cells.some((cell) => cell.rowIndex === 1 && cell.columnIndex === 1 && cell.text === "$10"),
+  "Grid table projection did not preserve the Q1 revenue cell.",
+);
+assert(
+  gridTableResult.knowledge.value?.tables[0]?.cells.every((cell) => cell.citations.length > 0),
+  "Grid table projection emitted a cell without citations.",
+);
+assert(
+  gridTableResult.knowledge.value?.knownLimits.includes("table-projection-heuristic"),
+  "Grid table knowledge known limits did not include table-projection-heuristic.",
+);
+assert(
+  !gridTableResult.knowledge.value?.knownLimits.includes("table-projection-not-implemented"),
+  "Grid table knowledge known limits still included table-projection-not-implemented.",
+);
+assert(
+  rowSequenceTableResult.knowledge.value?.tables.length === 1,
+  `Row-sequence table projection emitted ${String(rowSequenceTableResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
+  rowSequenceTableResult.knowledge.value?.tables[0]?.heuristic === "row-sequence",
+  `Row-sequence table heuristic was ${rowSequenceTableResult.knowledge.value?.tables[0]?.heuristic ?? "missing"}.`,
+);
+assert(
+  rowSequenceTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Quarter,Item,Revenue,Profit",
+  `Row-sequence table headers were ${JSON.stringify(rowSequenceTableResult.knowledge.value?.tables[0]?.headers ?? null)}.`,
+);
+assert(
+  rowSequenceTableResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 2 && cell.columnIndex === 1 && cell.text === "Beta",
+  ),
+  "Row-sequence table projection did not preserve the Beta row.",
+);
+assert(
+  rowSequenceTableResult.knowledge.value?.tables[0]?.cells.every((cell) => cell.citations.length > 0),
+  "Row-sequence table projection emitted a cell without citations.",
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(
