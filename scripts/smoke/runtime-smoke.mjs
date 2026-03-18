@@ -231,6 +231,20 @@ assert(typeof expectedRuntime === "string" && expectedRuntime.length > 0, "Missi
 
 const moduleNamespace = await import(moduleSpecifier);
 assert(typeof moduleNamespace.createPdfEngine === "function", "Module does not export createPdfEngine().");
+const viewerModuleSpecifier = resolveViewerModuleSpecifier(moduleSpecifier);
+assert(typeof viewerModuleSpecifier === "string", "Module path does not support resolving the viewer entrypoint.");
+const viewerModuleNamespace = await import(viewerModuleSpecifier);
+assert(typeof viewerModuleNamespace.renderPdfViewer === "function", "Viewer module does not export renderPdfViewer().");
+
+function resolveViewerModuleSpecifier(specifier) {
+  if (specifier.endsWith("/index.js")) {
+    return specifier.replace(/\/index\.js$/u, "/viewer.js");
+  }
+  if (specifier.endsWith("/mod.ts")) {
+    return specifier.replace(/\/mod\.ts$/u, "/viewer.ts");
+  }
+  return undefined;
+}
 
 const syntheticPdfTemplate = [
   "%PDF-1.4",

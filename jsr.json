@@ -3,7 +3,8 @@
   "name": "@ismail-elkorchi/pdf-engine",
   "version": "0.1.0",
   "exports": {
-    ".": "./jsr/mod.ts"
+    ".": "./jsr/mod.ts",
+    "./viewer": "./jsr/viewer.ts"
   },
   "exclude": [
     ".github/**",
