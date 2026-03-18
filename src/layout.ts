@@ -1083,7 +1083,7 @@ function looksLikeNumberedBodyParagraph(text: string): boolean {
     return false;
   }
 
-  if (normalized.endsWith(":")) {
+  if (normalized.endsWith(":") || looksLikeNumberedQuestionHeading(normalized)) {
     return false;
   }
 
@@ -1095,6 +1095,24 @@ function looksLikeNumberedBodyParagraph(text: string): boolean {
   return startsLikeSentence(bodyText) || /[.!?]["')\]]*$/u.test(normalized);
 }
 
+function looksLikeNumberedQuestionHeading(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (!normalized.endsWith("?")) {
+    return false;
+  }
+
+  const numberedPrefixMatch = normalized.match(/^\d+(?:\.\d+)*[.)]\s+/u);
+  if (!numberedPrefixMatch) {
+    return false;
+  }
+
+  const words = normalized
+    .slice(numberedPrefixMatch[0].length)
+    .split(/\s+/u)
+    .filter((word) => /\p{L}|\p{N}/u.test(word));
+  return words.length >= 2 && words.length <= 18;
+}
+
 function looksLikePromotedHeading(
   block: PdfLayoutBlock,
   blockIndex: number,
@@ -1102,6 +1120,8 @@ function looksLikePromotedHeading(
 ): boolean {
   return looksLikeContentsEntryHeading(block, blockIndex, blocks) ||
     looksLikeLegalMetadataHeading(block, blockIndex, blocks) ||
+    looksLikeFormPromptHeading(block, blockIndex, blocks) ||
+    looksLikeLeafletTitleHeading(block, blockIndex, blocks) ||
     looksLikeMetricSectionHeading(block, blockIndex, blocks) ||
     looksLikeRepeatedFieldGroupHeading(block, blockIndex, blocks) ||
     looksLikeTableHeaderLabel(block, blocks);
@@ -1137,11 +1157,57 @@ function looksLikeLegalMetadataHeading(
     return false;
   }
 
-  if (!/\b(?:citation number|neutral citation|claim number|claim no\.?|case number|case no\.?)\b/iu.test(normalized)) {
+  const compact = normalized.toLowerCase().replaceAll(/\s+/g, "");
+  const hasLegalMetadataLabel = /\b(?:citation number|neutral citation|claim number|claim no\.?|case number|case no\.?)\b/iu.test(
+    normalized,
+  ) ||
+    compact.includes("neutralcitationnumber") ||
+    compact.includes("claimnumber") ||
+    compact.includes("casenumber");
+  if (!hasLegalMetadataLabel) {
     return false;
   }
 
   return hasHeadingNeighbor(blockIndex, blocks) || /\[\d{4}\]/u.test(normalized);
+}
+
+function looksLikeFormPromptHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 96) {
+    return false;
+  }
+
+  const trimmedPrompt = normalized.replace(/^[*•]\s*/u, "");
+  if (!trimmedPrompt.endsWith(":") || /[.!?]$/.test(trimmedPrompt.slice(0, -1)) || countLabelMarkers(trimmedPrompt) !== 1) {
+    return false;
+  }
+
+  if (looksLikeDateLine(trimmedPrompt) || looksLikePaginationLine(trimmedPrompt) || looksLikeProductionMetadata(trimmedPrompt)) {
+    return false;
+  }
+
+  const promptText = trimmedPrompt.slice(0, -1).trim();
+  const words = promptText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 10) {
+    return false;
+  }
+
+  const hasPromptCue = normalized.startsWith("*") || normalized.startsWith("•") || promptText.includes("(") ||
+    /^\d+(?:\.\d+)*[.)]?\s+/u.test(promptText);
+  const hasHeadingContext = hasHeadingNeighbor(blockIndex, blocks);
+  if (!hasPromptCue && !hasHeadingContext) {
+    return false;
+  }
+
+  if (!hasPromptCue && !looksLikeTitleCaseHeading(promptText) && !looksLikeSectionHeading(promptText)) {
+    return false;
+  }
+
+  return hasHeadingContext || (hasPromptCue && isEarlyPageHeadingContext(blockIndex, blocks));
 }
 
 function looksLikeMetricSectionHeading(
@@ -1216,6 +1282,30 @@ function normalizeHeadingStem(text: string): string {
     .replace(/[:*]/gu, " ")
     .replaceAll(/\s+/g, " ")
     .trim();
+}
+
+function looksLikeLeafletTitleHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length < 24 || normalized.length > 160 || !isEarlyPageHeadingContext(blockIndex, blocks)) {
+    return false;
+  }
+
+  if (!normalized.includes(":") || looksLikeProductionMetadata(normalized) || looksLikeDateLine(normalized)) {
+    return false;
+  }
+
+  const labelText = normalized.slice(0, normalized.indexOf(":")).trim();
+  if (/\./u.test(labelText) || labelText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word)).length > 3) {
+    return false;
+  }
+
+  const hasDosePattern = /\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml)(?:\/(?:ml|l|g))?\b/iu.test(normalized);
+  const hasInstructionTitle = /^[\p{Lu}\s&/'’().-]+:/u.test(normalized) && /[\p{Ll}]/u.test(normalized);
+  return hasDosePattern && hasInstructionTitle;
 }
 
 function looksLikeFieldLabelBody(
@@ -1615,6 +1705,10 @@ function looksLikeSectionHeading(text: string): boolean {
   const normalized = text.replaceAll(/\s+/g, " ").trim();
   if (normalized.length === 0 || normalized.length > 160) {
     return false;
+  }
+
+  if (looksLikeNumberedQuestionHeading(normalized)) {
+    return true;
   }
 
   if (looksLikeNumberedBodyParagraph(normalized)) {
