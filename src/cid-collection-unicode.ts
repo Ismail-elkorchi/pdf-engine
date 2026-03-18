@@ -6,6 +6,8 @@ export interface PdfCidCollectionIdentifier {
 export interface PdfCidCollectionDecodeResult {
   readonly text: string;
   readonly complete: boolean;
+  readonly sourceUnitCount: number;
+  readonly mappedUnitCount: number;
 }
 
 const ADOBE_JAPAN1_UCS2_SUBSET = new Map<number, string>([
@@ -64,13 +66,18 @@ export function decodePdfCidHexTextWithKnownCollectionMap(
     return {
       text: "",
       complete: false,
+      sourceUnitCount: 0,
+      mappedUnitCount: 0,
     };
   }
 
   let text = "";
   let complete = true;
+  let sourceUnitCount = 0;
+  let mappedUnitCount = 0;
 
   for (let offset = 0; offset < normalizedHex.length; offset += 4) {
+    sourceUnitCount += 1;
     const cid = Number.parseInt(normalizedHex.slice(offset, offset + 4), 16);
     const mappedText = cidUnicodeMap.get(cid);
     if (mappedText === undefined) {
@@ -78,11 +85,14 @@ export function decodePdfCidHexTextWithKnownCollectionMap(
       continue;
     }
     text += mappedText;
+    mappedUnitCount += 1;
   }
 
   return {
     text,
     complete,
+    sourceUnitCount,
+    mappedUnitCount,
   };
 }
 
