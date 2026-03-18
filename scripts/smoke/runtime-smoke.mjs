@@ -445,6 +445,31 @@ const paragraphPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const compactLabelClusterPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Source:) Tj",
+    "1 0 0 1 72 706 Tm",
+    "(Person Of Impact) Tj",
+    "1 0 0 1 72 692 Tm",
+    "(Page 1 of 1) Tj",
+    "1 0 0 1 72 660 Tm",
+    "(First Name:) Tj",
+    "1 0 0 1 72 646 Tm",
+    "(Last Name:) Tj",
+    "1 0 0 1 72 632 Tm",
+    "(Country:) Tj",
+    "1 0 0 1 220 660 Tm",
+    "(Planet:) Tj",
+    "1 0 0 1 220 646 Tm",
+    "(Occupation:) Tj",
+    "1 0 0 1 220 632 Tm",
+    "(Date Of Birth:) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const scientificTextFlowPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1241,6 +1266,13 @@ const paragraphResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const compactLabelClusterResult = await engine.run({
+  source: {
+    bytes: encodeText(compactLabelClusterPdf),
+    fileName: "compact-label-clusters.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const scientificTextFlowResult = await engine.run({
   source: {
     bytes: encodeText(scientificTextFlowPdf),
@@ -1438,6 +1470,21 @@ assert(
 assert(
   paragraphResult.knowledge.value?.chunks[0]?.text === "First paragraph line one line two\n\nSecond paragraph starts here line four",
   `Paragraph-aware knowledge text was ${JSON.stringify(paragraphResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
+);
+assert(
+  compactLabelClusterResult.observation.value?.extractedText ===
+    "Source: Person Of Impact Page 1 of 1\n\nFirst Name: Last Name: Country: Planet: Occupation: Date Of Birth:",
+  `Compact label-cluster observation text was ${JSON.stringify(compactLabelClusterResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  compactLabelClusterResult.layout.value?.extractedText ===
+    "Source: Person Of Impact Page 1 of 1\n\nFirst Name: Last Name: Country: Planet: Occupation: Date Of Birth:",
+  `Compact label-cluster layout text was ${JSON.stringify(compactLabelClusterResult.layout.value?.extractedText ?? null)}.`,
+);
+assert(
+  compactLabelClusterResult.knowledge.value?.extractedText ===
+    "Source: Person Of Impact Page 1 of 1\n\nFirst Name: Last Name: Country: Planet:\n\nOccupation: Date Of Birth:",
+  `Compact label-cluster knowledge text was ${JSON.stringify(compactLabelClusterResult.knowledge.value?.extractedText ?? null)}.`,
 );
 assert(
   scientificTextFlowResult.observation.value?.extractedText ===

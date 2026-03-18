@@ -1112,7 +1112,7 @@ function serializeChunkBlocks(blocks: readonly PdfLayoutBlock[]): string {
   let text = "";
 
   for (const [blockIndex, block] of blocks.entries()) {
-    const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : "\n");
+    const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
     text += `${separator}${block.text}`;
   }
 

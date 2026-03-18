@@ -192,7 +192,7 @@ function mergeAdjacentBlocks(
 
     mergedBlocks[mergedBlocks.length - 1] = {
       ...previousBlock,
-      text: joinBlockText(previousBlock.text, block.text, writingMode),
+      text: joinBlockText(previousBlock, block, writingMode),
       startsParagraph: previousBlock.startsParagraph,
       runIds: [...previousBlock.runIds, ...block.runIds],
       glyphIds: [...previousBlock.glyphIds, ...block.glyphIds],
@@ -499,11 +499,22 @@ function shouldStartParagraph(
     return true;
   }
 
-  if (looksLikeHeadingLikeText(currentText, currentBlock.fontSize)) {
+  if (shouldKeepCompactBlocksInParagraph(previousBlock, currentBlock, previousText, currentText)) {
+    return false;
+  }
+
+  if (
+    looksLikeCompactLabelCluster(previousText, previousBlock.fontSize) ||
+    looksLikeCompactLabelCluster(currentText, currentBlock.fontSize)
+  ) {
     return true;
   }
 
-  if (looksLikeHeadingLikeText(previousText, previousBlock.fontSize)) {
+  if (looksLikeExplicitParagraphBoundaryText(currentText, currentBlock.fontSize)) {
+    return true;
+  }
+
+  if (looksLikeExplicitParagraphBoundaryText(previousText, previousBlock.fontSize)) {
     return true;
   }
 
@@ -523,6 +534,15 @@ function shouldStartParagraph(
   const currentFontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
   if (writingMode === "vertical") {
     if (!previousBlock.anchor || !currentBlock.anchor) {
+      return true;
+    }
+
+    if (
+      isSingleWordBlockText(previousText) &&
+      isSingleWordBlockText(currentText) &&
+      !previousText.includes(":") &&
+      !currentText.includes(":")
+    ) {
       return true;
     }
 
@@ -567,6 +587,83 @@ function shouldStartParagraph(
   return hasShortTail;
 }
 
+function shouldKeepCompactBlocksInParagraph(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  previousText: string,
+  currentText: string,
+): boolean {
+  if (!previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
+  const previousLineCount = countTextLines(previousBlock.text);
+  const currentLineCount = countTextLines(currentBlock.text);
+
+  if (
+    looksLikeCompactLabelCluster(previousText, previousBlock.fontSize) &&
+    looksLikeCompactLabelCluster(currentText, currentBlock.fontSize) &&
+    !(countLabelMarkers(previousText) <= 2 && countLabelMarkers(currentText) >= 3) &&
+    previousLineCount === currentLineCount &&
+    verticalGap <= Math.max(24, fontSize * 2)
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function looksLikeCompactLabelCluster(text: string, fontSize: number | undefined): boolean {
+  if (text.length === 0 || text.length > 80) {
+    return false;
+  }
+
+  if (
+    /^(?:[-*•]\s+|\d+[.)]\s+)/u.test(text) ||
+    /[.!?]$/.test(text) ||
+    looksLikeSectionHeading(text) ||
+    looksLikeStandaloneQuestionHeading(text)
+  ) {
+    return false;
+  }
+
+  const words = text.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 8 || countTextLines(text) > 3) {
+    return false;
+  }
+
+  if (!text.includes(":") && words.length < 2) {
+    return false;
+  }
+
+  return text.includes(":") || looksLikeTitleCaseHeading(text) || (fontSize !== undefined && fontSize <= 12);
+}
+
+function looksLikeExplicitParagraphBoundaryText(text: string, fontSize: number | undefined): boolean {
+  return looksLikeSectionHeading(text) ||
+    looksLikeStandaloneQuestionHeading(text) ||
+    (fontSize !== undefined && fontSize >= 18 && looksLikeHeading(text, fontSize) && !text.includes(":"));
+}
+
+function countTextLines(text: string): number {
+  return text
+    .split(/\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0)
+    .length;
+}
+
+function isSingleWordBlockText(text: string): boolean {
+  const words = normalizeBlockText(text).split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  return words.length === 1;
+}
+
+function countLabelMarkers(text: string): number {
+  return (text.match(/:/gu) ?? []).length;
+}
+
 function resolvePageWritingMode(page: PdfObservedPage): PdfWritingMode | undefined {
   if (page.runs.some((run) => run.writingMode === "vertical")) {
     return "vertical";
@@ -576,15 +673,25 @@ function resolvePageWritingMode(page: PdfObservedPage): PdfWritingMode | undefin
 }
 
 function joinBlockText(
-  previousText: string,
-  currentText: string,
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
   writingMode: PdfWritingMode | undefined,
 ): string {
+  const previousText = previousBlock.text;
+  const currentText = currentBlock.text;
   if (writingMode !== "vertical" && endsWithHyphenatedContinuation(previousText) && startsWithContinuation(currentText)) {
     return `${previousText.replace(/[-\u2010-\u2015]$/u, "")}${currentText.trimStart()}`;
   }
 
-  const separator = writingMode === "vertical" ? "\n" : " ";
+  const normalizedPreviousText = normalizeBlockText(previousText);
+  const normalizedCurrentText = normalizeBlockText(currentText);
+  const useInlineSeparator = shouldKeepCompactBlocksInParagraph(
+    previousBlock,
+    currentBlock,
+    normalizedPreviousText,
+    normalizedCurrentText,
+  );
+  const separator = writingMode === "vertical" && !useInlineSeparator ? "\n" : " ";
   return `${previousText}${separator}${currentText}`.replaceAll(/[ \t]+/g, " ").trim();
 }
 
@@ -968,7 +1075,7 @@ function serializeLayoutBlocks(blocks: readonly PdfLayoutBlock[]): string {
   let text = "";
 
   for (const [blockIndex, block] of blocks.entries()) {
-    const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : "\n");
+    const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
     text += `${separator}${block.text}`;
   }
 
