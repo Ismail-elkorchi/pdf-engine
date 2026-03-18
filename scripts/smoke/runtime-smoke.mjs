@@ -457,6 +457,20 @@ const sectionHeadingPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const coverMatterPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(The Crazy Ones) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 700 Tm",
+    "(October 14, 1998) Tj",
+    "1 0 0 1 72 666 Tm",
+    "(Heres to the crazy ones.) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const regulatoryTextRecoveryPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1114,6 +1128,13 @@ const sectionHeadingResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const coverMatterResult = await engine.run({
+  source: {
+    bytes: encodeText(coverMatterPdf),
+    fileName: "cover-matter.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const regulatoryTextRecoveryResult = await engine.run({
   source: {
     bytes: encodeText(regulatoryTextRecoveryPdf),
@@ -1310,6 +1331,18 @@ assert(
   "Section-heading second body block was not marked as a paragraph start.",
 );
 assert(
+  coverMatterResult.layout.value?.pages[0]?.blocks[0]?.role === "heading",
+  `Cover-matter title role was ${coverMatterResult.layout.value?.pages[0]?.blocks[0]?.role ?? "missing"}.`,
+);
+assert(
+  coverMatterResult.layout.value?.pages[0]?.blocks[1]?.role === "heading",
+  `Cover-matter date role was ${coverMatterResult.layout.value?.pages[0]?.blocks[1]?.role ?? "missing"}.`,
+);
+assert(
+  coverMatterResult.layout.value?.pages[0]?.blocks[2]?.role === "body",
+  `Cover-matter body role was ${coverMatterResult.layout.value?.pages[0]?.blocks[2]?.role ?? "missing"}.`,
+);
+assert(
   regulatoryTextRecoveryResult.observation.value?.extractedText === "Introduction Readable text",
   `Regulatory observation text was ${JSON.stringify(regulatoryTextRecoveryResult.observation.value?.extractedText ?? null)}.`,
 );
@@ -1335,7 +1368,7 @@ assert(
 );
 assert(
   regulatoryLayoutFlowResult.observation.value?.extractedText ===
-    "REGULATORY COVER TITLE\n\nBody text appears first in stream order.\n\n1. What is Example?\nBody paragraph starts here.",
+    "REGULATORY COVER TITLE\n\nBody text appears first in stream order.\n\n1. What is Example?\n\nBody paragraph starts here.",
   `Regulatory layout-flow observation text was ${JSON.stringify(regulatoryLayoutFlowResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(
@@ -1349,6 +1382,10 @@ assert(
 assert(
   regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[3]?.text === "Body paragraph starts here.",
   `Regulatory layout-flow body block was ${JSON.stringify(regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[3]?.text ?? null)}.`,
+);
+assert(
+  regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[3]?.startsParagraph === true,
+  "Regulatory layout-flow body block was not marked as a paragraph start after the heading block.",
 );
 assert(
   gridTableResult.knowledge.value?.tables.length === 1,

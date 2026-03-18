@@ -499,11 +499,11 @@ function shouldStartParagraph(
     return true;
   }
 
-  if (looksLikeHeading(currentText, currentBlock.fontSize)) {
+  if (looksLikeHeadingLikeText(currentText, currentBlock.fontSize)) {
     return true;
   }
 
-  if (looksLikeHeading(previousText, previousBlock.fontSize)) {
+  if (looksLikeHeadingLikeText(previousText, previousBlock.fontSize)) {
     return true;
   }
 
@@ -631,6 +631,14 @@ function classifyLayoutBlock(
 ): PdfLayoutBlock {
   const key = boundaryKey(block.text);
   if (key && repeatedBoundarySets.headers.has(key) && blockIndex === 0) {
+    if (shouldTreatRepeatedHeaderAsHeading(block, blockIndex, blocks)) {
+      return {
+        ...block,
+        role: "heading",
+        roleConfidence: 0.66,
+      };
+    }
+
     return {
       ...block,
       role: "header",
@@ -662,7 +670,12 @@ function classifyLayoutBlock(
     };
   }
 
-  if (looksLikeHeading(block.text, block.fontSize) || continuesHeadingBlock(blocks, blockIndex)) {
+  if (
+    looksLikeHeading(block.text, block.fontSize) ||
+    looksLikeStandaloneQuestionHeading(block.text) ||
+    looksLikeFrontMatterHeading(block, blockIndex, blocks) ||
+    continuesHeadingBlock(blocks, blockIndex)
+  ) {
     return {
       ...block,
       role: "heading",
@@ -704,6 +717,10 @@ function looksLikeHeading(text: string, fontSize: number | undefined): boolean {
     return true;
   }
 
+  if (looksLikeTitleCaseHeading(normalized)) {
+    return true;
+  }
+
   if (/[.!?]$/.test(normalized)) {
     return false;
   }
@@ -715,6 +732,10 @@ function looksLikeHeading(text: string, fontSize: number | undefined): boolean {
 
   const uppercaseRatio = letters.filter((character) => character === character.toUpperCase()).length / letters.length;
   return uppercaseRatio > 0.6 || normalized === normalized.toUpperCase();
+}
+
+function looksLikeHeadingLikeText(text: string, fontSize: number | undefined): boolean {
+  return looksLikeHeading(text, fontSize) || looksLikeSectionHeading(text) || looksLikeStandaloneQuestionHeading(text);
 }
 
 function looksLikeSectionHeading(text: string): boolean {
@@ -736,6 +757,127 @@ function looksLikeSectionHeading(text: string): boolean {
   }
 
   return false;
+}
+
+function looksLikeStandaloneQuestionHeading(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0 || normalized.length > 120 || !normalized.endsWith("?")) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u);
+  const firstLetter = Array.from(normalized).find((character) => /\p{L}/u.test(character));
+  return words.length <= 14 &&
+    words.length >= 2 &&
+    firstLetter !== undefined &&
+    firstLetter === firstLetter.toUpperCase() &&
+    !/[,;:]$/.test(normalized);
+}
+
+function looksLikeFrontMatterHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 120) {
+    return false;
+  }
+
+  if (!isEarlyPageHeadingContext(blockIndex, blocks) && !hasHeadingNeighbor(blockIndex, blocks)) {
+    return false;
+  }
+
+  if (looksLikeDateLine(normalized)) {
+    return true;
+  }
+
+  if (looksLikeStandaloneQuestionHeading(normalized)) {
+    return true;
+  }
+
+  if (looksLikeTitleCaseHeading(normalized)) {
+    return true;
+  }
+
+  return /\b(?:abstract|acknowledg(?:e)?ments|appendix|chapter|contents|foreword|introduction|keywords?|part|preface)\b/iu.test(normalized) &&
+    !/[.!]$/.test(normalized);
+}
+
+function shouldTreatRepeatedHeaderAsHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (blockIndex !== 0) {
+    return false;
+  }
+
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 48) {
+    return false;
+  }
+
+  const nextBlock = blocks[blockIndex + 1];
+  return nextBlock !== undefined &&
+    !looksLikeProductionMetadata(nextBlock.text) &&
+    (
+      looksLikeSectionHeading(normalized) ||
+      looksLikeStandaloneQuestionHeading(normalized) ||
+      /\b(?:abstract|acknowledg(?:e)?ments|appendix|contents|foreword|index|introduction|notes?|preface)\b/iu.test(normalized)
+    );
+}
+
+function isEarlyPageHeadingContext(blockIndex: number, blocks: readonly PdfLayoutBlock[]): boolean {
+  if (blockIndex <= 3) {
+    return true;
+  }
+
+  const precedingBlocks = blocks.slice(0, blockIndex);
+  return blockIndex <= 5 && precedingBlocks.every((block) => normalizeBlockText(block.text).length <= 120);
+}
+
+function hasHeadingNeighbor(blockIndex: number, blocks: readonly PdfLayoutBlock[]): boolean {
+  const previousBlock = blockIndex > 0 ? blocks[blockIndex - 1] : undefined;
+  const nextBlock = blockIndex + 1 < blocks.length ? blocks[blockIndex + 1] : undefined;
+
+  return [previousBlock, nextBlock].some((candidate) =>
+    candidate !== undefined &&
+    looksLikeHeadingLikeText(candidate.text, candidate.fontSize)
+  );
+}
+
+function looksLikeDateLine(text: string): boolean {
+  return /^(?:\p{L}{3,12}\s+\d{1,2},\s+\d{4}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})$/u.test(text);
+}
+
+function looksLikeTitleCaseHeading(text: string): boolean {
+  if (text.length === 0 || text.length > 96 || /[.!]$/.test(text) || /\b(?:https?:\/\/|www\.|@)\b/iu.test(text)) {
+    return false;
+  }
+
+  const words = text.split(/\s+/u);
+  if (words.length === 0 || words.length > 14) {
+    return false;
+  }
+
+  const lexicalWords = words.filter((word) => /\p{L}/u.test(word));
+  if (lexicalWords.length === 0) {
+    return false;
+  }
+
+  const titleLikeWords = lexicalWords.filter((word) => isTitleCaseWord(word) || isConnectorWord(word));
+  return titleLikeWords.length / lexicalWords.length >= 0.8 && lexicalWords.some((word) => isTitleCaseWord(word));
+}
+
+function isTitleCaseWord(word: string): boolean {
+  const normalized = word.replaceAll(/^[("'[]+|[)"'\].,:;!?]+$/gu, "");
+  return normalized.length > 0 && /^[\p{Lu}\p{Lt}\p{N}][\p{L}\p{N}'’/-]*$/u.test(normalized);
+}
+
+function isConnectorWord(word: string): boolean {
+  const normalized = word.replaceAll(/^[("'[]+|[)"'\].,:;!?]+$/gu, "");
+  return /^(?:a|an|and|as|at|by|de|for|from|in|into|of|on|or|the|to|und|von|with)$/iu.test(normalized);
 }
 
 function isSameLineBlockContinuation(
