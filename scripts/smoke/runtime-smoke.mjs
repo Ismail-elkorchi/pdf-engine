@@ -667,6 +667,62 @@ const continuedNumberedBodyPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const contentsNoisePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Contents) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 688 Tm",
+    "(Introduction) Tj",
+    "1 0 0 1 72 650 Tm",
+    "(..............) Tj",
+    "1 0 0 1 72 612 Tm",
+    "(1) Tj",
+    "1 0 0 1 72 570 Tm",
+    "(Installation) Tj",
+    "1 0 0 1 72 532 Tm",
+    "(..............) Tj",
+    "1 0 0 1 72 494 Tm",
+    "(2) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const standaloneBulletPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Read this first.) Tj",
+    "1 0 0 1 72 692 Tm",
+    "(•) Tj",
+    "1 0 0 1 72 664 Tm",
+    "(If you have questions, ask your doctor.) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const buildTraceParagraphPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Demo Form) Tj",
+    "/F1 9 Tf",
+    "1 0 0 1 72 700 Tm",
+    "(Page 1 of 1) Tj",
+    "1 0 0 1 72 684 Tm",
+    "(pdfcpu: v0.4.1 dev) Tj",
+    "1 0 0 1 72 670 Tm",
+    "(Created: 2023-05-06 21:15) Tj",
+    "1 0 0 1 72 656 Tm",
+    "(Optimized for A.Reader) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 628 Tm",
+    "(First Name: Last Name: Date Of Birth:) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const tableRowRolePdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1900,6 +1956,27 @@ const continuedNumberedBodyResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const contentsNoiseResult = await engine.run({
+  source: {
+    bytes: encodeText(contentsNoisePdf),
+    fileName: "contents-noise.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const standaloneBulletResult = await engine.run({
+  source: {
+    bytes: encodeText(standaloneBulletPdf),
+    fileName: "standalone-bullet.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const buildTraceParagraphResult = await engine.run({
+  source: {
+    bytes: encodeText(buildTraceParagraphPdf),
+    fileName: "build-trace-paragraph.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const tableRowRoleResult = await engine.run({
   source: {
     bytes: encodeText(tableRowRolePdf),
@@ -2214,6 +2291,25 @@ assert(
   continuedNumberedBodyResult.layout.value?.extractedText ===
     "Introduction\n\n1. This is a numbered body paragraph that should stay in the body flow even when it wraps onto a second line without becoming a new paragraph.\n\n2. Another numbered body paragraph follows as a separate paragraph.",
   `Continued numbered-body layout text was ${JSON.stringify(continuedNumberedBodyResult.layout.value?.extractedText ?? null)}.`,
+);
+assert(
+  contentsNoiseResult.layout.value?.extractedText === "Contents\n\nIntroduction\n\nInstallation",
+  `Contents-noise layout text was ${JSON.stringify(contentsNoiseResult.layout.value?.extractedText ?? null)}.`,
+);
+assert(
+  standaloneBulletResult.layout.value?.extractedText ===
+    "Read this first.\n\nIf you have questions, ask your doctor.",
+  `Standalone-bullet layout text was ${JSON.stringify(standaloneBulletResult.layout.value?.extractedText ?? null)}.`,
+);
+assert(
+  buildTraceParagraphResult.layout.value?.extractedText.includes("Page 1 of 1\n\npdfcpu: v0.4.1 dev"),
+  `Build-trace paragraph layout text was ${JSON.stringify(buildTraceParagraphResult.layout.value?.extractedText ?? null)}.`,
+);
+assert(
+  (buildTraceParagraphResult.layout.value?.pages[0]?.blocks ?? []).some(
+    (block) => block.text.includes("pdfcpu: v0.4.1 dev") && block.startsParagraph === true,
+  ),
+  `Build-trace paragraph blocks were ${JSON.stringify(buildTraceParagraphResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, startsParagraph: block.startsParagraph })) ?? null)}.`,
 );
 assert(
   compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role === "body",
