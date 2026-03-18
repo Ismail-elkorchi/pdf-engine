@@ -709,6 +709,84 @@ const singleByteEncodedTextPdfTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+const ligatureEncodedTextContentStreamText = [
+  "BT",
+  "/F1 12 Tf",
+  "<01020304050607> Tj",
+  "ET",
+].join("\n");
+const ligatureEncodedTextPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(ligatureEncodedTextContentStreamText).byteLength)} >>`,
+  "stream",
+  ligatureEncodedTextContentStreamText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+  "endobj",
+  "6 0 obj",
+  "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /f_f 2 /space 3 /f_f_i 4 /space 5 /f_i 6 /space 7 /f_l] >>",
+  "endobj",
+  "xref",
+  "0 7",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 7 >>",
+  "startxref",
+  "__LIGATURE_ENCODED_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
+const extendedNamedGlyphContentStreamText = [
+  "BT",
+  "/F1 12 Tf",
+  "<0102030405> Tj",
+  "ET",
+].join("\n");
+const extendedNamedGlyphPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(extendedNamedGlyphContentStreamText).byteLength)} >>`,
+  "stream",
+  extendedNamedGlyphContentStreamText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+  "endobj",
+  "6 0 obj",
+  "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /Abreve 2 /space 3 /Ccaron 4 /space 5 /Gbreve] >>",
+  "endobj",
+  "xref",
+  "0 7",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 7 >>",
+  "startxref",
+  "__EXTENDED_NAMED_GLYPH_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
 const toUnicodeCMapFlateBytes = decodeBase64(
   "eJxdkM1qxCAQx+8+xRy3h0UT2qUHCZSUQA79oGkfwOgkFRoVYw55+0502UIPOr9h5j9fvO2fe2cT8Pfo9YAJJutMxNVvUSOMOFvHqhqM1enq5V8vKjBO4mFfEy69mzxICfyDgmuKO5yejB/xDvhbNBitm+H01Q7kD1sIP7igSyCgacDgRIVeVHhVCwLPsnNvKG7TfibNX8bnHhDq7FdlGO0NrkFpjMrNyKQQDciuaxg68y92KYpx0t8qMnn/SJlCkGHy8pCZDHFbuD24K0z1ZC0ykyGuCle5z7Xi0fE4ym0VvcVIW+TL5fGPwa3D23GDD4cqv18KDXoH",
 );
@@ -760,6 +838,10 @@ const encodedTextStartXrefOffset = encodedTextPdfTemplate.indexOf("xref\n0 5");
 assert(encodedTextStartXrefOffset >= 0, "Encoded-text PDF did not contain an xref section.");
 const singleByteEncodedTextStartXrefOffset = singleByteEncodedTextPdfTemplate.indexOf("xref\n0 7");
 assert(singleByteEncodedTextStartXrefOffset >= 0, "Single-byte encoded-text PDF did not contain an xref section.");
+const ligatureEncodedTextStartXrefOffset = ligatureEncodedTextPdfTemplate.indexOf("xref\n0 7");
+assert(ligatureEncodedTextStartXrefOffset >= 0, "Ligature encoded-text PDF did not contain an xref section.");
+const extendedNamedGlyphStartXrefOffset = extendedNamedGlyphPdfTemplate.indexOf("xref\n0 7");
+assert(extendedNamedGlyphStartXrefOffset >= 0, "Extended named-glyph PDF did not contain an xref section.");
 
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
 const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
@@ -768,6 +850,14 @@ const encodedTextPdf = encodedTextPdfTemplate.replace("__ENCODED_TEXT_STARTXREF_
 const singleByteEncodedTextPdf = singleByteEncodedTextPdfTemplate.replace(
   "__SINGLE_BYTE_ENCODED_STARTXREF__",
   String(singleByteEncodedTextStartXrefOffset),
+);
+const ligatureEncodedTextPdf = ligatureEncodedTextPdfTemplate.replace(
+  "__LIGATURE_ENCODED_STARTXREF__",
+  String(ligatureEncodedTextStartXrefOffset),
+);
+const extendedNamedGlyphPdf = extendedNamedGlyphPdfTemplate.replace(
+  "__EXTENDED_NAMED_GLYPH_STARTXREF__",
+  String(extendedNamedGlyphStartXrefOffset),
 );
 const flateXrefOffset = encodeText(flatePdfPrefix).byteLength + flateStreamBytes.byteLength + encodeText(flatePdfMiddle).byteLength;
 const flatePdfSuffix = [
@@ -1033,6 +1123,20 @@ const singleByteEncodedTextResult = await engine.run({
   source: {
     bytes: encodeText(singleByteEncodedTextPdf),
     fileName: "single-byte-encoded-text.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const ligatureEncodedTextResult = await engine.run({
+  source: {
+    bytes: encodeText(ligatureEncodedTextPdf),
+    fileName: "ligature-encoded-text.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const extendedNamedGlyphResult = await engine.run({
+  source: {
+    bytes: encodeText(extendedNamedGlyphPdf),
+    fileName: "extended-named-glyphs.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -1797,6 +1901,38 @@ assert(
 assert(
   !singleByteEncodedTextResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
   "Single-byte encoded-text observation still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  ligatureEncodedTextResult.observation.status === "completed",
+  `Ligature encoded-text observation status was ${ligatureEncodedTextResult.observation.status}.`,
+);
+assert(
+  ligatureEncodedTextResult.observation.value?.extractedText === "ff ffi fi fl",
+  `Unexpected ligature encoded-text extraction: ${JSON.stringify(ligatureEncodedTextResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  ligatureEncodedTextResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
+  `Unexpected ligature unicode mapping source: ${JSON.stringify(ligatureEncodedTextResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource ?? null)}.`,
+);
+assert(
+  !ligatureEncodedTextResult.observation.value?.knownLimits.includes("literal-font-encoding-not-implemented"),
+  "Ligature encoded-text observation still reported literal-font-encoding-not-implemented.",
+);
+assert(
+  extendedNamedGlyphResult.observation.status === "completed",
+  `Extended named-glyph observation status was ${extendedNamedGlyphResult.observation.status}.`,
+);
+assert(
+  extendedNamedGlyphResult.observation.value?.extractedText === "Ă Č Ğ",
+  `Unexpected extended named-glyph extraction: ${JSON.stringify(extendedNamedGlyphResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  extendedNamedGlyphResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
+  `Unexpected extended named-glyph unicode mapping source: ${JSON.stringify(extendedNamedGlyphResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource ?? null)}.`,
+);
+assert(
+  !extendedNamedGlyphResult.observation.value?.knownLimits.includes("literal-font-encoding-not-implemented"),
+  "Extended named-glyph observation still reported literal-font-encoding-not-implemented.",
 );
 assert(
   delayedContentResult.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4,

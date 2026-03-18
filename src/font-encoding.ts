@@ -181,6 +181,74 @@ const GLYPH_NAME_TO_UNICODE = new Map<string, string>([
   ["tilde", "˜"],
   ["section", "§"],
   ["paragraph", "¶"],
+  ["ff", "ff"],
+  ["ffi", "ffi"],
+  ["ffl", "ffl"],
+  ["f_f", "ff"],
+  ["f_f_i", "ffi"],
+  ["f_f_l", "ffl"],
+  ["f_i", "fi"],
+  ["f_l", "fl"],
+  ["Abreve", "Ă"],
+  ["abreve", "ă"],
+  ["Aogonek", "Ą"],
+  ["aogonek", "ą"],
+  ["Amacron", "Ā"],
+  ["amacron", "ā"],
+  ["AEacute", "Ǽ"],
+  ["aeacute", "ǽ"],
+  ["Cacute", "Ć"],
+  ["cacute", "ć"],
+  ["Ccaron", "Č"],
+  ["ccaron", "č"],
+  ["Ccircumflex", "Ĉ"],
+  ["ccircumflex", "ĉ"],
+  ["Cdotaccent", "Ċ"],
+  ["cdotaccent", "ċ"],
+  ["Dcaron", "Ď"],
+  ["dcaron", "ď"],
+  ["Dcroat", "Đ"],
+  ["dcroat", "đ"],
+  ["Ebreve", "Ĕ"],
+  ["ebreve", "ĕ"],
+  ["Ecaron", "Ě"],
+  ["ecaron", "ě"],
+  ["Edotaccent", "Ė"],
+  ["edotaccent", "ė"],
+  ["Emacron", "Ē"],
+  ["emacron", "ē"],
+  ["Eng", "Ŋ"],
+  ["eng", "ŋ"],
+  ["Eogonek", "Ę"],
+  ["eogonek", "ę"],
+  ["Gbreve", "Ğ"],
+  ["gbreve", "ğ"],
+  ["Gcircumflex", "Ĝ"],
+  ["gcircumflex", "ĝ"],
+  ["Gcommaaccent", "Ģ"],
+  ["gcommaaccent", "ģ"],
+  ["Gdotaccent", "Ġ"],
+  ["gdotaccent", "ġ"],
+  ["Hbar", "Ħ"],
+  ["hbar", "ħ"],
+  ["Hcircumflex", "Ĥ"],
+  ["hcircumflex", "ĥ"],
+  ["Alpha", "Α"],
+  ["Alphatonos", "Ά"],
+  ["Beta", "Β"],
+  ["Gamma", "Γ"],
+  ["Delta", "Δ"],
+  ["Epsilon", "Ε"],
+  ["Epsilontonos", "Έ"],
+  ["Eta", "Η"],
+  ["Etatonos", "Ή"],
+  ["Chi", "Χ"],
+  ["Acute", "´"],
+  ["Grave", "`"],
+  ["Caron", "ˇ"],
+  ["DieresisAcute", "΅"],
+  ["DieresisGrave", "῭"],
+  ["Hungarumlaut", "˝"],
 ]);
 
 export function buildPdfSingleByteFontEncoding(input: {
@@ -392,6 +460,11 @@ function mapGlyphNameToUnicode(glyphName: string): string | undefined {
     return normalizedName;
   }
 
+  const compositeGlyphText = mapCompositeGlyphNameToUnicode(normalizedName);
+  if (compositeGlyphText) {
+    return compositeGlyphText;
+  }
+
   const digit = DIGIT_NAMES.get(normalizedName);
   if (digit) {
     return digit;
@@ -418,6 +491,28 @@ function mapGlyphNameToUnicode(glyphName: string): string | undefined {
   }
 
   return undefined;
+}
+
+function mapCompositeGlyphNameToUnicode(glyphName: string): string | undefined {
+  if (!glyphName.includes("_")) {
+    return undefined;
+  }
+
+  const parts = glyphName.split("_").filter((part) => part.length > 0);
+  if (parts.length < 2) {
+    return undefined;
+  }
+
+  const decodedParts: string[] = [];
+  for (const part of parts) {
+    const decodedPart = mapGlyphNameToUnicode(part);
+    if (!decodedPart) {
+      return undefined;
+    }
+    decodedParts.push(decodedPart);
+  }
+
+  return decodedParts.join("");
 }
 
 function normalizeGlyphName(glyphName: string): string {
