@@ -476,6 +476,19 @@ const regulatoryTextRecoveryPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const regulatoryLayoutFlowPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 700 Tm",
+    "(Body text appears first in stream order.) Tj",
+    "1 0 0 1 72 680 Tm",
+    "(1. What is Example? Body paragraph starts here.) Tj",
+    "1 0 0 1 72 740 Tm",
+    "(REGULATORY COVER TITLE) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const gridTablePdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1108,6 +1121,13 @@ const regulatoryTextRecoveryResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const regulatoryLayoutFlowResult = await engine.run({
+  source: {
+    bytes: encodeText(regulatoryLayoutFlowPdf),
+    fileName: "regulatory-layout-flow.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const gridTableResult = await engine.run({
   source: {
     bytes: encodeText(gridTablePdf),
@@ -1312,6 +1332,23 @@ assert(
 assert(
   !hasUnreadableControlCharacters(regulatoryTextRecoveryResult.observation.value?.extractedText ?? ""),
   `Regulatory observation text still contained unreadable control characters: ${JSON.stringify(regulatoryTextRecoveryResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  regulatoryLayoutFlowResult.observation.value?.extractedText ===
+    "REGULATORY COVER TITLE\n\nBody text appears first in stream order.\n\n1. What is Example?\nBody paragraph starts here.",
+  `Regulatory layout-flow observation text was ${JSON.stringify(regulatoryLayoutFlowResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[0]?.text === "REGULATORY COVER TITLE",
+  `Regulatory layout-flow first block was ${JSON.stringify(regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[0]?.text ?? null)}.`,
+);
+assert(
+  regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[2]?.text === "1. What is Example?",
+  `Regulatory layout-flow heading block was ${JSON.stringify(regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[2]?.text ?? null)}.`,
+);
+assert(
+  regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[3]?.text === "Body paragraph starts here.",
+  `Regulatory layout-flow body block was ${JSON.stringify(regulatoryLayoutFlowResult.layout.value?.pages[0]?.blocks[3]?.text ?? null)}.`,
 );
 assert(
   gridTableResult.knowledge.value?.tables.length === 1,
