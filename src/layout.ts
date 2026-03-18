@@ -104,8 +104,10 @@ function groupPageIntoBlocks(page: PdfObservedPage): PdfLayoutPage {
 
   flushCurrentRuns();
   const mergedBlocks = mergeAdjacentBlocks(lineBlocks, pageWritingMode);
-  const orderedBlocks = orderPageBlocks(mergedBlocks, pageWritingMode);
-  const paragraphBlocks = annotateParagraphStarts(orderedBlocks, pageWritingMode);
+  const structuredBlocks = splitStructuredBlocks(mergedBlocks, pageWritingMode);
+  const orderedBlocks = orderPageBlocks(structuredBlocks, pageWritingMode);
+  const filteredBlocks = filterPeripheralBlocks(orderedBlocks);
+  const paragraphBlocks = annotateParagraphStarts(filteredBlocks, pageWritingMode);
 
   return {
     pageNumber: page.pageNumber,
@@ -205,7 +207,7 @@ function orderPageBlocks(
   writingMode: PdfWritingMode | undefined,
 ): readonly GroupedBlockSeed[] {
   if (writingMode !== "vertical") {
-    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
+    return orderHorizontalBlocks(blocks);
   }
 
   const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
@@ -248,6 +250,163 @@ function orderPageBlocks(
     ...block,
     readingOrder: blockIndex,
   }));
+}
+
+function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
+  const firstReadableBlock = blocks.find((block) => block.anchor !== undefined && !looksLikeProductionMetadata(block.text));
+  if (!firstReadableBlock?.anchor) {
+    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
+  }
+
+  const promotionThreshold = Math.max(24, (firstReadableBlock.fontSize ?? 12) * 2.2);
+  const promotedBlocks = blocks.filter((block, blockIndex) =>
+    blockIndex > 0 &&
+    block.anchor !== undefined &&
+    !looksLikeProductionMetadata(block.text) &&
+    block.anchor.y > firstReadableBlock.anchor!.y + promotionThreshold &&
+    (looksLikeHeading(block.text, block.fontSize) || looksLikeSectionHeading(block.text))
+  );
+  if (promotedBlocks.length === 0) {
+    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
+  }
+
+  const promotedBlockIds = new Set(promotedBlocks.map((block) => block.id));
+  const orderedBlocks = [
+    ...[...promotedBlocks].sort(compareHorizontalBlocks),
+    ...blocks.filter((block) => !promotedBlockIds.has(block.id)),
+  ];
+
+  return orderedBlocks.map((block, blockIndex) => ({
+    ...block,
+    readingOrder: blockIndex,
+  }));
+}
+
+function compareHorizontalBlocks(left: GroupedBlockSeed, right: GroupedBlockSeed): number {
+  const leftAnchor = left.anchor;
+  const rightAnchor = right.anchor;
+  if (!leftAnchor || !rightAnchor) {
+    return left.readingOrder - right.readingOrder;
+  }
+
+  const leftFontSize = left.fontSize ?? right.fontSize ?? 12;
+  const rightFontSize = right.fontSize ?? left.fontSize ?? 12;
+  const averageFontSize = (leftFontSize + rightFontSize) / 2;
+  const sameLineThreshold = Math.max(6, averageFontSize * 0.8);
+  if (Math.abs(leftAnchor.y - rightAnchor.y) <= sameLineThreshold) {
+    return leftAnchor.x - rightAnchor.x;
+  }
+
+  return rightAnchor.y - leftAnchor.y;
+}
+
+function splitStructuredBlocks(
+  blocks: readonly GroupedBlockSeed[],
+  writingMode: PdfWritingMode | undefined,
+): readonly GroupedBlockSeed[] {
+  if (writingMode === "vertical") {
+    return blocks;
+  }
+
+  return blocks.flatMap((block) => splitStructuredBlock(block));
+}
+
+function splitStructuredBlock(block: GroupedBlockSeed): readonly GroupedBlockSeed[] {
+  const split = splitInlineHeadingAndBody(block.text);
+  if (!split) {
+    return [block];
+  }
+
+  const headingBlock: GroupedBlockSeed = {
+    ...block,
+    id: `${block.id}-heading`,
+    text: split.heading,
+  };
+  const bodyBlock: GroupedBlockSeed = {
+    ...block,
+    id: `${block.id}-body`,
+    text: split.body,
+    startsParagraph: true,
+  };
+
+  return [headingBlock, bodyBlock];
+}
+
+function splitInlineHeadingAndBody(text: string): { readonly heading: string; readonly body: string } | undefined {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0) {
+    return undefined;
+  }
+
+  const numberedPrefixMatch = normalized.match(/^\d+(?:\.\d+)*[.)]?\s+/u);
+  if (!numberedPrefixMatch) {
+    return undefined;
+  }
+
+  const questionIndex = normalized.indexOf("? ");
+  if (questionIndex <= numberedPrefixMatch[0].length + 6) {
+    return undefined;
+  }
+
+  const heading = normalized.slice(0, questionIndex + 1).trim();
+  const body = normalized.slice(questionIndex + 2).trim();
+  if (!startsLikeSentence(body)) {
+    return undefined;
+  }
+
+  return { heading, body };
+}
+
+function filterPeripheralBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
+  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
+  if (anchoredBlocks.length === 0) {
+    return blocks;
+  }
+
+  const yValues = anchoredBlocks.map((block) => (block.anchor as PdfPoint).y);
+  const minY = Math.min(...yValues);
+  const maxY = Math.max(...yValues);
+  const bandSize = Math.max(24, (maxY - minY) * 0.08);
+  const filteredBlocks = blocks.filter((block) => {
+    if (!block.anchor || !looksLikeProductionMetadata(block.text)) {
+      return true;
+    }
+
+    return block.anchor.y < maxY - bandSize && block.anchor.y > minY + bandSize;
+  });
+
+  return filteredBlocks.length > 0 ? filteredBlocks : blocks;
+}
+
+function looksLikeProductionMetadata(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  const metadataSignals = [
+    /\bwww\./iu,
+    /\bemail\b/iu,
+    /\btel\./iu,
+    /\bartwork\b/iu,
+    /\bsupplier\b/iu,
+    /\bcomponent\b/iu,
+    /\bdimension\b/iu,
+    /\bbrand solutions\b/iu,
+    /\brepro\b/iu,
+    /\bnon printing colours\b/iu,
+    /\bdiecut\b/iu,
+    /\bpage:\b/iu,
+    /\bdate:\b/iu,
+    /\bpzn:\b/iu,
+  ];
+  const signalCount = metadataSignals.filter((pattern) => pattern.test(normalized)).length;
+  if (signalCount >= 2) {
+    return true;
+  }
+
+  const punctuationGroups = (normalized.match(/[/:|]/g) ?? []).length;
+  return signalCount >= 1 && punctuationGroups >= 3;
 }
 
 function annotateParagraphStarts(
@@ -487,7 +646,15 @@ function classifyLayoutBlock(
     };
   }
 
-  if (/^(?:[-*•]\s+|\d+[.)]\s+)/u.test(block.text)) {
+  if (looksLikeSectionHeading(block.text)) {
+    return {
+      ...block,
+      role: "heading",
+      roleConfidence: 0.7,
+    };
+  }
+
+  if (/^(?:[-*•]\s+|[a-z][.)]\s+)/u.test(block.text)) {
     return {
       ...block,
       role: "list",
@@ -548,6 +715,27 @@ function looksLikeHeading(text: string, fontSize: number | undefined): boolean {
 
   const uppercaseRatio = letters.filter((character) => character === character.toUpperCase()).length / letters.length;
   return uppercaseRatio > 0.6 || normalized === normalized.toUpperCase();
+}
+
+function looksLikeSectionHeading(text: string): boolean {
+  const normalized = text.replaceAll(/\s+/g, " ").trim();
+  if (normalized.length === 0 || normalized.length > 160) {
+    return false;
+  }
+
+  if (!/^\d+(?:\.\d+)*[.)]?\s+/u.test(normalized)) {
+    return false;
+  }
+
+  if (/[?]$/.test(normalized)) {
+    return true;
+  }
+
+  if (/^\d+(?:\.\d+)*[.)]?\s+\p{Lu}/u.test(normalized) && !/[.!?]$/.test(normalized)) {
+    return true;
+  }
+
+  return false;
 }
 
 function isSameLineBlockContinuation(
