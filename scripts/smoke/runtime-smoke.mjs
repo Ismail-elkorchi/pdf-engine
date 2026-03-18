@@ -470,6 +470,26 @@ const compactLabelClusterPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const fieldLabelFormPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 24 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Person Of Impact) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 684 Tm",
+    "(First Name) Tj",
+    "1 0 0 1 220 684 Tm",
+    "(Last Name) Tj",
+    "1 0 0 1 72 660 Tm",
+    "(Birthday) Tj",
+    "1 0 0 1 72 636 Tm",
+    "(Agree to privacy policy) Tj",
+    "1 0 0 1 72 612 Tm",
+    "(Other) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const scientificTextFlowPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1313,6 +1333,13 @@ const compactLabelClusterResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const fieldLabelFormResult = await engine.run({
+  source: {
+    bytes: encodeText(fieldLabelFormPdf),
+    fileName: "field-label-form.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const scientificTextFlowResult = await engine.run({
   source: {
     bytes: encodeText(scientificTextFlowPdf),
@@ -1599,6 +1626,34 @@ assert(
 assert(
   compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role === "body",
   `Compact label-cluster body role was ${compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role ?? "missing"}.`,
+);
+assert(
+  fieldLabelFormResult.knowledge.value?.tables.length === 1,
+  `Field-label form projection emitted ${String(fieldLabelFormResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
+  fieldLabelFormResult.knowledge.value?.tables[0]?.heuristic === "field-label-form",
+  `Field-label form heuristic was ${fieldLabelFormResult.knowledge.value?.tables[0]?.heuristic ?? "missing"}.`,
+);
+assert(
+  fieldLabelFormResult.knowledge.value?.tables[0]?.headers?.join(",") === "Person Of Impact",
+  `Field-label form headers were ${JSON.stringify(fieldLabelFormResult.knowledge.value?.tables[0]?.headers ?? null)}.`,
+);
+assert(
+  fieldLabelFormResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 1 && cell.columnIndex === 0 && cell.text === "First Name",
+  ),
+  "Field-label form projection did not recover the first field label.",
+);
+assert(
+  fieldLabelFormResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 4 && cell.columnIndex === 0 && cell.text === "Agree to privacy policy",
+  ),
+  "Field-label form projection did not recover the privacy field label.",
+);
+assert(
+  fieldLabelFormResult.knowledge.value?.tables[0]?.cells.every((cell) => cell.citations.length > 0),
+  "Field-label form projection emitted a cell without citations.",
 );
 assert(
   regulatoryTextRecoveryResult.observation.value?.extractedText === "Introduction Readable text",
