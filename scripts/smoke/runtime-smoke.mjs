@@ -1881,7 +1881,7 @@ assert(
 );
 assert(
   fieldLabelFormResult.knowledge.value?.tables[0]?.cells.some(
-    (cell) => cell.columnIndex === 0 && cell.text === "First Name",
+    (cell) => cell.columnIndex === 0 && cell.text === "First Name:",
   ),
   "Field-label form projection did not recover the first field label.",
 );
