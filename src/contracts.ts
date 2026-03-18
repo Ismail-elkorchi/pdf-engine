@@ -77,6 +77,7 @@ export type PdfTextEncodingKind = "literal" | "hex" | "cid";
  */
 export type PdfUnicodeMappingSource =
   | "literal"
+  | "actual-text"
   | "tounicode-cmap"
   | "cid-collection-ucs2"
   | "embedded-font-cmap";
@@ -102,6 +103,7 @@ export type PdfRepairState = "clean" | "recovered" | "recovery-required";
 export type PdfKnownLimitCode =
   | "decryption-not-implemented"
   | "font-unicode-mapping-not-implemented"
+  | "literal-font-encoding-not-implemented"
   | "streams-not-decoded"
   | "unsupported-stream-filters"
   | "stream-decoding-failed"

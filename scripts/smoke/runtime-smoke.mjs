@@ -22,6 +22,17 @@ function assert(condition, message) {
   }
 }
 
+function hasUnreadableControlCharacters(value) {
+  for (const character of value) {
+    const codePoint = character.codePointAt(0) ?? 0;
+    if ((codePoint >= 0x00 && codePoint <= 0x08) || (codePoint >= 0x0b && codePoint <= 0x1f)) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
 function encodeText(value) {
   return new TextEncoder().encode(value);
 }
@@ -370,6 +381,25 @@ const scientificTextFlowPdf = buildPdfWithPageContents([
     "[(resented)-220(here.)] TJ",
     "0 -28 Td",
     "[(Second)-220(paragraph)-220(starts)-220(here.)] TJ",
+    "ET",
+  ].join("\n"),
+]);
+const regulatoryTextRecoveryPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "/Artifact <</O /Layout>> BDC",
+    "72 720 Td",
+    "(\\001\\002\\003\\004) Tj",
+    "EMC",
+    "/Span <</ActualText (Introduction)>> BDC",
+    "0 -14 Td",
+    "(\\001\\002\\003) Tj",
+    "EMC",
+    "0 -14 Td",
+    "(Readable text) Tj",
+    "0 -14 Td",
+    "(\\001\\002) Tj",
     "ET",
   ].join("\n"),
 ]);
@@ -843,6 +873,13 @@ const scientificTextFlowResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const regulatoryTextRecoveryResult = await engine.run({
+  source: {
+    bytes: encodeText(regulatoryTextRecoveryPdf),
+    fileName: "regulatory-text-recovery.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const repeatedBoundaryResult = await engine.toLayout({
   source: {
     bytes: encodeText(repeatedBoundaryPdf),
@@ -985,6 +1022,30 @@ assert(
   scientificTextFlowResult.knowledge.value?.chunks[0]?.text ===
     "Dense retrieval, which describes the use of contextualised language models such as BERT, is represented here.\n\nSecond paragraph starts here.",
   `Scientific text-flow knowledge text was ${JSON.stringify(scientificTextFlowResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
+);
+assert(
+  regulatoryTextRecoveryResult.observation.value?.extractedText === "Introduction Readable text",
+  `Regulatory observation text was ${JSON.stringify(regulatoryTextRecoveryResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  regulatoryTextRecoveryResult.layout.value?.extractedText === "Introduction Readable text",
+  `Regulatory layout text was ${JSON.stringify(regulatoryTextRecoveryResult.layout.value?.extractedText ?? null)}.`,
+);
+assert(
+  regulatoryTextRecoveryResult.knowledge.value?.chunks[0]?.text === "Introduction Readable text",
+  `Regulatory knowledge text was ${JSON.stringify(regulatoryTextRecoveryResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
+);
+assert(
+  regulatoryTextRecoveryResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "actual-text",
+  `Regulatory actual-text mapping source was ${regulatoryTextRecoveryResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource ?? "missing"}.`,
+);
+assert(
+  regulatoryTextRecoveryResult.observation.value?.knownLimits.includes("literal-font-encoding-not-implemented"),
+  "Regulatory observation known limits did not include literal-font-encoding-not-implemented.",
+);
+assert(
+  !hasUnreadableControlCharacters(regulatoryTextRecoveryResult.observation.value?.extractedText ?? ""),
+  `Regulatory observation text still contained unreadable control characters: ${JSON.stringify(regulatoryTextRecoveryResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(

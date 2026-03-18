@@ -41,17 +41,27 @@ export interface ParsedFontResourceBinding {
   readonly fontRef: PdfObjectRef;
 }
 
+type ParsedTextArrayOperand =
+  | { readonly kind: "literal"; readonly token: string }
+  | { readonly kind: "hex"; readonly token: string }
+  | { readonly kind: "adjustment"; readonly value: number };
+
+type ParsedMarkedContentKind = "artifact" | "span" | "other";
+
+interface ParsedMarkedContentContext {
+  readonly kind: ParsedMarkedContentKind;
+  readonly actualText?: string;
+}
+
 export interface ParsedTextOperatorRun {
   readonly operator: "Tj" | "TJ" | "'" | "\"";
   readonly fontResourceName?: string;
   readonly fontSize?: number;
   readonly startsNewLine: boolean;
   readonly anchor?: PdfPoint;
-  readonly operands: ReadonlyArray<
-    | { readonly kind: "literal"; readonly token: string }
-    | { readonly kind: "hex"; readonly token: string }
-    | { readonly kind: "adjustment"; readonly value: number }
-  >;
+  readonly operands: ReadonlyArray<ParsedTextArrayOperand>;
+  readonly markedContentKind?: ParsedMarkedContentKind;
+  readonly actualText?: string;
 }
 
 export interface PdfShellAnalysis {
@@ -1392,14 +1402,8 @@ function readTrailingNumericOperands(
     | { readonly kind: "name"; readonly token: string }
     | { readonly kind: "literal"; readonly token: string }
     | { readonly kind: "hex"; readonly token: string }
-    | {
-      readonly kind: "array";
-      readonly items: ReadonlyArray<
-        | { readonly kind: "literal"; readonly token: string }
-        | { readonly kind: "hex"; readonly token: string }
-        | { readonly kind: "adjustment"; readonly value: number }
-      >;
-    }
+    | { readonly kind: "dictionary"; readonly token: string }
+    | { readonly kind: "array"; readonly items: ReadonlyArray<ParsedTextArrayOperand> }
     | { readonly kind: "other"; readonly token: string }
   >,
   count: number,
@@ -1450,18 +1454,13 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
   let currentTextAnchor: PdfPoint | undefined;
   let currentLeading: number | undefined;
   let pendingLineBreak = false;
+  const markedContentStack: ParsedMarkedContentContext[] = [];
   const operands: Array<
     | { kind: "name"; token: string }
     | { kind: "literal"; token: string }
     | { kind: "hex"; token: string }
-    | {
-      kind: "array";
-      items: ReadonlyArray<
-        | { readonly kind: "literal"; readonly token: string }
-        | { readonly kind: "hex"; readonly token: string }
-        | { readonly kind: "adjustment"; readonly value: number }
-      >;
-    }
+    | { kind: "dictionary"; token: string }
+    | { kind: "array"; items: ReadonlyArray<ParsedTextArrayOperand> }
     | { kind: "other"; token: string }
   > = [];
 
@@ -1509,6 +1508,18 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
       continue;
     }
 
+    if (current === "<" && text[index + 1] === "<") {
+      const dictionary = readPdfDictionaryToken(text, index);
+      if (!dictionary) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "dictionary", token: dictionary.token });
+      index = dictionary.nextIndex;
+      continue;
+    }
+
     if (current === "[") {
       const array = readPdfTextArrayToken(text, index);
       if (!array) {
@@ -1532,6 +1543,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
       operands.length = 0;
       pendingLineBreak = false;
       currentTextAnchor = undefined;
+      markedContentStack.length = 0;
       index = tokenEnd;
       continue;
     }
@@ -1605,6 +1617,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
       const literal = [...operands].reverse().find(
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
+      const markedContent = markedContentStack.at(-1);
       if (literal?.kind === "literal") {
         runs.push({
           operator: "Tj",
@@ -1613,6 +1626,8 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(currentTextAnchor !== undefined ? { anchor: currentTextAnchor } : {}),
           startsNewLine: pendingLineBreak,
           operands: [literal],
+          ...(markedContent?.kind !== undefined ? { markedContentKind: markedContent.kind } : {}),
+          ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       } else if (literal?.kind === "hex") {
         runs.push({
@@ -1622,6 +1637,8 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(currentTextAnchor !== undefined ? { anchor: currentTextAnchor } : {}),
           startsNewLine: pendingLineBreak,
           operands: [literal],
+          ...(markedContent?.kind !== undefined ? { markedContentKind: markedContent.kind } : {}),
+          ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       }
       operands.length = 0;
@@ -1632,6 +1649,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
 
     if (token === "TJ") {
       const array = operands.at(-1);
+      const markedContent = markedContentStack.at(-1);
       if (array?.kind === "array") {
         runs.push({
           operator: "TJ",
@@ -1640,6 +1658,8 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(currentTextAnchor !== undefined ? { anchor: currentTextAnchor } : {}),
           startsNewLine: pendingLineBreak,
           operands: array.items,
+          ...(markedContent?.kind !== undefined ? { markedContentKind: markedContent.kind } : {}),
+          ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       }
       operands.length = 0;
@@ -1653,6 +1673,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
       const literal = [...operands].reverse().find(
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
+      const markedContent = markedContentStack.at(-1);
       if (literal?.kind === "literal") {
         runs.push({
           operator: "'",
@@ -1661,6 +1682,8 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
           startsNewLine: true,
           operands: [literal],
+          ...(markedContent?.kind !== undefined ? { markedContentKind: markedContent.kind } : {}),
+          ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       } else if (literal?.kind === "hex") {
         runs.push({
@@ -1670,6 +1693,8 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
           startsNewLine: true,
           operands: [literal],
+          ...(markedContent?.kind !== undefined ? { markedContentKind: markedContent.kind } : {}),
+          ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       }
       currentTextAnchor = lineAnchor;
@@ -1684,6 +1709,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
       const literal = [...operands].reverse().find(
         (operand) => operand.kind === "literal" || operand.kind === "hex",
       );
+      const markedContent = markedContentStack.at(-1);
       if (literal?.kind === "literal") {
         runs.push({
           operator: "\"",
@@ -1692,6 +1718,8 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
           startsNewLine: true,
           operands: [literal],
+          ...(markedContent?.kind !== undefined ? { markedContentKind: markedContent.kind } : {}),
+          ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       } else if (literal?.kind === "hex") {
         runs.push({
@@ -1701,11 +1729,35 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(lineAnchor !== undefined ? { anchor: lineAnchor } : {}),
           startsNewLine: true,
           operands: [literal],
+          ...(markedContent?.kind !== undefined ? { markedContentKind: markedContent.kind } : {}),
+          ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       }
       currentTextAnchor = lineAnchor;
       operands.length = 0;
       pendingLineBreak = false;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "BDC") {
+      markedContentStack.push(readMarkedContentContext(operands));
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "BMC") {
+      const tagOperand = [...operands].reverse().find((operand) => operand.kind === "name");
+      markedContentStack.push(classifyMarkedContent(tagOperand?.kind === "name" ? tagOperand.token : undefined));
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    if (token === "EMC") {
+      markedContentStack.pop();
+      operands.length = 0;
       index = tokenEnd;
       continue;
     }
@@ -1746,26 +1798,110 @@ export function extractTextOperatorRuns(text: string): string[] {
   return [...analyzeTextOperators(text).runs];
 }
 
+function readMarkedContentContext(
+  operands: ReadonlyArray<
+    | { readonly kind: "name"; readonly token: string }
+    | { readonly kind: "literal"; readonly token: string }
+    | { readonly kind: "hex"; readonly token: string }
+    | { readonly kind: "dictionary"; readonly token: string }
+    | { readonly kind: "array"; readonly items: ReadonlyArray<ParsedTextArrayOperand> }
+    | { readonly kind: "other"; readonly token: string }
+  >,
+): ParsedMarkedContentContext {
+  const tagOperand = [...operands].reverse().find((operand) => operand.kind === "name");
+  const dictionaryOperand = [...operands].reverse().find((operand) => operand.kind === "dictionary");
+  const baseContext = classifyMarkedContent(tagOperand?.kind === "name" ? tagOperand.token : undefined);
+  if (dictionaryOperand?.kind !== "dictionary") {
+    return baseContext;
+  }
+
+  const actualText = extractMarkedContentActualText(dictionaryOperand.token);
+  return actualText === undefined ? baseContext : { ...baseContext, actualText };
+}
+
+function classifyMarkedContent(tagToken: string | undefined): ParsedMarkedContentContext {
+  if (tagToken === "/Artifact") {
+    return { kind: "artifact" };
+  }
+  if (tagToken === "/Span") {
+    return { kind: "span" };
+  }
+  return { kind: "other" };
+}
+
+function extractMarkedContentActualText(dictionaryToken: string): string | undefined {
+  const actualTextToken = parseDictionaryEntries(dictionaryToken).get("ActualText");
+  if (!actualTextToken) {
+    return undefined;
+  }
+
+  if (actualTextToken.startsWith("(") && actualTextToken.endsWith(")")) {
+    return decodePdfPossibleUnicodeBytes(stringToPdfBytes(decodePdfLiteral(actualTextToken)));
+  }
+
+  if (actualTextToken.startsWith("<") && actualTextToken.endsWith(">")) {
+    return decodePdfPossibleUnicodeBytes(readPdfHexBytes(actualTextToken));
+  }
+
+  return undefined;
+}
+
+function stringToPdfBytes(value: string): Uint8Array {
+  return Uint8Array.from(Array.from(value, (character) => character.charCodeAt(0) & 0xff));
+}
+
+function readPdfHexBytes(token: string): Uint8Array {
+  const normalized = token
+    .slice(1, -1)
+    .replaceAll(/\s+/g, "");
+  const padded = normalized.length % 2 === 0 ? normalized : `${normalized}0`;
+  const bytes = new Uint8Array(padded.length / 2);
+
+  for (let index = 0; index < padded.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(padded.slice(index, index + 2), 16);
+  }
+
+  return bytes;
+}
+
+function decodePdfPossibleUnicodeBytes(bytes: Uint8Array): string {
+  if (bytes.byteLength >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return decodePdfUtf16Bytes(bytes.subarray(2), "be");
+  }
+  if (bytes.byteLength >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return decodePdfUtf16Bytes(bytes.subarray(2), "le");
+  }
+
+  return Array.from(bytes, (value) => String.fromCharCode(value)).join("");
+}
+
+function decodePdfUtf16Bytes(bytes: Uint8Array, endianness: "be" | "le"): string {
+  let value = "";
+
+  for (let index = 0; index + 1 < bytes.byteLength; index += 2) {
+    const firstByte = bytes[index] ?? 0;
+    const secondByte = bytes[index + 1] ?? 0;
+    const codePoint = endianness === "be"
+      ? (firstByte << 8) | secondByte
+      : firstByte | (secondByte << 8);
+    value += String.fromCharCode(codePoint);
+  }
+
+  return value;
+}
+
 function readPdfTextArrayToken(
   text: string,
   startIndex: number,
 ): {
-  readonly items: ReadonlyArray<
-    | { readonly kind: "literal"; readonly token: string }
-    | { readonly kind: "hex"; readonly token: string }
-    | { readonly kind: "adjustment"; readonly value: number }
-  >;
+  readonly items: ReadonlyArray<ParsedTextArrayOperand>;
   readonly nextIndex: number;
 } | undefined {
   if (text[startIndex] !== "[") {
     return undefined;
   }
 
-  const items: Array<
-    | { readonly kind: "literal"; readonly token: string }
-    | { readonly kind: "hex"; readonly token: string }
-    | { readonly kind: "adjustment"; readonly value: number }
-  > = [];
+  const items: ParsedTextArrayOperand[] = [];
   let depth = 1;
 
   for (let index = startIndex + 1; index < text.length; index += 1) {
