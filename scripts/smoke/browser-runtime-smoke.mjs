@@ -182,6 +182,20 @@ async function runBrowserSmoke(baseUrl, browserName) {
           "ET"
         ].join("\n")
       ]);
+      const coverMatterPdf = buildPdfWithPageContents([
+        [
+          "BT",
+          "/F1 18 Tf",
+          "1 0 0 1 72 720 Tm",
+          "(The Crazy Ones) Tj",
+          "/F1 12 Tf",
+          "1 0 0 1 72 700 Tm",
+          "(October 14, 1998) Tj",
+          "1 0 0 1 72 666 Tm",
+          "(Heres to the crazy ones.) Tj",
+          "ET"
+        ].join("\n")
+      ]);
       const viewerNavigationPdf = buildPdfWithPageContents([
         [
           "BT",
@@ -446,6 +460,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: sectionHeadingPdf
           }
         });
+        const coverMatterResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: coverMatterPdf
+          }
+        });
         const viewerNavigationResult = await engine.run({
           source: {
             kind: "bytes",
@@ -562,6 +582,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
             sectionHeadingResult.layout.value?.pages[0]?.blocks[1]?.text ===
             "Search engine architectures often follow a cascading architecture.",
           sectionParagraphBreak: sectionHeadingResult.layout.value?.pages[0]?.blocks[2]?.startsParagraph === true,
+          coverMatterTitleRole: coverMatterResult.layout.value?.pages[0]?.blocks[0]?.role === "heading",
+          coverMatterDateRole: coverMatterResult.layout.value?.pages[0]?.blocks[1]?.role === "heading",
+          coverMatterBodyRole: coverMatterResult.layout.value?.pages[0]?.blocks[2]?.role === "body",
           gridTableProjected: gridTableResult.knowledge.value?.tables.length === 1,
           gridTableHeuristic: gridTableResult.knowledge.value?.tables[0]?.heuristic === "layout-grid",
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Quarter,Revenue,Profit",
@@ -611,6 +634,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
           verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null,
           sectionHeadingText: sectionHeadingResult.layout.value?.pages[0]?.blocks[0]?.text ?? null,
           sectionInlineFlow: sectionHeadingResult.layout.value?.pages[0]?.blocks[1]?.text ?? null,
+          coverMatterRoles: coverMatterResult.layout.value?.pages[0]?.blocks.slice(0, 3).map((block) => block.role).join(",") ?? null,
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           denseGridHeaders: denseGridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           delayedContentText: delayedContentResult.observation.value?.extractedText ?? null,
