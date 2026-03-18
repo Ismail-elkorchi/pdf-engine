@@ -750,7 +750,11 @@ export type PdfKnowledgeStrategy = "layout-chunks" | "layout-chunks-and-heuristi
 /**
  * Heuristic used to project one knowledge table.
  */
-export type PdfKnowledgeTableHeuristic = "layout-grid" | "row-sequence";
+export type PdfKnowledgeTableHeuristic =
+  | "layout-grid"
+  | "row-sequence"
+  | "stacked-header-sequence"
+  | "field-value-form";
 
 /**
  * One provenance record attached to a knowledge chunk or table cell.

@@ -22,6 +22,7 @@ const GRID_HEADER_ROW_MIN_COLUMNS = 3;
 const GRID_ROW_CELL_MIN_COUNT = 2;
 const ROW_SEQUENCE_MIN_HEADERS = 3;
 const ROW_SEQUENCE_MIN_ROWS = 2;
+const FIELD_VALUE_MIN_ROWS = 2;
 
 interface ProjectedTableCellSeed {
   readonly columnIndex: number;
@@ -130,6 +131,25 @@ function buildKnowledgeTables(
       !candidates.some((candidate) => projectedTableOverlap(candidate, rowSequenceCandidate))
     ) {
       candidates.push(rowSequenceCandidate);
+    }
+
+    const stackedHeaderCandidate =
+      observationPage === undefined
+        ? undefined
+        : projectStackedHeaderSequenceTable(page, observationPage, runToBlock);
+    if (
+      stackedHeaderCandidate &&
+      !candidates.some((candidate) => projectedTableOverlap(candidate, stackedHeaderCandidate))
+    ) {
+      candidates.push(stackedHeaderCandidate);
+    }
+
+    const fieldValueCandidate = projectFieldValueFormTable(page);
+    if (
+      fieldValueCandidate &&
+      !candidates.some((candidate) => projectedTableOverlap(candidate, fieldValueCandidate))
+    ) {
+      candidates.push(fieldValueCandidate);
     }
   }
 
@@ -319,6 +339,121 @@ function projectRowSequenceTable(
   };
 }
 
+function projectStackedHeaderSequenceTable(
+  layoutPage: PdfLayoutPage,
+  observationPage: PdfObservedPage,
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): ProjectedTableCandidate | undefined {
+  const runs = observationPage.runs.filter((run) => normalizeCellText(run.text).length > 0);
+  const headerGroup = findBestHeaderRunGroup(runs);
+  if (!headerGroup) {
+    return undefined;
+  }
+
+  const headerBlocks = dedupeById(
+    headerGroup.runs
+      .map((run) => runToBlock.get(run.id))
+      .filter((block): block is PdfLayoutBlock => block !== undefined),
+  );
+  const headerTexts = expandStackedHeaderTexts(headerBlocks);
+  if (headerTexts.length < ROW_SEQUENCE_MIN_HEADERS || headerTexts.length >= headerGroup.runs.length) {
+    return undefined;
+  }
+
+  const dataRuns = collectSequenceDataRuns(runs, headerGroup.startIndex);
+  if (dataRuns.length < headerTexts.length * 2 - 1) {
+    return undefined;
+  }
+
+  const bodyRows = chunkSequenceRuns(dataRuns, headerTexts.length);
+  if (bodyRows.length < ROW_SEQUENCE_MIN_ROWS || !looksLikeStackedHeaderBodyRows(bodyRows)) {
+    return undefined;
+  }
+
+  const headerRow: ProjectedTableRowSeed = {
+    cells: headerTexts.map((text, columnIndex) => ({
+      columnIndex,
+      text,
+      blocks: headerBlocks,
+    })),
+  };
+  const bodyRowSeeds = bodyRows.map((rowRuns) => ({
+    cells: rowRuns.map((run, columnIndex) => ({
+      columnIndex,
+      text: normalizeCellText(run.text),
+      blocks: toRunBlocks([run], runToBlock),
+    })),
+  }));
+  const rows = [headerRow, ...bodyRowSeeds];
+
+  return {
+    pageNumber: layoutPage.pageNumber,
+    heuristic: "stacked-header-sequence",
+    headers: headerTexts,
+    blockIds: dedupeStrings(rows.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
+    confidence: Number(Math.min(0.74, 0.48 + headerTexts.length * 0.03 + bodyRows.length * 0.025).toFixed(2)),
+    rows,
+  };
+}
+
+function projectFieldValueFormTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
+  const blocks = page.blocks.filter((block) => block.role !== "header" && block.role !== "footer");
+  if (blocks.length < 3) {
+    return undefined;
+  }
+
+  const rows: ProjectedTableRowSeed[] = [];
+  const blockIds = new Set<string>();
+
+  for (let blockIndex = 0; blockIndex < blocks.length; blockIndex += 1) {
+    const block = blocks[blockIndex] as PdfLayoutBlock;
+    const inlineFieldValue = parseInlineFieldValueRow(block);
+    if (inlineFieldValue) {
+      rows.push(createFieldValueRow(inlineFieldValue.field, inlineFieldValue.value, [block]));
+      blockIds.add(block.id);
+      continue;
+    }
+
+    const label = parseFieldLabel(block.text);
+    if (!label) {
+      continue;
+    }
+
+    const nextBlock = blocks[blockIndex + 1];
+    if (nextBlock === undefined || !looksLikeFieldValuePair(block, nextBlock)) {
+      continue;
+    }
+
+    rows.push(createFieldValueRow(label, normalizeCellText(nextBlock.text), [block, nextBlock]));
+    blockIds.add(block.id);
+    blockIds.add(nextBlock.id);
+    blockIndex += 1;
+  }
+
+  if (rows.length < FIELD_VALUE_MIN_ROWS) {
+    return undefined;
+  }
+
+  const candidateRows: ProjectedTableRowSeed[] = [
+    {
+      cells: [
+        { columnIndex: 0, text: "Field", blocks: [] },
+        { columnIndex: 1, text: "Value", blocks: [] },
+      ],
+    },
+    ...rows,
+  ];
+
+  return {
+    pageNumber: page.pageNumber,
+    heuristic: "field-value-form",
+    headers: ["Field", "Value"],
+    blockIds: [...blockIds],
+    confidence: Number(Math.min(0.78, 0.52 + rows.length * 0.04).toFixed(2)),
+    rows: candidateRows,
+  };
+}
+
 function findBestHeaderRunGroup(
   runs: readonly PdfObservedTextRun[],
 ): { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined {
@@ -373,6 +508,200 @@ function collectSequenceDataRuns(
   }
 
   return collectedRuns;
+}
+
+function expandStackedHeaderTexts(
+  headerBlocks: readonly PdfLayoutBlock[],
+): readonly string[] {
+  const orderedBlocks = headerBlocks
+    .filter((block): block is AnchoredLayoutBlock => block.anchor !== undefined)
+    .sort(compareBlocksByX);
+  if (orderedBlocks.length < 2) {
+    return [];
+  }
+
+  const multilineBlock = orderedBlocks.find((block) => block.text.includes("\n"));
+  if (!multilineBlock) {
+    return [];
+  }
+
+  const headerTexts: string[] = [];
+  for (const block of orderedBlocks) {
+    const lines = block.text
+      .split(/\n+/u)
+      .map((line) => normalizeCellText(line))
+      .filter((line) => line.length > 0);
+    if (lines.length === 0) {
+      continue;
+    }
+
+    if (block.id === multilineBlock.id) {
+      headerTexts.push(...mergeStackedHeaderLines(lines));
+      continue;
+    }
+
+    headerTexts.push(lines[0] as string);
+  }
+
+  return headerTexts.filter((text) => !looksLikeNumericCell(text));
+}
+
+function mergeStackedHeaderLines(lines: readonly string[]): readonly string[] {
+  if (lines.length >= 4 && shouldMergeLeadingHeaderLines(lines[0], lines[1])) {
+    return [joinCellText(lines[0] as string, lines[1] as string), ...lines.slice(2)];
+  }
+
+  return lines;
+}
+
+function shouldMergeLeadingHeaderLines(
+  firstLine: string | undefined,
+  secondLine: string | undefined,
+): boolean {
+  if (firstLine === undefined || secondLine === undefined) {
+    return false;
+  }
+
+  if (firstLine.length === 0 || secondLine.length === 0) {
+    return false;
+  }
+
+  if (looksLikeNumericCell(firstLine) || looksLikeNumericCell(secondLine)) {
+    return false;
+  }
+
+  return firstLine.length <= 24 && secondLine.length <= 24;
+}
+
+function looksLikeStackedHeaderBodyRows(
+  rows: readonly (readonly PdfObservedTextRun[])[],
+): boolean {
+  return rows.every((row, rowIndex) => {
+    const firstCell = normalizeCellText(row[0]?.text ?? "");
+    const secondCell = normalizeCellText(row[1]?.text ?? "");
+    if (!looksLikeNumericCell(firstCell)) {
+      return false;
+    }
+
+    if (secondCell.length === 0 || looksLikeNumericCell(secondCell)) {
+      return false;
+    }
+
+    if (rowIndex === rows.length - 1) {
+      return row.length >= 3;
+    }
+
+    return row.length >= 4;
+  });
+}
+
+function parseInlineFieldValueRow(
+  block: PdfLayoutBlock,
+): { readonly field: string; readonly value: string } | undefined {
+  const normalizedText = normalizeCellText(block.text);
+  if (normalizedText.length === 0) {
+    return undefined;
+  }
+
+  const colonCount = [...normalizedText].filter((character) => character === ":").length;
+  if (colonCount !== 1) {
+    return undefined;
+  }
+
+  const colonIndex = normalizedText.lastIndexOf(":");
+  if (colonIndex < 0) {
+    return undefined;
+  }
+
+  const field = stripFieldPrefix(normalizedText.slice(0, colonIndex));
+  const value = normalizeCellText(normalizedText.slice(colonIndex + 1));
+  if (!field || !value || !looksLikeFieldValueText(value)) {
+    return undefined;
+  }
+
+  return { field, value };
+}
+
+function parseFieldLabel(text: string): string | undefined {
+  const normalizedText = normalizeCellText(text);
+  if (normalizedText.length === 0 || !normalizedText.endsWith(":")) {
+    return undefined;
+  }
+
+  const field = stripFieldPrefix(normalizedText.slice(0, -1));
+  if (!field || looksLikeNumericCell(field)) {
+    return undefined;
+  }
+
+  return field;
+}
+
+function stripFieldPrefix(text: string): string {
+  return text.replace(/^\*\s*/u, "").trim();
+}
+
+function looksLikeFieldValuePair(
+  labelBlock: PdfLayoutBlock,
+  valueBlock: PdfLayoutBlock,
+): boolean {
+  const label = parseFieldLabel(labelBlock.text);
+  const value = normalizeCellText(valueBlock.text);
+  if (
+    !label ||
+    value.length === 0 ||
+    parseFieldLabel(valueBlock.text) ||
+    parseInlineFieldValueRow(valueBlock)
+  ) {
+    return false;
+  }
+
+  if (!looksLikeFieldValueText(value)) {
+    return false;
+  }
+
+  const labelAnchor = labelBlock.anchor;
+  const valueAnchor = valueBlock.anchor;
+  if (labelAnchor === undefined || valueAnchor === undefined) {
+    return false;
+  }
+
+  const sameColumn = Math.abs(labelAnchor.x - valueAnchor.x) <= 12;
+  const closeInFlow = labelAnchor.y - valueAnchor.y <= 40 && labelAnchor.y > valueAnchor.y;
+  return sameColumn && closeInFlow;
+}
+
+function looksLikeFieldValueText(text: string): boolean {
+  const normalizedText = normalizeCellText(text);
+  if (normalizedText.length === 0 || normalizedText.length > 96) {
+    return false;
+  }
+
+  if (normalizedText.endsWith(":")) {
+    return false;
+  }
+
+  return !/^(?:\*?\s*)?(?:\d+\.\s+)?[A-Z][^:]{0,80}:$/u.test(normalizedText);
+}
+
+function createFieldValueRow(
+  field: string,
+  value: string,
+  blocks: readonly PdfLayoutBlock[],
+): ProjectedTableRowSeed {
+  return {
+    cells: [
+      {
+        columnIndex: 0,
+        text: field,
+        blocks,
+      },
+      {
+        columnIndex: 1,
+        text: value,
+        blocks,
+      },
+    ],
+  };
 }
 
 function chunkSequenceRuns(
