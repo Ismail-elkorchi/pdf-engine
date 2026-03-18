@@ -499,6 +499,10 @@ function shouldStartParagraph(
     return true;
   }
 
+  if (shouldKeepParagraphContinuation(previousBlock, currentBlock, previousText, currentText, writingMode)) {
+    return false;
+  }
+
   if (shouldKeepCompactBlocksInParagraph(previousBlock, currentBlock, previousText, currentText)) {
     return false;
   }
@@ -587,6 +591,65 @@ function shouldStartParagraph(
   return hasShortTail;
 }
 
+function shouldKeepParagraphContinuation(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  previousText: string,
+  currentText: string,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  if (previousText.length < 24 || currentText.length === 0) {
+    return false;
+  }
+
+  if (/[.!?]["')\]]*$/u.test(previousText)) {
+    return false;
+  }
+
+  if (looksLikeExplicitParagraphBoundaryText(currentText, currentBlock.fontSize)) {
+    return false;
+  }
+
+  if (looksLikeExplicitParagraphBoundaryText(previousText, previousBlock.fontSize) && !looksLikeNumberedBodyParagraph(previousText)) {
+    return false;
+  }
+
+  if (looksLikeHeadingLikeText(previousText, previousBlock.fontSize) && !looksLikeNumberedBodyParagraph(previousText)) {
+    return false;
+  }
+
+  if (/^(?:[-*•]\s+|[a-z][.)]\s+)/u.test(currentText)) {
+    return false;
+  }
+
+  if (/^\d+[.)]\s+/u.test(currentText) && !looksLikeNumberedBodyParagraph(currentText)) {
+    return false;
+  }
+
+  if (countTextLines(previousBlock.text) > 4 || countTextLines(currentBlock.text) > 4) {
+    return false;
+  }
+
+  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
+  const indentShift = currentBlock.anchor.x - previousBlock.anchor.x;
+  if (indentShift < -Math.max(10, fontSize * 0.9)) {
+    return false;
+  }
+
+  if (looksLikeNumberedBodyParagraph(previousText)) {
+    return verticalGap <= Math.max(48, fontSize * 4) &&
+      (startsWithContinuation(currentText) || startsLikeSentence(currentText));
+  }
+
+  return verticalGap <= Math.max(18, fontSize * 1.5) &&
+    (startsWithContinuation(currentText) || startsLikeSentence(currentText));
+}
+
 function shouldKeepCompactBlocksInParagraph(
   previousBlock: GroupedBlockSeed,
   currentBlock: GroupedBlockSeed,
@@ -599,8 +662,22 @@ function shouldKeepCompactBlocksInParagraph(
 
   const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
   const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
+  const horizontalShift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
   const previousLineCount = countTextLines(previousBlock.text);
   const currentLineCount = countTextLines(currentBlock.text);
+
+  if (
+    looksLikeFieldLikeClusterText(previousText, previousBlock.fontSize) &&
+    looksLikeFieldLikeClusterText(currentText, currentBlock.fontSize) &&
+    Math.abs((previousBlock.fontSize ?? fontSize) - (currentBlock.fontSize ?? fontSize)) <= 2 &&
+    horizontalShift <= Math.max(22, fontSize * 1.8) &&
+    verticalGap <= Math.max(48, fontSize * 4.2) &&
+    !/[.!?]$/.test(previousText) &&
+    !/[.!?]$/.test(currentText) &&
+    !(countLabelMarkers(previousText) <= 2 && countLabelMarkers(currentText) >= 3)
+  ) {
+    return true;
+  }
 
   if (
     looksLikeCompactLabelCluster(previousText, previousBlock.fontSize) &&
@@ -613,6 +690,28 @@ function shouldKeepCompactBlocksInParagraph(
   }
 
   return false;
+}
+
+function looksLikeFieldLikeClusterText(text: string, fontSize: number | undefined): boolean {
+  if (!looksLikeCompactLabelCluster(text, fontSize)) {
+    return false;
+  }
+
+  const normalized = normalizeBlockText(text);
+  if (countLabelMarkers(normalized) > 0) {
+    return true;
+  }
+
+  if (looksLikeTitleCaseHeading(normalized)) {
+    return true;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 6) {
+    return false;
+  }
+
+  return words.every((word) => isTitleCaseWord(word) || isConnectorWord(word) || /^[\p{N}()/-]+$/u.test(word));
 }
 
 function looksLikeCompactLabelCluster(text: string, fontSize: number | undefined): boolean {
@@ -1092,6 +1191,10 @@ function looksLikeSectionHeading(text: string): boolean {
     return false;
   }
 
+  if (looksLikeNumberedBodyParagraph(normalized)) {
+    return false;
+  }
+
   if (!/^\d+(?:\.\d+)*[.)]?\s+/u.test(normalized)) {
     return false;
   }
@@ -1316,8 +1419,12 @@ function serializeLayoutBlocks(blocks: readonly PdfLayoutBlock[]): string {
   let text = "";
 
   for (const [blockIndex, block] of blocks.entries()) {
+    const normalizedBlockText = normalizeBlockText(block.text);
+    if (normalizedBlockText.length === 0) {
+      continue;
+    }
     const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
-    text += `${separator}${block.text}`;
+    text += `${separator}${normalizedBlockText}`;
   }
 
   return text;
