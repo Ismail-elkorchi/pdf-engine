@@ -14,7 +14,10 @@ Report vulnerabilities privately through GitHub Security Advisories:
 
 `https://github.com/Ismail-elkorchi/pdf-engine/security/advisories/new`
 
-When you disclose a vulnerability, include reproduction input, expected behavior, observed behavior, impact details, and runtime/version context. If GitHub Security Advisories is unavailable, open a private draft advisory as soon as access returns instead of filing a public issue.
+When you disclose a vulnerability, include reproduction input, expected behavior,
+observed behavior, impact details, and runtime/version context. If GitHub
+Security Advisories is unavailable, open a private draft advisory as soon as
+access returns instead of filing a public issue.
 
 ## Disclosure expectations
 
