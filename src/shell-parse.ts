@@ -88,6 +88,8 @@ export interface PdfShellAnalysis {
   readonly repairState: PdfRepairState;
 }
 
+const FULL_STRUCTURE_SCAN_LIMIT = 8_000_000;
+
 export async function analyzePdfShell(
   source: PdfDocumentSource,
   policy: PdfNormalizedAdmissionPolicy,
@@ -95,9 +97,21 @@ export async function analyzePdfShell(
   const scanText = decodePdfBytes(source.bytes, policy.resourceBudget.maxScanBytes);
   const byteLength = source.bytes.byteLength;
   const isTruncated = scanText.length < byteLength;
+  const shouldUseFullStructureScan = isTruncated &&
+    byteLength <= Math.min(policy.resourceBudget.maxBytes, FULL_STRUCTURE_SCAN_LIMIT);
+  const structureText = shouldUseFullStructureScan ? decodePdfBytes(source.bytes) : scanText;
+  const tailStartOffset = isTruncated
+    ? Math.max(0, byteLength - policy.resourceBudget.maxScanBytes)
+    : 0;
+  const tailText = isTruncated ? decodePdfBytes(source.bytes.subarray(tailStartOffset)) : scanText;
   const header = findPdfHeader(scanText);
   const fileType = header ? "pdf" : "unknown";
-  const parsedIndirectObjects = parseIndirectObjects(scanText);
+  const parsedIndirectObjects = shouldUseFullStructureScan
+    ? parseIndirectObjects(structureText)
+    : dedupeIndirectObjectsByRef([
+      ...parseIndirectObjects(scanText),
+      ...(isTruncated ? parseIndirectObjects(tailText, tailStartOffset) : []),
+    ]);
   const provisionalObjectIndex = new Map(
     parsedIndirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const),
   );
@@ -105,10 +119,20 @@ export async function analyzePdfShell(
   const expandedObjectStreamResult = expandObjectStreams(finalizedIndirectObjects);
   const indirectObjects = expandedObjectStreamResult.indirectObjects;
   let objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
-  const crossReferenceSections = collectCrossReferenceSections(scanText, indirectObjects);
-  const startXrefOffset = readStartXrefOffset(scanText);
+  const crossReferenceSections = shouldUseFullStructureScan
+    ? collectCrossReferenceSections(structureText, indirectObjects)
+    : dedupeCrossReferenceSections([
+      ...collectCrossReferenceSections(scanText, indirectObjects),
+      ...(isTruncated ? collectCrossReferenceSections(tailText, [], tailStartOffset, false) : []),
+    ]);
+  const startXrefOffset = shouldUseFullStructureScan
+    ? readStartXrefOffset(structureText)
+    : readStartXrefOffset(tailText) ?? (isTruncated ? readStartXrefOffset(scanText) : undefined);
   const startXrefResolved = resolveStartXref(startXrefOffset, crossReferenceSections);
-  const trailer = parseTrailerShell(scanText, indirectObjects);
+  const trailer = shouldUseFullStructureScan
+    ? parseTrailerShell(structureText, indirectObjects)
+    : parseTrailerShell(tailText, indirectObjects) ??
+      (isTruncated ? parseTrailerShell(scanText, indirectObjects) : undefined);
   const pageTree = buildPageEntries(trailer, objectIndex, indirectObjects);
   const pageEntries = pageTree.pages;
   const classifiedIndirectObjects = classifyIndirectObjectStreamRoles(indirectObjects, pageEntries, objectIndex);
@@ -235,11 +259,11 @@ function summarizeCrossReferenceKind(
   return "unknown";
 }
 
-function parseIndirectObjects(text: string): ParsedIndirectObject[] {
+function parseIndirectObjects(text: string, offsetBase = 0): ParsedIndirectObject[] {
   const objects: ParsedIndirectObject[] = [];
 
   for (let index = 0; index < text.length; index += 1) {
-    const objectShell = readIndirectObject(text, index);
+    const objectShell = readIndirectObject(text, index, offsetBase);
     if (!objectShell) {
       continue;
     }
@@ -251,7 +275,32 @@ function parseIndirectObjects(text: string): ParsedIndirectObject[] {
   return objects;
 }
 
-function readIndirectObject(text: string, startIndex: number): ParsedIndirectObject | undefined {
+function dedupeIndirectObjectsByRef(
+  indirectObjects: readonly ParsedIndirectObject[],
+): ParsedIndirectObject[] {
+  const objectByKey = new Map<string, ParsedIndirectObject>();
+
+  for (const objectShell of indirectObjects) {
+    const objectKey = keyOfObjectRef(objectShell.ref);
+    if (!objectByKey.has(objectKey)) {
+      objectByKey.set(objectKey, objectShell);
+      continue;
+    }
+
+    const currentObject = objectByKey.get(objectKey);
+    if (!currentObject || objectShell.offset < currentObject.offset) {
+      objectByKey.set(objectKey, objectShell);
+    }
+  }
+
+  return [...objectByKey.values()].sort((leftObject, rightObject) => leftObject.offset - rightObject.offset);
+}
+
+function readIndirectObject(
+  text: string,
+  startIndex: number,
+  offsetBase = 0,
+): ParsedIndirectObject | undefined {
   if (!isTokenBoundary(text, startIndex - 1)) {
     return undefined;
   }
@@ -290,14 +339,14 @@ function readIndirectObject(text: string, startIndex: number): ParsedIndirectObj
       objectNumber: objectNumber.value,
       generationNumber: generationNumber.value,
     },
-    offset: startIndex,
-    endOffset: endObjectIndex + "endobj".length,
+    offset: offsetBase + startIndex,
+    endOffset: offsetBase + endObjectIndex + "endobj".length,
     hasStream: streamInfo !== undefined,
     ...(typeName !== undefined ? { typeName } : {}),
     dictionaryKeys,
     ...(bodyText.trim().length > 0 ? { objectValueText: bodyText.trim() } : {}),
-    ...(streamInfo?.dataStartOffset !== undefined ? { streamStartOffset: bodyStart + streamInfo.dataStartOffset } : {}),
-    ...(streamInfo?.dataEndOffset !== undefined ? { streamEndOffset: bodyStart + streamInfo.dataEndOffset } : {}),
+    ...(streamInfo?.dataStartOffset !== undefined ? { streamStartOffset: offsetBase + bodyStart + streamInfo.dataStartOffset } : {}),
+    ...(streamInfo?.dataEndOffset !== undefined ? { streamEndOffset: offsetBase + bodyStart + streamInfo.dataEndOffset } : {}),
     ...(streamInfo?.lengthRef !== undefined ? { streamLengthRef: streamInfo.lengthRef } : {}),
     dictionaryEntries,
   };
@@ -516,6 +565,8 @@ function readIntegerValueFromObject(objectShell: ParsedIndirectObject | undefine
 function collectCrossReferenceSections(
   text: string,
   indirectObjects: readonly ParsedIndirectObject[],
+  offsetBase = 0,
+  includeStreamSections = true,
 ): PdfCrossReferenceSection[] {
   const sections: PdfCrossReferenceSection[] = [];
 
@@ -525,9 +576,13 @@ function collectCrossReferenceSections(
       break;
     }
 
-    const section = readClassicCrossReferenceSection(text, keywordIndex);
+    const section = readClassicCrossReferenceSection(text, keywordIndex, offsetBase);
     sections.push(section);
     searchStart = keywordIndex;
+  }
+
+  if (!includeStreamSections) {
+    return sections.sort((leftSection, rightSection) => leftSection.offset - rightSection.offset);
   }
 
   for (const objectShell of indirectObjects) {
@@ -548,6 +603,24 @@ function collectCrossReferenceSections(
   }
 
   return sections.sort((leftSection, rightSection) => leftSection.offset - rightSection.offset);
+}
+
+function dedupeCrossReferenceSections(
+  sections: readonly PdfCrossReferenceSection[],
+): PdfCrossReferenceSection[] {
+  const dedupedSections: PdfCrossReferenceSection[] = [];
+  const seenSectionKeys = new Set<string>();
+
+  for (const section of sections) {
+    const sectionKey = `${section.kind}:${section.offset}:${section.objectRef ? keyOfObjectRef(section.objectRef) : "none"}`;
+    if (seenSectionKeys.has(sectionKey)) {
+      continue;
+    }
+    seenSectionKeys.add(sectionKey);
+    dedupedSections.push(section);
+  }
+
+  return dedupedSections.sort((leftSection, rightSection) => leftSection.offset - rightSection.offset);
 }
 
 function classifyIndirectObjectStreamRoles(
@@ -676,7 +749,11 @@ function readIntegerArrayValue(value: string | undefined): number[] {
   return [...value.matchAll(/\d+/g)].map((match) => Number(match[0]));
 }
 
-function readClassicCrossReferenceSection(text: string, keywordIndex: number): PdfCrossReferenceSection {
+function readClassicCrossReferenceSection(
+  text: string,
+  keywordIndex: number,
+  offsetBase = 0,
+): PdfCrossReferenceSection {
   let offset = skipPdfWhitespaceAndComments(text, keywordIndex + "xref".length);
   let entryCount = 0;
 
@@ -703,7 +780,7 @@ function readClassicCrossReferenceSection(text: string, keywordIndex: number): P
 
   return {
     kind: "classic",
-    offset: keywordIndex,
+    offset: offsetBase + keywordIndex,
     ...(entryCount > 0 ? { entryCount } : {}),
   };
 }
@@ -783,7 +860,7 @@ function buildPageEntries(
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
   indirectObjects: readonly ParsedIndirectObject[],
 ): { pages: ParsedPageEntry[]; resolved: boolean; inheritedStateResolved: boolean } {
-  const rootRef = trailer?.rootRef;
+  const rootRef = trailer?.rootRef ?? findCatalogRootRef(indirectObjects);
   if (rootRef) {
     const treePages = traversePageTree(rootRef, objectIndex);
     if (treePages.length > 0) {
@@ -797,6 +874,13 @@ function buildPageEntries(
     .map((objectShell, pageIndex) => toPageEntry(objectShell, pageIndex + 1, {}, objectIndex));
 
   return { pages: fallbackPages, resolved: false, inheritedStateResolved: false };
+}
+
+function findCatalogRootRef(
+  indirectObjects: readonly ParsedIndirectObject[],
+): PdfObjectRef | undefined {
+  const catalogObject = [...indirectObjects].reverse().find((objectShell) => objectShell.typeName === "Catalog");
+  return catalogObject?.ref;
 }
 
 function traversePageTree(
@@ -907,8 +991,9 @@ function toPageEntry(
 ): ParsedPageEntry {
   const contentStreamRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Contents"));
   const annotationRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Annots"));
-  const resourceValue = inheritedState.resources;
-  const resourceOrigin: PdfPageValueOrigin | undefined = objectShell.dictionaryEntries.has("Resources")
+  const directResourceValue = readInheritedPageValue(objectShell, "Resources");
+  const resourceValue = directResourceValue ?? inheritedState.resources;
+  const resourceOrigin: PdfPageValueOrigin | undefined = directResourceValue
     ? "direct"
     : resourceValue
       ? "inherited"
