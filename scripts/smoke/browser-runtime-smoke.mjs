@@ -89,6 +89,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
 
     const smoke = await page.evaluate(async () => {
       const { createPdfEngine } = await import("/dist/index.js");
+      const { renderPdfViewer } = await import("/dist/viewer.js");
       const { publicSmokeFixtures, decodeFixturePdfBytes } = await import("/scripts/smoke/fixture-data.mjs");
 
       const encodeText = (value) => new TextEncoder().encode(value);
@@ -180,6 +181,28 @@ async function runBrowserSmoke(baseUrl, browserName) {
           "(Second paragraph starts here.) Tj",
           "ET"
         ].join("\n")
+      ]);
+      const viewerNavigationPdf = buildPdfWithPageContents([
+        [
+          "BT",
+          "/F1 18 Tf",
+          "1 0 0 1 72 720 Tm",
+          "(First Page Summary) Tj",
+          "/F1 12 Tf",
+          "1 0 0 1 72 692 Tm",
+          "(First page narrative block.) Tj",
+          "ET"
+        ].join("\n"),
+        [
+          "BT",
+          "/F1 18 Tf",
+          "1 0 0 1 72 720 Tm",
+          "(Second Page Overview) Tj",
+          "/F1 12 Tf",
+          "1 0 0 1 72 692 Tm",
+          "(Second page body block.) Tj",
+          "ET"
+        ].join("\n"),
       ]);
       const buildDelayedContentPdf = () => {
         const delayedContentStreamText = [
@@ -423,6 +446,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: sectionHeadingPdf
           }
         });
+        const viewerNavigationResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: viewerNavigationPdf
+          }
+        });
         const gridTableResult = await engine.run({
           source: {
             kind: "bytes",
@@ -447,9 +476,63 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: singleByteEncodedPdf
           }
         });
+        const viewerContainer = globalThis.document.createElement("div");
+        globalThis.document.body.append(viewerContainer);
+
+        const readBlockTexts = () => Array.from(
+          viewerContainer.querySelectorAll(".pdf-engine-viewer__block-text"),
+          (element) => element.textContent ?? "",
+        );
+        const findButton = (label) => Array.from(viewerContainer.querySelectorAll("button")).find(
+          (button) => button.textContent === label,
+        ) ?? null;
+        const readTableHeaders = () => Array.from(
+          viewerContainer.querySelectorAll(".pdf-engine-viewer__table th"),
+          (element) => element.textContent ?? "",
+        );
+        const readTableCells = () => Array.from(
+          viewerContainer.querySelectorAll(".pdf-engine-viewer__table td"),
+          (element) => element.textContent ?? "",
+        );
+
+        const viewerHandle = renderPdfViewer(viewerContainer, viewerNavigationResult, {
+          initialPage: 2,
+          showBlockOutlines: true,
+          showChunkAnchors: true,
+        });
+        const initialViewerLabel =
+          viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
+        const initialViewerBlocks = readBlockTexts();
+        const initialPreviousDisabled = findButton("Previous")?.disabled ?? null;
+        const initialNextDisabled = findButton("Next")?.disabled ?? null;
+
+        viewerHandle.goToPage(1);
+        const navigatedViewerLabel =
+          viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
+        const navigatedViewerBlocks = readBlockTexts();
+        const navigatedPreviousDisabled = findButton("Previous")?.disabled ?? null;
+        const navigatedNextDisabled = findButton("Next")?.disabled ?? null;
+
+        viewerHandle.update(denseGridTableResult, { showTables: true });
+        const updatedViewerLabel =
+          viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
+        const updatedViewerBlocks = readBlockTexts();
+        const updatedViewerTableCount =
+          viewerContainer.querySelector("[data-viewer-table-count]")?.dataset.viewerTableCount ?? null;
+        const updatedViewerChunkCount =
+          viewerContainer.querySelector("[data-viewer-chunk-count]")?.dataset.viewerChunkCount ?? null;
+        const updatedViewerBlockCount =
+          viewerContainer.querySelector("[data-viewer-block-count]")?.dataset.viewerBlockCount ?? null;
+        const updatedViewerHeaders = readTableHeaders();
+        const updatedViewerCells = readTableCells();
+
+        viewerHandle.destroy();
+        const viewerDestroyed = viewerContainer.childElementCount === 0;
+        viewerContainer.remove();
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
+          viewerExportPresent: typeof renderPdfViewer === "function",
           runtime: plainResult.runtime.kind === "web",
           supportedRuntimeClaim: engine.identity.supportedRuntimes.includes("web"),
           plainText: plainResult.observation.value?.extractedText === "Browser Hello",
@@ -502,7 +585,21 @@ async function runBrowserSmoke(baseUrl, browserName) {
           singleByteText: singleByteEncodedResult.observation.value?.extractedText === "Encoded Text",
           singleByteMapping: singleByteEncodedResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
           singleByteLimitCleared:
-            !singleByteEncodedResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented")
+            !singleByteEncodedResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+          viewerInitialPage: initialViewerLabel === "Page 2 of 2",
+          viewerInitialBlocks: initialViewerBlocks.some((text) => text.includes("Second Page Overview")),
+          viewerInitialButtons: initialPreviousDisabled === false && initialNextDisabled === true,
+          viewerNavigatedPage: navigatedViewerLabel === "Page 1 of 2",
+          viewerNavigatedBlocks: navigatedViewerBlocks.some((text) => text.includes("First Page Summary")),
+          viewerNavigatedButtons: navigatedPreviousDisabled === true && navigatedNextDisabled === false,
+          viewerUpdatePreservedPage: updatedViewerLabel === "Page 1 of 1",
+          viewerUpdatePreservedPanels: updatedViewerChunkCount !== null && updatedViewerBlockCount !== null,
+          viewerUpdatedBlocks: updatedViewerBlocks.some((text) => text.includes("Code")) === true,
+          viewerTableCount: updatedViewerTableCount === "1",
+          viewerTableHeaders: updatedViewerHeaders.join(",") === "Code,Label,Amount",
+          viewerTableCells:
+            updatedViewerCells.includes("Base Salary") && updatedViewerCells.includes("Hours 25%"),
+          viewerDestroy: viewerDestroyed === true,
         };
         const stablePayload = {
           runtime: plainResult.runtime.kind,
@@ -517,7 +614,11 @@ async function runBrowserSmoke(baseUrl, browserName) {
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           denseGridHeaders: denseGridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           delayedContentText: delayedContentResult.observation.value?.extractedText ?? null,
-          singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null
+          singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null,
+          viewerInitialPage: initialViewerLabel,
+          viewerNavigatedPage: navigatedViewerLabel,
+          viewerUpdatedPage: updatedViewerLabel,
+          viewerHeaders: updatedViewerHeaders.join(","),
         };
 
         return {

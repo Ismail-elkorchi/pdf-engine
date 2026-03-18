@@ -32,8 +32,10 @@ The published surface is still early, but it is no longer contracts-only. This r
 - inherited page-resource state, content-stream provenance for observed text, run-level anchor and font-size hints, and operator-ready stream bodies for unfiltered and `FlateDecode` streams
 - decoded text-operator observation, a line-oriented layout stage with explicit heuristic limitation markers, and extractive knowledge chunks with source citations
 - a first heuristic table projection that stays citation-backed and emits no table when layout evidence is too weak
+- a browser-only `./viewer` subpath that renders staged layout blocks, cited knowledge chunks, and projected tables from existing pipeline results
 - runtime support claims and a no-op disposal contract for future worker or WASM backends
 - runtime smoke coverage for Node.js, Deno, Bun, and a real Chromium browser session, plus a browser bundle compatibility proof
+- required browser-compat proof on GitHub for Chromium, Firefox, and WebKit
 - JSR/npm publication scaffolding and public GitHub automation
 
-It does not yet ship a finished parser, a mature layout engine, mature structured knowledge projections, a renderer, or benchmark-backed superiority claims.
+It does not yet ship a finished parser, a mature layout engine, mature structured knowledge projections, a pixel-accurate renderer, or benchmark-backed superiority claims.
