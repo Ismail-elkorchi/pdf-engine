@@ -666,8 +666,10 @@ function buildObservedPage(
   const glyphs: PdfObservedGlyph[] = [];
   const runs: PdfObservedTextRun[] = [];
   let contentOrder = 0;
-  let hasFontMappingGap = false;
-  let hasLiteralFontEncodingGap = false;
+  let fontMappingGapCount = 0;
+  let literalFontEncodingGapCount = 0;
+  let hasSevereFontMappingGap = false;
+  let hasSevereLiteralFontEncodingGap = false;
   const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
   const unicodeCMapByFontKey = new Map<string, ReturnType<typeof parsePdfUnicodeCMap>>();
   const embeddedFontMappingByFontKey = new Map<string, PdfEmbeddedFontMapping | undefined>();
@@ -689,8 +691,15 @@ function buildObservedPage(
         singleByteFontEncodingByFontKey,
         inspection,
       );
-      hasFontMappingGap = hasFontMappingGap || observedRun.hasFontMappingGap;
-      hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || observedRun.hasLiteralFontEncodingGap;
+      if (observedRun.hasFontMappingGap) {
+        fontMappingGapCount += 1;
+      }
+      if (observedRun.hasLiteralFontEncodingGap) {
+        literalFontEncodingGapCount += 1;
+      }
+      hasSevereFontMappingGap = hasSevereFontMappingGap || observedRun.hasSevereFontMappingGap;
+      hasSevereLiteralFontEncodingGap =
+        hasSevereLiteralFontEncodingGap || observedRun.hasSevereLiteralFontEncodingGap;
       if (observedRun.text.length === 0) {
         continue;
       }
@@ -754,6 +763,10 @@ function buildObservedPage(
     glyph.writingMode !== undefined ? glyph : { ...glyph, writingMode: pageWritingMode }
   ));
 
+  const hasFontMappingGap = hasSevereFontMappingGap || fontMappingGapCount > 1;
+  const hasLiteralFontEncodingGap =
+    hasSevereLiteralFontEncodingGap || literalFontEncodingGapCount > 1;
+
   return {
     page: {
       pageNumber,
@@ -778,6 +791,8 @@ function observeParsedTextRun(
   text: string;
   hasFontMappingGap: boolean;
   hasLiteralFontEncodingGap: boolean;
+  hasSevereFontMappingGap: boolean;
+  hasSevereLiteralFontEncodingGap: boolean;
   fontRef?: PdfObjectRef;
   textEncodingKind?: PdfTextEncodingKind;
   unicodeMappingSource?: PdfUnicodeMappingSource;
@@ -789,6 +804,8 @@ function observeParsedTextRun(
   let text = "";
   let hasFontMappingGap = false;
   let hasLiteralFontEncodingGap = false;
+  let hasSevereFontMappingGap = false;
+  let hasSevereLiteralFontEncodingGap = false;
   let textEncodingKind: PdfTextEncodingKind | undefined;
   let unicodeMappingSource: PdfUnicodeMappingSource | undefined;
   let pendingTextAdjustment: number | undefined;
@@ -852,15 +869,27 @@ function observeParsedTextRun(
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
           unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
-          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap ||
-            shouldReportMaterialDecodeGap(decodedLiteralText, parsedRun);
+          const hasMaterialDecodeGap = shouldReportMaterialDecodeGap(decodedLiteralText, parsedRun);
+          const shouldReportGap = hasMaterialDecodeGap && !shouldSuppressTrivialDecodeGap(
+            fontRef,
+            inspection,
+            decodedLiteralText,
+            sanitizedLiteralText,
+          );
+          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || shouldReportGap;
+          hasSevereLiteralFontEncodingGap = hasSevereLiteralFontEncodingGap ||
+            (shouldReportGap && isSevereMaterialDecodeGap(decodedLiteralText));
           continue;
         }
 
         if (shouldSuppressUnreadableLiteralText(preferredLiteralText, parsedRun.markedContentKind)) {
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
-          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || parsedRun.markedContentKind !== "artifact";
+          const shouldReportGap = parsedRun.markedContentKind !== "artifact" &&
+            !shouldSuppressTrivialDecodeGap(fontRef, inspection, decodedLiteralText, preferredLiteralText);
+          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || shouldReportGap;
+          hasSevereLiteralFontEncodingGap = hasSevereLiteralFontEncodingGap ||
+            shouldReportGap;
           continue;
         }
       }
@@ -876,8 +905,16 @@ function observeParsedTextRun(
       pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
       unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
-      hasLiteralFontEncodingGap = hasLiteralFontEncodingGap ||
-        shouldReportMaterialDecodeGap(decodedLiteralText, parsedRun);
+      const hasMaterialDecodeGap = shouldReportMaterialDecodeGap(decodedLiteralText, parsedRun);
+      const shouldReportGap = hasMaterialDecodeGap && !shouldSuppressTrivialDecodeGap(
+        fontRef,
+        inspection,
+        decodedLiteralText,
+        preferredLiteralText,
+      );
+      hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || shouldReportGap;
+      hasSevereLiteralFontEncodingGap = hasSevereLiteralFontEncodingGap ||
+        (shouldReportGap && isSevereMaterialDecodeGap(decodedLiteralText));
       continue;
     }
 
@@ -891,12 +928,17 @@ function observeParsedTextRun(
       singleByteFontEncoding,
     );
     if (!decodedText) {
-      hasFontMappingGap = hasFontMappingGap || shouldReportTextMappingGap(parsedRun);
+      const shouldReportGap = shouldReportTextMappingGap(parsedRun) &&
+        (fontRef !== undefined || shouldReportNoFontHexDecodeGap(operand.token));
+      hasFontMappingGap = hasFontMappingGap || shouldReportGap;
+      hasSevereFontMappingGap = hasSevereFontMappingGap || shouldReportGap;
       continue;
     }
 
-    if (shouldReportMaterialDecodeGap(decodedText, parsedRun)) {
+    const hasMaterialDecodeGap = shouldReportMaterialDecodeGap(decodedText, parsedRun);
+    if (hasMaterialDecodeGap && !shouldSuppressTrivialDecodeGap(fontRef, inspection, decodedText, decodedText.text)) {
       hasFontMappingGap = true;
+      hasSevereFontMappingGap = hasSevereFontMappingGap || isSevereMaterialDecodeGap(decodedText);
     }
     text = appendObservedOperandText(
       text,
@@ -915,6 +957,8 @@ function observeParsedTextRun(
     text: normalizedText,
     hasFontMappingGap,
     hasLiteralFontEncodingGap,
+    hasSevereFontMappingGap,
+    hasSevereLiteralFontEncodingGap,
     startsNewLine: parsedRun.startsNewLine,
     ...(fontRef !== undefined ? { fontRef } : {}),
     ...(textEncodingKind !== undefined ? { textEncodingKind } : {}),
@@ -1152,11 +1196,160 @@ function shouldReportMaterialDecodeGap(
     return true;
   }
 
+  const missingUnitCount = decodedText.sourceUnitCount - decodedText.mappedUnitCount;
+  if (missingUnitCount <= 0) {
+    return false;
+  }
+
+  if (missingUnitCount === 1 && decodedText.mappedUnitCount >= 8) {
+    return false;
+  }
+
+  if (missingUnitCount <= 2 && decodedText.mappedUnitCount >= 24) {
+    return false;
+  }
+
   if (decodedText.mappedUnitCount < 4) {
     return true;
   }
 
   return decodedText.mappedUnitCount / decodedText.sourceUnitCount < 0.9;
+}
+
+function isSevereMaterialDecodeGap(
+  decodedText:
+    | {
+      readonly sourceUnitCount: number;
+      readonly mappedUnitCount: number;
+    }
+    | undefined,
+): boolean {
+  if (!decodedText || decodedText.mappedUnitCount === 0 || decodedText.sourceUnitCount === 0) {
+    return true;
+  }
+
+  const missingUnitCount = decodedText.sourceUnitCount - decodedText.mappedUnitCount;
+  if (missingUnitCount <= 0) {
+    return false;
+  }
+
+  if (missingUnitCount >= 2 && decodedText.mappedUnitCount < 8) {
+    return true;
+  }
+
+  return decodedText.mappedUnitCount / decodedText.sourceUnitCount < 0.7;
+}
+
+function shouldSuppressTrivialDecodeGap(
+  fontRef: PdfObjectRef | undefined,
+  inspection: PdfShellInspection,
+  decodedText?:
+    | {
+      readonly sourceUnitCount: number;
+      readonly mappedUnitCount: number;
+    },
+  previewText?: string,
+): boolean {
+  const normalizedPreview = normalizeObservedRunText(previewText ?? "");
+
+  if (!decodedText) {
+    return isSymbolLikeFont(fontRef, inspection) && !hasLetterOrDigit(normalizedPreview);
+  }
+
+  if (decodedText.sourceUnitCount === 1 && decodedText.mappedUnitCount === 0 && normalizedPreview.length === 0) {
+    return true;
+  }
+
+  if (!isSymbolLikeFont(fontRef, inspection)) {
+    return false;
+  }
+
+  if (decodedText.sourceUnitCount > 8 || hasLetterOrDigit(normalizedPreview)) {
+    return false;
+  }
+
+  return true;
+}
+
+function shouldReportNoFontHexDecodeGap(token: string): boolean {
+  const normalizedHex = normalizeHexOperandToken(token);
+  if (normalizedHex.length === 0) {
+    return false;
+  }
+
+  // CID-like hex units without an active font produce noisy pseudo-text in the
+  // audited slice and are not actionable font-mapping evidence on their own.
+  if (normalizedHex.length % 4 === 0) {
+    return false;
+  }
+
+  return looksPrintableNoFontByteText(readHexOperandBytes(normalizedHex));
+}
+
+function normalizeHexOperandToken(token: string): string {
+  const normalized = token
+    .slice(1, -1)
+    .replaceAll(/\s+/g, "");
+
+  return normalized.length % 2 === 0 ? normalized : `${normalized}0`;
+}
+
+function readHexOperandBytes(normalizedHex: string): Uint8Array {
+  const bytes = new Uint8Array(normalizedHex.length / 2);
+
+  for (let index = 0; index < normalizedHex.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(normalizedHex.slice(index, index + 2), 16);
+  }
+
+  return bytes;
+}
+
+function looksPrintableNoFontByteText(bytes: Uint8Array): boolean {
+  if (bytes.byteLength === 0) {
+    return false;
+  }
+
+  let printableByteCount = 0;
+  let hasLetterOrDigitByte = false;
+
+  for (const value of bytes) {
+    const isPrintableWhitespace = value === 0x09 || value === 0x0a || value === 0x0d || value === 0x20;
+    const isPrintableAscii = value >= 0x21 && value <= 0x7e;
+    if (isPrintableWhitespace || isPrintableAscii) {
+      printableByteCount += 1;
+    }
+    if ((value >= 0x30 && value <= 0x39) || (value >= 0x41 && value <= 0x5a) || (value >= 0x61 && value <= 0x7a)) {
+      hasLetterOrDigitByte = true;
+    }
+  }
+
+  return hasLetterOrDigitByte && printableByteCount / bytes.byteLength >= 0.6;
+}
+
+function isSymbolLikeFont(
+  fontRef: PdfObjectRef | undefined,
+  inspection: PdfShellInspection,
+): boolean {
+  if (!fontRef) {
+    return false;
+  }
+
+  const fontObject = inspection.analysis.objectIndex.get(keyOfObjectRef(fontRef));
+  const fontNameText = [
+    fontObject?.dictionaryEntries.get("BaseFont") ?? "",
+    fontObject?.dictionaryEntries.get("Subtype") ?? "",
+  ].join(" ").toLowerCase();
+
+  return fontNameText.includes("math") ||
+    fontNameText.includes("symbol") ||
+    fontNameText.includes("dingbat") ||
+    fontNameText.includes("txsy") ||
+    fontNameText.includes("txex") ||
+    fontNameText.includes("txmi");
+}
+
+function hasLetterOrDigit(value: string): boolean {
+  return /[\p{Letter}\p{Number}]/u.test(value);
 }
 
 function decodeHexTextOperand(
@@ -1767,6 +1960,10 @@ function isParserRelevantStream(
   }
 
   if (objectShell.dictionaryEntries.get("Filter")?.trim() === "/DCTDecode") {
+    return false;
+  }
+
+  if (objectShell.dictionaryEntries.has("FunctionType")) {
     return false;
   }
 
