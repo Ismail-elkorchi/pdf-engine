@@ -2510,6 +2510,19 @@ assert(
   "Contract-award projection emitted a cell without citations.",
 );
 assert(
+  contractAwardTableResult.knowledge.value?.extractedText.includes(
+    "Serial No. | Contract Description | Contractor | Amount | Remarks",
+  ),
+  `Contract-award knowledge text was ${JSON.stringify(contractAwardTableResult.knowledge.value?.extractedText ?? null)}.`,
+);
+assert(
+  (contractAwardTableResult.knowledge.value?.extractedText.indexOf("Procurement of Traffic Engineering") ?? -1) <
+    (contractAwardTableResult.knowledge.value?.extractedText.indexOf("Procurement of Software") ?? -1) &&
+    (contractAwardTableResult.knowledge.value?.extractedText.indexOf("Procurement of Software") ?? -1) <
+      (contractAwardTableResult.knowledge.value?.extractedText.indexOf("Production of Road Safety Posters") ?? -1),
+  `Contract-award knowledge ordering was ${JSON.stringify(contractAwardTableResult.knowledge.value?.extractedText ?? null)}.`,
+);
+assert(
   regulatoryTextRecoveryResult.observation.value?.extractedText === "Introduction Readable text",
   `Regulatory observation text was ${JSON.stringify(regulatoryTextRecoveryResult.observation.value?.extractedText ?? null)}.`,
 );

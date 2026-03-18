@@ -59,8 +59,8 @@ export function buildKnowledgeDocument(
   layout: PdfLayoutDocument,
   observation?: PdfObservedDocument,
 ): PdfKnowledgeDocument {
-  const chunks = buildKnowledgeChunks(layout);
   const tables = buildKnowledgeTables(layout, observation);
+  const chunks = buildKnowledgeChunks(layout, tables);
   const strategy: PdfKnowledgeStrategy =
     tables.length === 0 ? "layout-chunks" : "layout-chunks-and-heuristic-tables";
 
@@ -78,10 +78,28 @@ export function buildKnowledgeDocument(
   };
 }
 
-function buildKnowledgeChunks(layout: PdfLayoutDocument): readonly PdfKnowledgeChunk[] {
+interface InlineKnowledgeTablePlan {
+  readonly table: PdfKnowledgeTable;
+  readonly pageNumber: number;
+  readonly startReadingOrder: number;
+}
+
+function buildKnowledgeChunks(
+  layout: PdfLayoutDocument,
+  tables: readonly PdfKnowledgeTable[],
+): readonly PdfKnowledgeChunk[] {
   const chunks: PdfKnowledgeChunk[] = [];
   let chunkIndex = 0;
   let currentBlocks: PdfLayoutBlock[] = [];
+  const tablePlans = buildInlineKnowledgeTablePlans(layout, tables);
+  const pagePlans = new Map<number, readonly InlineKnowledgeTablePlan[]>(
+    dedupeNumbers(tablePlans.map((plan) => plan.pageNumber)).map((pageNumber) => [
+      pageNumber,
+      tablePlans
+        .filter((plan) => plan.pageNumber === pageNumber)
+        .sort((left, right) => left.startReadingOrder - right.startReadingOrder),
+    ]),
+  );
 
   function flushBlocks(): void {
     if (currentBlocks.length === 0) {
@@ -107,11 +125,93 @@ function buildKnowledgeChunks(layout: PdfLayoutDocument): readonly PdfKnowledgeC
       currentBlocks.push(block);
     }
     flushBlocks();
+
+    for (const plan of pagePlans.get(page.pageNumber) ?? []) {
+      chunkIndex += 1;
+      chunks.push(createProjectedTableChunk(chunkIndex, plan.table));
+    }
   }
 
   flushBlocks();
 
   return chunks;
+}
+
+function buildInlineKnowledgeTablePlans(
+  layout: PdfLayoutDocument,
+  tables: readonly PdfKnowledgeTable[],
+): readonly InlineKnowledgeTablePlan[] {
+  const pagesByNumber = new Map(layout.pages.map((page) => [page.pageNumber, page]));
+  const plans: InlineKnowledgeTablePlan[] = [];
+
+  for (const table of tables) {
+    if (!shouldInlineKnowledgeTableChunk(table)) {
+      continue;
+    }
+
+    const page = pagesByNumber.get(table.pageNumber);
+    if (!page) {
+      continue;
+    }
+
+    const tableBlockIds = new Set(table.blockIds);
+    const startBlock = page.blocks
+      .filter((block) => tableBlockIds.has(block.id))
+      .sort((left, right) => left.readingOrder - right.readingOrder)[0];
+    if (!startBlock) {
+      continue;
+    }
+
+    plans.push({
+      table,
+      pageNumber: table.pageNumber,
+      startReadingOrder: startBlock.readingOrder,
+    });
+  }
+
+  return plans.sort((left, right) => {
+    if (left.pageNumber !== right.pageNumber) {
+      return left.pageNumber - right.pageNumber;
+    }
+    return left.startReadingOrder - right.startReadingOrder;
+  });
+}
+
+function shouldInlineKnowledgeTableChunk(table: PdfKnowledgeTable): boolean {
+  if (table.heuristic === "contract-award-sequence") {
+    return true;
+  }
+
+  if (table.heuristic !== "field-label-form") {
+    return false;
+  }
+
+  return looksLikeInlineFieldLabelTable(table);
+}
+
+function looksLikeInlineFieldLabelTable(table: PdfKnowledgeTable): boolean {
+  const bodyCells = table.cells.filter((cell) => cell.rowIndex > 0 && cell.columnIndex === 0);
+  if (bodyCells.length < FIELD_LABEL_MIN_ROWS) {
+    return false;
+  }
+
+  const colonEndedCount = bodyCells.filter((cell) => normalizeCellText(cell.text).endsWith(":")).length;
+  const compactLabelCount = bodyCells.filter((cell) => looksLikeInlineFieldLabelCell(cell.text)).length;
+  return colonEndedCount / bodyCells.length >= 0.5 || compactLabelCount / bodyCells.length >= 0.75;
+}
+
+function looksLikeInlineFieldLabelCell(text: string): boolean {
+  const normalizedText = normalizeCellText(text);
+  if (normalizedText.length === 0 || normalizedText.length > 40) {
+    return false;
+  }
+
+  if (/[.!?]$/.test(normalizedText)) {
+    return false;
+  }
+
+  const words = normalizedText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  return words.length >= 1 && words.length <= 4;
 }
 
 function buildKnowledgeTables(
@@ -214,6 +314,25 @@ function createChunk(chunkIndex: number, blocks: readonly PdfLayoutBlock[]): Pdf
   };
 }
 
+function createProjectedTableChunk(chunkIndex: number, table: PdfKnowledgeTable): PdfKnowledgeChunk {
+  const sourceCitations = dedupeKnowledgeCitations(table.cells.flatMap((cell) => cell.citations));
+  return {
+    id: `chunk-${chunkIndex}`,
+    text: serializeKnowledgeTable(table),
+    role: "mixed",
+    pageNumbers:
+      sourceCitations.length === 0
+        ? [table.pageNumber]
+        : dedupeNumbers(sourceCitations.map((citation) => citation.pageNumber)),
+    blockIds: dedupeStrings(table.blockIds),
+    runIds: dedupeStrings(sourceCitations.flatMap((citation) => citation.runIds)),
+    citations: sourceCitations.map((citation, citationIndex) => ({
+      ...citation,
+      id: `citation-${chunkIndex}-${citationIndex + 1}`,
+    })),
+  };
+}
+
 function createCitation(chunkIndex: number, blockIndex: number, block: PdfLayoutBlock): PdfKnowledgeCitation {
   return {
     id: `citation-${chunkIndex}-${blockIndex + 1}`,
@@ -223,6 +342,23 @@ function createCitation(chunkIndex: number, blockIndex: number, block: PdfLayout
     text: block.text,
     ...(block.pageRef !== undefined ? { pageRef: block.pageRef } : {}),
   };
+}
+
+function dedupeKnowledgeCitations(citations: readonly PdfKnowledgeCitation[]): readonly PdfKnowledgeCitation[] {
+  const deduped: PdfKnowledgeCitation[] = [];
+  const seenKeys = new Set<string>();
+
+  for (const citation of citations) {
+    const key = `${citation.pageNumber}:${citation.blockId}:${citation.runIds.join(",")}:${citation.text}`;
+    if (seenKeys.has(key)) {
+      continue;
+    }
+
+    seenKeys.add(key);
+    deduped.push(citation);
+  }
+
+  return deduped;
 }
 
 function summarizeChunkRole(blocks: readonly PdfLayoutBlock[]): PdfKnowledgeChunkRole {
@@ -1398,6 +1534,22 @@ function finalizeProjectedTable(tableIndex: number, candidate: ProjectedTableCan
     confidence: candidate.confidence,
     cells,
   };
+}
+
+function serializeKnowledgeTable(table: PdfKnowledgeTable): string {
+  const rowIndexes = [...dedupeNumbers(table.cells.map((cell) => cell.rowIndex))].sort(
+    (left: number, right: number) => left - right,
+  );
+  const serializedRows = rowIndexes.map((rowIndex: number) => {
+    const rowCells = table.cells
+      .filter((cell) => cell.rowIndex === rowIndex)
+      .sort((left, right) => left.columnIndex - right.columnIndex)
+      .map((cell) => normalizeCellText(cell.text))
+      .filter((text) => text.length > 0);
+    return rowCells.join(" | ");
+  });
+
+  return serializedRows.filter((rowText: string) => rowText.length > 0).join("\n");
 }
 
 function createTableCellCitations(
