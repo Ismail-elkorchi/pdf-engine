@@ -1012,7 +1012,7 @@ function normalizeStandaloneFormFieldLabel(text: string): string | undefined {
 
   if (normalizedText.endsWith(":")) {
     const fieldText = stripFieldPrefix(normalizedText.slice(0, -1));
-    return fieldText.length === 0 ? undefined : fieldText;
+    return fieldText.length === 0 ? undefined : `${fieldText}:`;
   }
 
   if (/[.!?]$/.test(normalizedText) || /\d/u.test(normalizedText)) {
