@@ -522,6 +522,33 @@ const fieldLabelFormPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const numberedPromptRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Example Form) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 688 Tm",
+    "(1\\) Please tell us about yourself:) Tj",
+    "1 0 0 1 72 660 Tm",
+    "(2\\) How did you hear about pdfcpu:) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const inlineNarrativeHeadingPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Body paragraph starts here with enough text to anchor the context.) Tj",
+    "1 0 0 1 72 692 Tm",
+    "(The Yankee Lookout.) Tj",
+    "1 0 0 1 72 664 Tm",
+    "(Another body paragraph follows with enough text to keep the line in narrative flow.) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const fieldValueRowPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1952,6 +1979,20 @@ const fieldLabelFormResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const numberedPromptRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(numberedPromptRolePdf),
+    fileName: "numbered-prompt-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const inlineNarrativeHeadingResult = await engine.run({
+  source: {
+    bytes: encodeText(inlineNarrativeHeadingPdf),
+    fileName: "inline-narrative-heading.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const fieldValueRowResult = await engine.run({
   source: {
     bytes: encodeText(fieldValueRowPdf),
@@ -2386,6 +2427,21 @@ assert(
     (block) => block.role === "body" && block.text.includes("First Name:") && block.text.includes("Last Name:"),
   ),
   `Field-label form rows were ${JSON.stringify(fieldLabelFormResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  (fieldLabelFormResult.layout.value?.pages[0]?.blocks ?? []).some(
+    (block) => block.role === "body" && block.text.includes("Gender:"),
+  ),
+  `Field-label gender role was ${JSON.stringify(fieldLabelFormResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  findBlockRole(numberedPromptRoleResult.layout.value?.pages[0]?.blocks ?? [], "1) Please tell us about yourself:") === "list" &&
+    findBlockRole(numberedPromptRoleResult.layout.value?.pages[0]?.blocks ?? [], "2) How did you hear about pdfcpu:") === "list",
+  `Numbered prompt roles were ${JSON.stringify(numberedPromptRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  findBlockRole(inlineNarrativeHeadingResult.layout.value?.pages[0]?.blocks ?? [], "The Yankee Lookout.") === "heading",
+  `Inline narrative heading role was ${JSON.stringify(inlineNarrativeHeadingResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
 );
 assert(
   findBlockRole(fieldValueRowResult.layout.value?.pages[0]?.blocks ?? [], "MBL-SF424Family-AllForms") === "body" &&
