@@ -367,7 +367,14 @@ function filterPeripheralBlocks(blocks: readonly GroupedBlockSeed[]): readonly G
   const minY = Math.min(...yValues);
   const maxY = Math.max(...yValues);
   const bandSize = Math.max(24, (maxY - minY) * 0.08);
-  const filteredBlocks = blocks.filter((block) => {
+  const hasContentsContext = blocks.some((block, blockIndex) =>
+    blockIndex <= 5 && /\bcontents\b/iu.test(normalizeBlockText(block.text))
+  );
+  const filteredBlocks = blocks.filter((block, blockIndex) => {
+    if (shouldFilterInlineNoiseBlock(block, blockIndex, blocks, hasContentsContext)) {
+      return false;
+    }
+
     if (!block.anchor || !looksLikeProductionMetadata(block.text)) {
       return true;
     }
@@ -399,6 +406,8 @@ function looksLikeProductionMetadata(text: string): boolean {
     /\bpage:\b/iu,
     /\bdate:\b/iu,
     /\bpzn:\b/iu,
+    /\bpr\.\s*name\b/iu,
+    /\bprinting number\b/iu,
   ];
   const signalCount = metadataSignals.filter((pattern) => pattern.test(normalized)).length;
   if (signalCount >= 2) {
@@ -406,7 +415,84 @@ function looksLikeProductionMetadata(text: string): boolean {
   }
 
   const punctuationGroups = (normalized.match(/[/:|]/g) ?? []).length;
-  return signalCount >= 1 && punctuationGroups >= 3;
+  if (signalCount >= 1 && punctuationGroups >= 3) {
+    return true;
+  }
+
+  return looksLikeRevisionStamp(normalized);
+}
+
+function looksLikeBuildTraceText(text: string): boolean {
+  return /\bpdfcpu\b/iu.test(text) ||
+    /\bcreated:\b/iu.test(text) ||
+    /\boptimized\s+for\b/iu.test(text) ||
+    /(?:^|[\s(])(?:testdata|samples?|examples?)\/[^\s)]+/iu.test(text);
+}
+
+function shouldFilterInlineNoiseBlock(
+  block: GroupedBlockSeed,
+  blockIndex: number,
+  blocks: readonly GroupedBlockSeed[],
+  hasContentsContext: boolean,
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0) {
+    return true;
+  }
+
+  if (looksLikeStandaloneBulletText(normalized)) {
+    return true;
+  }
+
+  return hasContentsContext && looksLikeContentsNoiseBlock(normalized, blockIndex, blocks);
+}
+
+function looksLikeStandaloneBulletText(text: string): boolean {
+  return /^(?:[-*•]|â\s*¢)$/u.test(text);
+}
+
+function looksLikeRevisionStamp(text: string): boolean {
+  return /\b\d{2,}-\d{2,}(?:-\d{2,})+\b/u.test(text) &&
+    /\brev\.[\p{L}\p{N}]+\b/iu.test(text);
+}
+
+function looksLikeContentsNoiseBlock(
+  text: string,
+  blockIndex: number,
+  blocks: readonly GroupedBlockSeed[],
+): boolean {
+  if (looksLikeDotLeaderNoise(text)) {
+    return true;
+  }
+
+  if (!looksLikeStandalonePageReference(text)) {
+    return false;
+  }
+
+  if (blockIndex <= 0) {
+    return false;
+  }
+
+  return blocks
+    .slice(Math.max(0, blockIndex - 2), blockIndex)
+    .some((candidate) => looksLikeContentsEntryLabel(normalizeBlockText(candidate.text)));
+}
+
+function looksLikeDotLeaderNoise(text: string): boolean {
+  return /^[.\s\u2024\u2027\u2219]{4,}$/u.test(text);
+}
+
+function looksLikeStandalonePageReference(text: string): boolean {
+  return /^(?:\d{1,4}|[ivxlcdm]{1,8})$/iu.test(text);
+}
+
+function looksLikeContentsEntryLabel(text: string): boolean {
+  if (text.length === 0 || text.length > 80 || /[.!?]$/.test(text) || countLabelMarkers(text) > 0) {
+    return false;
+  }
+
+  const words = text.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  return words.length > 0 && words.length <= 8 && looksLikeTitleCaseHeading(text);
 }
 
 function annotateParagraphStarts(
@@ -428,6 +514,20 @@ function shouldMergeAdjacentBlocks(
   const currentText = normalizeBlockText(currentBlock.text);
 
   if (/^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentBlock.text)) {
+    return false;
+  }
+
+  if (
+    looksLikeStandaloneBulletText(previousText) ||
+    looksLikeStandaloneBulletText(currentText)
+  ) {
+    return false;
+  }
+
+  if (
+    looksLikeBuildTraceText(currentText) &&
+    (looksLikePaginationLine(previousText) || looksLikeHeadingLikeText(previousText, previousBlock.fontSize))
+  ) {
     return false;
   }
 
@@ -496,6 +596,13 @@ function shouldStartParagraph(
   }
 
   if (/^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentText)) {
+    return true;
+  }
+
+  if (
+    looksLikeBuildTraceText(currentText) &&
+    (looksLikePaginationLine(previousText) || looksLikeHeadingLikeText(previousText, previousBlock.fontSize))
+  ) {
     return true;
   }
 
