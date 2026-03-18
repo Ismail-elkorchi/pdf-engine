@@ -6,15 +6,23 @@ import type {
   PdfPipelineResult,
 } from "./contracts.ts";
 
+export type PdfViewerView = "page" | "reader";
+
 export interface PdfViewerOptions {
   readonly initialPage?: number;
+  readonly initialView?: PdfViewerView;
   readonly showTables?: boolean;
   readonly showBlockOutlines?: boolean;
   readonly showChunkAnchors?: boolean;
+  readonly showSearch?: boolean;
+  readonly showOutline?: boolean;
 }
 
 export interface PdfViewerHandle {
   goToPage(pageNumber: number): void;
+  goToChunk(chunkId: string): void;
+  setView(view: PdfViewerView): void;
+  setSearchQuery(query: string): void;
   update(pipelineResult: PdfPipelineResult, options?: PdfViewerOptions): void;
   destroy(): void;
 }
@@ -23,6 +31,8 @@ interface PdfResolvedViewerOptions {
   readonly showTables: boolean;
   readonly showBlockOutlines: boolean;
   readonly showChunkAnchors: boolean;
+  readonly showSearch: boolean;
+  readonly showOutline: boolean;
 }
 
 interface PdfViewerState {
@@ -30,6 +40,39 @@ interface PdfViewerState {
   readonly options: PdfResolvedViewerOptions;
   readonly pageNumbers: readonly number[];
   readonly currentPageNumber: number;
+  readonly currentView: PdfViewerView;
+  readonly searchQuery: string;
+  readonly activeChunkId: string | null;
+}
+
+interface PdfViewerOutlineItem {
+  readonly blockId: string;
+  readonly pageNumber: number;
+  readonly text: string;
+}
+
+interface PdfViewerSearchResult {
+  readonly id: string;
+  readonly pageNumber: number;
+  readonly kind: "block" | "chunk" | "table";
+  readonly label: string;
+  readonly text: string;
+  readonly chunkId?: string;
+}
+
+interface PdfViewerActions {
+  readonly goToPage: (pageNumber: number) => void;
+  readonly goToChunk: (chunkId: string) => void;
+  readonly setView: (view: PdfViewerView) => void;
+  readonly setSearchQuery: (query: string) => void;
+  readonly update: (pipelineResult: PdfPipelineResult, options?: PdfViewerOptions) => void;
+}
+
+interface PdfViewerStateDefaults {
+  readonly previousPageNumber?: number;
+  readonly previousView?: PdfViewerView;
+  readonly previousSearchQuery?: string;
+  readonly previousActiveChunkId?: string | null;
 }
 
 const VIEWER_STYLE = `
@@ -43,13 +86,21 @@ const VIEWER_STYLE = `
 }
 
 .pdf-engine-viewer__toolbar {
-  align-items: center;
+  align-items: flex-start;
   background: rgba(255, 255, 255, 0.82);
   border-bottom: 1px solid #d6ded5;
   display: flex;
-  gap: 12px;
+  flex-wrap: wrap;
+  gap: 12px 18px;
   justify-content: space-between;
   padding: 14px 18px;
+}
+
+.pdf-engine-viewer__toolbar-group {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 .pdf-engine-viewer__controls {
@@ -72,20 +123,43 @@ const VIEWER_STYLE = `
   cursor: default;
 }
 
+.pdf-engine-viewer__button[aria-pressed="true"] {
+  background: #6f8d52;
+}
+
+.pdf-engine-viewer__search {
+  align-items: center;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.pdf-engine-viewer__search-label,
 .pdf-engine-viewer__label {
   color: #26415b;
   font-size: 0.95rem;
   letter-spacing: 0.02em;
 }
 
+.pdf-engine-viewer__search-input {
+  background: rgba(255, 255, 255, 0.92);
+  border: 1px solid #c5d2bf;
+  border-radius: 999px;
+  color: #112133;
+  font: inherit;
+  min-width: 220px;
+  padding: 8px 12px;
+}
+
 .pdf-engine-viewer__layout {
   display: grid;
   gap: 18px;
-  grid-template-columns: minmax(0, 2fr) minmax(260px, 1fr);
+  grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr);
   padding: 18px;
 }
 
-.pdf-engine-viewer__page {
+.pdf-engine-viewer__page,
+.pdf-engine-viewer__reader {
   background: rgba(255, 255, 255, 0.88);
   border: 1px solid #d6ded5;
   border-radius: 16px;
@@ -94,6 +168,25 @@ const VIEWER_STYLE = `
   gap: 18px;
   min-height: 360px;
   padding: 20px;
+}
+
+.pdf-engine-viewer__reader-page {
+  background: rgba(248, 250, 247, 0.85);
+  border: 1px solid #d6ded5;
+  border-radius: 16px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  padding: 18px;
+}
+
+.pdf-engine-viewer__reader-page-label {
+  color: #5d6c7a;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 0.82rem;
+  letter-spacing: 0.08em;
+  margin: 0;
+  text-transform: uppercase;
 }
 
 .pdf-engine-viewer__section {
@@ -151,7 +244,8 @@ const VIEWER_STYLE = `
   margin-bottom: 6px;
 }
 
-.pdf-engine-viewer__block-text {
+.pdf-engine-viewer__block-text,
+.pdf-engine-viewer__action-text {
   line-height: 1.55;
   white-space: pre-wrap;
 }
@@ -208,6 +302,10 @@ const VIEWER_STYLE = `
   padding: 10px 12px;
 }
 
+.pdf-engine-viewer__list-item[data-active="true"] {
+  box-shadow: inset 0 0 0 2px #6f8d52;
+}
+
 .pdf-engine-viewer__list-item small {
   color: #5d6c7a;
   display: block;
@@ -215,10 +313,29 @@ const VIEWER_STYLE = `
   margin-bottom: 4px;
 }
 
+.pdf-engine-viewer__action {
+  background: transparent;
+  border: 0;
+  color: inherit;
+  cursor: pointer;
+  display: block;
+  font: inherit;
+  padding: 0;
+  text-align: left;
+  width: 100%;
+}
+
 .pdf-engine-viewer__empty {
   color: #5d6c7a;
   font-style: italic;
   margin: 0;
+}
+
+.pdf-engine-viewer__highlight {
+  background: #f6d96e;
+  border-radius: 0.18em;
+  color: #112133;
+  padding: 0 0.08em;
 }
 
 @media (max-width: 960px) {
@@ -236,8 +353,8 @@ const VIEWER_STYLE = `
  *
  * @param container Browser DOM element that will own the viewer subtree.
  * @param pipelineResult Existing staged pipeline result to visualize.
- * @param options Optional viewer toggles and initial-page selection.
- * @returns Handle that can navigate, refresh, or destroy the viewer.
+ * @param options Optional viewer toggles, initial-page selection, and initial view mode.
+ * @returns Handle that can navigate, switch modes, search, refresh, or destroy the viewer.
  */
 export function renderPdfViewer(
   container: HTMLElement,
@@ -251,8 +368,16 @@ export function renderPdfViewer(
 
   let state = createViewerState(pipelineResult, options);
 
+  const actions: PdfViewerActions = {
+    goToPage,
+    goToChunk,
+    setView,
+    setSearchQuery,
+    update,
+  };
+
   function render(): void {
-    container.replaceChildren(buildViewerRoot(ownerDocument, state, goToPage, update));
+    container.replaceChildren(buildViewerRoot(ownerDocument, state, actions));
   }
 
   function goToPage(pageNumber: number): void {
@@ -263,12 +388,43 @@ export function renderPdfViewer(
     render();
   }
 
+  function goToChunk(chunkId: string): void {
+    const chunk = findChunkById(state.pipelineResult, chunkId);
+    if (!chunk) {
+      return;
+    }
+
+    state = {
+      ...state,
+      currentPageNumber: clampPageNumber(chunk.pageNumbers[0] ?? state.currentPageNumber, state.pageNumbers),
+      activeChunkId: chunk.id,
+    };
+    render();
+  }
+
+  function setView(view: PdfViewerView): void {
+    state = {
+      ...state,
+      currentView: view,
+    };
+    render();
+  }
+
+  function setSearchQuery(query: string): void {
+    state = {
+      ...state,
+      searchQuery: query,
+    };
+    render();
+  }
+
   function update(nextPipelineResult: PdfPipelineResult, nextOptions?: PdfViewerOptions): void {
-    state = createViewerState(
-      nextPipelineResult,
-      resolveViewerOptions(state.options, nextOptions),
-      state.currentPageNumber,
-    );
+    state = createViewerState(nextPipelineResult, resolveViewerOptions(state.options, nextOptions), {
+      previousPageNumber: state.currentPageNumber,
+      previousView: state.currentView,
+      previousSearchQuery: state.searchQuery,
+      previousActiveChunkId: state.activeChunkId,
+    });
     render();
   }
 
@@ -280,6 +436,9 @@ export function renderPdfViewer(
 
   return {
     goToPage,
+    goToChunk,
+    setView,
+    setSearchQuery,
     update,
     destroy,
   };
@@ -295,19 +454,22 @@ function resolveViewerOptions(
 
   return {
     ...(nextOptions.initialPage === undefined ? {} : { initialPage: nextOptions.initialPage }),
+    ...(nextOptions.initialView === undefined ? {} : { initialView: nextOptions.initialView }),
     showTables: nextOptions.showTables ?? currentOptions.showTables,
     showBlockOutlines: nextOptions.showBlockOutlines ?? currentOptions.showBlockOutlines,
     showChunkAnchors: nextOptions.showChunkAnchors ?? currentOptions.showChunkAnchors,
+    showSearch: nextOptions.showSearch ?? currentOptions.showSearch,
+    showOutline: nextOptions.showOutline ?? currentOptions.showOutline,
   };
 }
 
 function createViewerState(
   pipelineResult: PdfPipelineResult,
   options: PdfViewerOptions,
-  previousPageNumber?: number,
+  defaults: PdfViewerStateDefaults = {},
 ): PdfViewerState {
   const pageNumbers = collectPageNumbers(pipelineResult);
-  const defaultPageNumber = options.initialPage ?? previousPageNumber ?? pageNumbers[0] ?? 1;
+  const defaultPageNumber = options.initialPage ?? defaults.previousPageNumber ?? pageNumbers[0] ?? 1;
 
   return {
     pipelineResult,
@@ -315,9 +477,14 @@ function createViewerState(
       showTables: options.showTables ?? false,
       showBlockOutlines: options.showBlockOutlines ?? false,
       showChunkAnchors: options.showChunkAnchors ?? false,
+      showSearch: options.showSearch ?? false,
+      showOutline: options.showOutline ?? false,
     },
     pageNumbers,
     currentPageNumber: clampPageNumber(defaultPageNumber, pageNumbers),
+    currentView: options.initialView ?? defaults.previousView ?? "page",
+    searchQuery: defaults.previousSearchQuery ?? "",
+    activeChunkId: defaults.previousActiveChunkId ?? null,
   };
 }
 
@@ -360,8 +527,7 @@ function clampPageNumber(pageNumber: number, pageNumbers: readonly number[]): nu
 function buildViewerRoot(
   ownerDocument: Document,
   state: PdfViewerState,
-  goToPage: (pageNumber: number) => void,
-  update: (pipelineResult: PdfPipelineResult, options?: PdfViewerOptions) => void,
+  actions: PdfViewerActions,
 ): HTMLElement {
   const currentLayoutPage = state.pipelineResult.layout.value?.pages.find(
     (page) => page.pageNumber === state.currentPageNumber,
@@ -373,31 +539,39 @@ function buildViewerRoot(
     chunk.pageNumbers.includes(state.currentPageNumber),
   );
   const currentPageIndex = state.pageNumbers.indexOf(state.currentPageNumber);
+  const outlineItems = collectOutlineItems(state.pipelineResult);
+  const searchResults = collectSearchResults(state.pipelineResult, state.searchQuery);
 
   const root = createElement(ownerDocument, "section", "pdf-engine-viewer");
+  root.dataset["viewerCurrentView"] = state.currentView;
   root.append(createStyleElement(ownerDocument));
-  root.append(
-    createToolbar(
-      ownerDocument,
-      state,
-      currentPageIndex,
-      goToPage,
-      update,
-    ),
-  );
+  root.append(createToolbar(ownerDocument, state, currentPageIndex, searchResults.length, actions));
 
   const layout = createElement(ownerDocument, "div", "pdf-engine-viewer__layout");
+  if (state.currentView === "reader") {
+    layout.append(
+      createReaderPanel(
+        ownerDocument,
+        state.pipelineResult,
+        state.pageNumbers,
+        state.options.showTables,
+        state.searchQuery,
+      ),
+    );
+  } else {
+    layout.append(
+      createPagePanel(
+        ownerDocument,
+        currentLayoutPage,
+        currentTables,
+        state.options.showTables,
+        state.searchQuery,
+      ),
+    );
+  }
+
   layout.append(
-    createPagePanel(ownerDocument, currentLayoutPage, currentTables, state.options.showTables),
-  );
-  layout.append(
-    createSidebar(
-      ownerDocument,
-      currentLayoutPage,
-      currentChunks,
-      state.options.showBlockOutlines,
-      state.options.showChunkAnchors,
-    ),
+    createSidebar(ownerDocument, state, currentLayoutPage, currentChunks, outlineItems, searchResults, actions),
   );
   root.append(layout);
 
@@ -414,15 +588,19 @@ function createToolbar(
   ownerDocument: Document,
   state: PdfViewerState,
   currentPageIndex: number,
-  goToPage: (pageNumber: number) => void,
-  update: (pipelineResult: PdfPipelineResult, options?: PdfViewerOptions) => void,
+  searchResultCount: number,
+  actions: PdfViewerActions,
 ): HTMLElement {
   const toolbar = createElement(ownerDocument, "header", "pdf-engine-viewer__toolbar");
+  toolbar.setAttribute("role", "toolbar");
+  toolbar.setAttribute("aria-label", "PDF reader controls");
+
+  const navigationGroup = createElement(ownerDocument, "div", "pdf-engine-viewer__toolbar-group");
   const controls = createElement(ownerDocument, "div", "pdf-engine-viewer__controls");
   const previousButton = createButton(ownerDocument, "Previous", () => {
     const previousPageNumber = state.pageNumbers[currentPageIndex - 1];
     if (previousPageNumber !== undefined) {
-      goToPage(previousPageNumber);
+      actions.goToPage(previousPageNumber);
     }
   });
   previousButton.disabled = currentPageIndex <= 0;
@@ -430,27 +608,74 @@ function createToolbar(
   const nextButton = createButton(ownerDocument, "Next", () => {
     const nextPageNumber = state.pageNumbers[currentPageIndex + 1];
     if (nextPageNumber !== undefined) {
-      goToPage(nextPageNumber);
+      actions.goToPage(nextPageNumber);
     }
   });
   nextButton.disabled = currentPageIndex < 0 || currentPageIndex >= state.pageNumbers.length - 1;
 
   const refreshButton = createButton(ownerDocument, "Refresh", () => {
-    update(state.pipelineResult, state.options);
+    actions.update(state.pipelineResult, {
+      initialView: state.currentView,
+    });
   });
 
-  controls.append(previousButton, nextButton, refreshButton);
+  const pageViewButton = createToggleButton(ownerDocument, "Page", state.currentView === "page", () => {
+    actions.setView("page");
+  });
+  const readerViewButton = createToggleButton(ownerDocument, "Reader", state.currentView === "reader", () => {
+    actions.setView("reader");
+  });
+  pageViewButton.dataset["viewerViewButton"] = "page";
+  readerViewButton.dataset["viewerViewButton"] = "reader";
+
+  controls.append(previousButton, nextButton, refreshButton, pageViewButton, readerViewButton);
+  navigationGroup.append(controls);
 
   const label = createElement(ownerDocument, "div", "pdf-engine-viewer__label");
   label.dataset["viewerPageLabel"] = "true";
   label.setAttribute("aria-live", "polite");
-  label.textContent =
-    state.pageNumbers.length === 0
-      ? "No page content available"
-      : `Page ${String(state.currentPageNumber)} of ${String(state.pageNumbers.length)}`;
+  label.textContent = formatPageLabel(state);
+  navigationGroup.append(label);
+  toolbar.append(navigationGroup);
 
-  toolbar.append(controls, label);
+  if (state.options.showSearch) {
+    const searchGroup = createElement(ownerDocument, "div", "pdf-engine-viewer__search");
+    const searchLabel = createElement(ownerDocument, "label", "pdf-engine-viewer__search-label");
+    searchLabel.textContent = "Search";
+    const searchInput = ownerDocument.createElement("input");
+    searchInput.className = "pdf-engine-viewer__search-input";
+    searchInput.type = "search";
+    searchInput.value = state.searchQuery;
+    searchInput.placeholder = "Find text in blocks, chunks, and tables";
+    searchInput.dataset["viewerSearchInput"] = "true";
+    searchInput.addEventListener("input", () => {
+      actions.setSearchQuery(searchInput.value);
+    });
+
+    const searchCount = createElement(ownerDocument, "span", "pdf-engine-viewer__label");
+    searchCount.dataset["viewerSearchCount"] = String(searchResultCount);
+    searchCount.textContent =
+      state.searchQuery.trim().length === 0
+        ? "Search is ready"
+        : `${String(searchResultCount)} result${searchResultCount === 1 ? "" : "s"}`;
+
+    searchGroup.append(searchLabel, searchInput, searchCount);
+    toolbar.append(searchGroup);
+  }
+
   return toolbar;
+}
+
+function formatPageLabel(state: PdfViewerState): string {
+  if (state.pageNumbers.length === 0) {
+    return "No page content available";
+  }
+
+  if (state.currentView === "reader") {
+    return `Reader view • page ${String(state.currentPageNumber)} of ${String(state.pageNumbers.length)}`;
+  }
+
+  return `Page ${String(state.currentPageNumber)} of ${String(state.pageNumbers.length)}`;
 }
 
 function createPagePanel(
@@ -458,96 +683,143 @@ function createPagePanel(
   layoutPage: PdfLayoutPage | undefined,
   tables: readonly PdfKnowledgeTable[],
   showTables: boolean,
+  searchQuery: string,
 ): HTMLElement {
   const pagePanel = createElement(ownerDocument, "section", "pdf-engine-viewer__page");
-  const blocksSection = createElement(ownerDocument, "section", "pdf-engine-viewer__section");
-  blocksSection.append(createSectionTitle(ownerDocument, "Page Layout"));
-
-  if (!layoutPage || layoutPage.blocks.length === 0) {
-    blocksSection.append(createEmptyText(ownerDocument, "No layout blocks are available for this page."));
-  } else {
-    const blocksContainer = createElement(ownerDocument, "div", "pdf-engine-viewer__blocks");
-    blocksContainer.dataset["viewerBlockCount"] = String(layoutPage.blocks.length);
-    for (const block of layoutPage.blocks) {
-      blocksContainer.append(createBlockCard(ownerDocument, block));
-    }
-    blocksSection.append(blocksContainer);
-  }
-
-  pagePanel.append(blocksSection);
+  pagePanel.append(createBlocksSection(ownerDocument, layoutPage, searchQuery, true));
 
   if (showTables) {
-    const tablesSection = createElement(ownerDocument, "section", "pdf-engine-viewer__section");
-    tablesSection.append(createSectionTitle(ownerDocument, "Projected Tables"));
-    tablesSection.dataset["viewerTableCount"] = String(tables.length);
-    if (tables.length === 0) {
-      tablesSection.append(createEmptyText(ownerDocument, "No projected tables are available for this page."));
-    } else {
-      for (const table of tables) {
-        tablesSection.append(createTableCard(ownerDocument, table));
-      }
-    }
-    pagePanel.append(tablesSection);
+    pagePanel.append(createTablesSection(ownerDocument, tables, searchQuery, true));
   }
 
   return pagePanel;
 }
 
-function createSidebar(
+function createReaderPanel(
+  ownerDocument: Document,
+  pipelineResult: PdfPipelineResult,
+  pageNumbers: readonly number[],
+  showTables: boolean,
+  searchQuery: string,
+): HTMLElement {
+  const readerPanel = createElement(ownerDocument, "section", "pdf-engine-viewer__reader");
+  readerPanel.dataset["viewerReaderPageCount"] = String(pageNumbers.length);
+
+  if (pageNumbers.length === 0) {
+    readerPanel.append(createEmptyText(ownerDocument, "No reader content is available."));
+    return readerPanel;
+  }
+
+  for (const pageNumber of pageNumbers) {
+    const page = pipelineResult.layout.value?.pages.find((candidate) => candidate.pageNumber === pageNumber);
+    const tables = (pipelineResult.knowledge.value?.tables ?? []).filter(
+      (table) => table.pageNumber === pageNumber,
+    );
+    const pageSection = createElement(ownerDocument, "section", "pdf-engine-viewer__reader-page");
+    pageSection.dataset["viewerReaderPage"] = String(pageNumber);
+
+    const pageLabel = createElement(ownerDocument, "p", "pdf-engine-viewer__reader-page-label");
+    pageLabel.textContent = `Page ${String(pageNumber)}`;
+    pageSection.append(pageLabel);
+    pageSection.append(createBlocksSection(ownerDocument, page, searchQuery, false));
+    if (showTables) {
+      pageSection.append(createTablesSection(ownerDocument, tables, searchQuery, false));
+    }
+    readerPanel.append(pageSection);
+  }
+
+  return readerPanel;
+}
+
+function createBlocksSection(
   ownerDocument: Document,
   layoutPage: PdfLayoutPage | undefined,
+  searchQuery: string,
+  includeDataset: boolean,
+): HTMLElement {
+  const blocksSection = createElement(ownerDocument, "section", "pdf-engine-viewer__section");
+  blocksSection.append(createSectionTitle(ownerDocument, "Page Layout"));
+
+  if (!layoutPage || layoutPage.blocks.length === 0) {
+    blocksSection.append(createEmptyText(ownerDocument, "No layout blocks are available for this page."));
+    return blocksSection;
+  }
+
+  const blocksContainer = createElement(ownerDocument, "div", "pdf-engine-viewer__blocks");
+  if (includeDataset) {
+    blocksContainer.dataset["viewerBlockCount"] = String(layoutPage.blocks.length);
+  }
+
+  for (const block of layoutPage.blocks) {
+    blocksContainer.append(createBlockCard(ownerDocument, block, searchQuery));
+  }
+  blocksSection.append(blocksContainer);
+  return blocksSection;
+}
+
+function createTablesSection(
+  ownerDocument: Document,
+  tables: readonly PdfKnowledgeTable[],
+  searchQuery: string,
+  includeDataset: boolean,
+): HTMLElement {
+  const tablesSection = createElement(ownerDocument, "section", "pdf-engine-viewer__section");
+  tablesSection.append(createSectionTitle(ownerDocument, "Projected Tables"));
+  if (includeDataset) {
+    tablesSection.dataset["viewerTableCount"] = String(tables.length);
+  }
+
+  if (tables.length === 0) {
+    tablesSection.append(createEmptyText(ownerDocument, "No projected tables are available for this page."));
+    return tablesSection;
+  }
+
+  for (const table of tables) {
+    tablesSection.append(createTableCard(ownerDocument, table, searchQuery));
+  }
+
+  return tablesSection;
+}
+
+function createSidebar(
+  ownerDocument: Document,
+  state: PdfViewerState,
+  layoutPage: PdfLayoutPage | undefined,
   chunks: readonly PdfKnowledgeChunk[],
-  showBlockOutlines: boolean,
-  showChunkAnchors: boolean,
+  outlineItems: readonly PdfViewerOutlineItem[],
+  searchResults: readonly PdfViewerSearchResult[],
+  actions: PdfViewerActions,
 ): HTMLElement {
   const sidebar = createElement(ownerDocument, "aside", "pdf-engine-viewer__sidebar");
 
-  if (showChunkAnchors) {
-    const chunkPanel = createElement(ownerDocument, "section", "pdf-engine-viewer__panel");
-    chunkPanel.dataset["viewerChunkCount"] = String(chunks.length);
-    chunkPanel.append(createSectionTitle(ownerDocument, "Chunk Anchors"));
-    if (chunks.length === 0) {
-      chunkPanel.append(createEmptyText(ownerDocument, "No chunk anchors are available for this page."));
-    } else {
-      const list = createElement(ownerDocument, "ol", "pdf-engine-viewer__list");
-      for (const chunk of chunks) {
-        const item = createElement(ownerDocument, "li", "pdf-engine-viewer__list-item");
-        const label = ownerDocument.createElement("small");
-        label.textContent = `${chunk.id} • ${chunk.citations.length} citations`;
-        item.append(label, ownerDocument.createTextNode(chunk.text));
-        list.append(item);
-      }
-      chunkPanel.append(list);
-    }
-    sidebar.append(chunkPanel);
+  if (state.options.showSearch) {
+    sidebar.append(createSearchPanel(ownerDocument, state, searchResults, actions));
   }
 
-  if (showBlockOutlines) {
-    const outlinePanel = createElement(ownerDocument, "section", "pdf-engine-viewer__panel");
-    outlinePanel.append(createSectionTitle(ownerDocument, "Block Outline"));
-    if (!layoutPage || layoutPage.blocks.length === 0) {
-      outlinePanel.append(createEmptyText(ownerDocument, "No block outline is available for this page."));
-    } else {
-      const list = createElement(ownerDocument, "ol", "pdf-engine-viewer__list");
-      for (const block of layoutPage.blocks) {
-        const item = createElement(ownerDocument, "li", "pdf-engine-viewer__list-item");
-        const label = ownerDocument.createElement("small");
-        label.textContent = `${block.id} • ${block.role} • order ${String(block.readingOrder)}`;
-        item.append(label, ownerDocument.createTextNode(block.text));
-        list.append(item);
-      }
-      outlinePanel.append(list);
-    }
-    sidebar.append(outlinePanel);
+  if (state.options.showOutline) {
+    sidebar.append(createOutlinePanel(ownerDocument, outlineItems, actions));
   }
 
-  if (!showChunkAnchors && !showBlockOutlines) {
+  if (state.options.showChunkAnchors) {
+    sidebar.append(createChunkPanel(ownerDocument, chunks, state, actions));
+  }
+
+  if (state.options.showBlockOutlines) {
+    sidebar.append(createBlockOutlinePanel(ownerDocument, layoutPage, state.searchQuery));
+  }
+
+  if (
+    !state.options.showSearch &&
+    !state.options.showOutline &&
+    !state.options.showChunkAnchors &&
+    !state.options.showBlockOutlines
+  ) {
     const placeholder = createElement(ownerDocument, "section", "pdf-engine-viewer__panel");
     placeholder.append(createSectionTitle(ownerDocument, "Viewer"));
     placeholder.append(
       createEmptyText(
         ownerDocument,
-        "Enable block outlines or chunk anchors to inspect additional provenance for this page.",
+        "Enable search, outline, block outlines, or chunk anchors to inspect additional provenance.",
       ),
     );
     sidebar.append(placeholder);
@@ -556,7 +828,148 @@ function createSidebar(
   return sidebar;
 }
 
-function createTableCard(ownerDocument: Document, table: PdfKnowledgeTable): HTMLElement {
+function createSearchPanel(
+  ownerDocument: Document,
+  state: PdfViewerState,
+  searchResults: readonly PdfViewerSearchResult[],
+  actions: PdfViewerActions,
+): HTMLElement {
+  const panel = createElement(ownerDocument, "section", "pdf-engine-viewer__panel");
+  panel.dataset["viewerSearchCount"] = String(searchResults.length);
+  panel.append(createSectionTitle(ownerDocument, "Search Results"));
+
+  const query = state.searchQuery.trim();
+  if (query.length === 0) {
+    panel.append(createEmptyText(ownerDocument, "Enter a query to search the staged reader output."));
+    return panel;
+  }
+
+  if (searchResults.length === 0) {
+    panel.append(createEmptyText(ownerDocument, "No staged matches were found for the current query."));
+    return panel;
+  }
+
+  const list = createElement(ownerDocument, "ol", "pdf-engine-viewer__list");
+  for (const result of searchResults) {
+    const item = createElement(ownerDocument, "li", "pdf-engine-viewer__list-item");
+    const label = ownerDocument.createElement("small");
+    label.textContent = result.label;
+    const button = createActionButton(ownerDocument, () => {
+      if (result.chunkId) {
+        actions.goToChunk(result.chunkId);
+        return;
+      }
+      actions.goToPage(result.pageNumber);
+    });
+    button.dataset["viewerSearchResult"] = result.id;
+    appendHighlightedText(ownerDocument, button, result.text, state.searchQuery, "pdf-engine-viewer__action-text");
+    item.append(label, button);
+    list.append(item);
+  }
+  panel.append(list);
+  return panel;
+}
+
+function createOutlinePanel(
+  ownerDocument: Document,
+  outlineItems: readonly PdfViewerOutlineItem[],
+  actions: PdfViewerActions,
+): HTMLElement {
+  const panel = createElement(ownerDocument, "section", "pdf-engine-viewer__panel");
+  panel.dataset["viewerOutlineCount"] = String(outlineItems.length);
+  panel.append(createSectionTitle(ownerDocument, "Outline"));
+
+  if (outlineItems.length === 0) {
+    panel.append(createEmptyText(ownerDocument, "No heading outline is available for this result."));
+    return panel;
+  }
+
+  const list = createElement(ownerDocument, "ol", "pdf-engine-viewer__list");
+  for (const item of outlineItems) {
+    const entry = createElement(ownerDocument, "li", "pdf-engine-viewer__list-item");
+    const label = ownerDocument.createElement("small");
+    label.textContent = `Page ${String(item.pageNumber)}`;
+    const button = createActionButton(ownerDocument, () => {
+      actions.goToPage(item.pageNumber);
+    });
+    button.dataset["viewerOutlineItem"] = item.blockId;
+    button.textContent = item.text;
+    entry.append(label, button);
+    list.append(entry);
+  }
+  panel.append(list);
+  return panel;
+}
+
+function createChunkPanel(
+  ownerDocument: Document,
+  chunks: readonly PdfKnowledgeChunk[],
+  state: PdfViewerState,
+  actions: PdfViewerActions,
+): HTMLElement {
+  const panel = createElement(ownerDocument, "section", "pdf-engine-viewer__panel");
+  panel.dataset["viewerChunkCount"] = String(chunks.length);
+  panel.append(createSectionTitle(ownerDocument, "Chunk Anchors"));
+
+  if (chunks.length === 0) {
+    panel.append(createEmptyText(ownerDocument, "No chunk anchors are available for this page."));
+    return panel;
+  }
+
+  const list = createElement(ownerDocument, "ol", "pdf-engine-viewer__list");
+  for (const chunk of chunks) {
+    const item = createElement(ownerDocument, "li", "pdf-engine-viewer__list-item");
+    const isActiveChunk = state.activeChunkId === chunk.id;
+    item.dataset["active"] = isActiveChunk ? "true" : "false";
+    if (isActiveChunk) {
+      item.dataset["viewerActiveChunk"] = chunk.id;
+    }
+    const label = ownerDocument.createElement("small");
+    label.textContent = `${chunk.id} • ${chunk.citations.length} citations`;
+    const button = createActionButton(ownerDocument, () => {
+      actions.goToChunk(chunk.id);
+    });
+    button.dataset["viewerChunkId"] = chunk.id;
+    appendHighlightedText(ownerDocument, button, chunk.text, state.searchQuery, "pdf-engine-viewer__action-text");
+    item.append(label, button);
+    list.append(item);
+  }
+  panel.append(list);
+  return panel;
+}
+
+function createBlockOutlinePanel(
+  ownerDocument: Document,
+  layoutPage: PdfLayoutPage | undefined,
+  searchQuery: string,
+): HTMLElement {
+  const panel = createElement(ownerDocument, "section", "pdf-engine-viewer__panel");
+  panel.append(createSectionTitle(ownerDocument, "Block Outline"));
+
+  if (!layoutPage || layoutPage.blocks.length === 0) {
+    panel.append(createEmptyText(ownerDocument, "No block outline is available for this page."));
+    return panel;
+  }
+
+  const list = createElement(ownerDocument, "ol", "pdf-engine-viewer__list");
+  for (const block of layoutPage.blocks) {
+    const item = createElement(ownerDocument, "li", "pdf-engine-viewer__list-item");
+    const label = ownerDocument.createElement("small");
+    label.textContent = `${block.id} • ${block.role} • order ${String(block.readingOrder)}`;
+    const text = ownerDocument.createElement("div");
+    appendHighlightedText(ownerDocument, text, block.text, searchQuery, "pdf-engine-viewer__action-text");
+    item.append(label, text);
+    list.append(item);
+  }
+  panel.append(list);
+  return panel;
+}
+
+function createTableCard(
+  ownerDocument: Document,
+  table: PdfKnowledgeTable,
+  searchQuery: string,
+): HTMLElement {
   const section = createElement(ownerDocument, "section", "pdf-engine-viewer__section");
   const title = createSectionTitle(
     ownerDocument,
@@ -576,7 +989,12 @@ function createTableCard(ownerDocument: Document, table: PdfKnowledgeTable): HTM
     const headerRow = ownerDocument.createElement("tr");
     for (let columnIndex = 0; columnIndex < columnCount; columnIndex += 1) {
       const headerCell = ownerDocument.createElement("th");
-      headerCell.textContent = table.headers?.[columnIndex] ?? "";
+      appendHighlightedText(
+        ownerDocument,
+        headerCell,
+        table.headers?.[columnIndex] ?? "",
+        searchQuery,
+      );
       headerRow.append(headerCell);
     }
     thead.append(headerRow);
@@ -588,7 +1006,7 @@ function createTableCard(ownerDocument: Document, table: PdfKnowledgeTable): HTM
     const rowElement = ownerDocument.createElement("tr");
     for (const cellText of row) {
       const cellElement = ownerDocument.createElement("td");
-      cellElement.textContent = cellText;
+      appendHighlightedText(ownerDocument, cellElement, cellText, searchQuery);
       rowElement.append(cellElement);
     }
     tbody.append(rowElement);
@@ -619,7 +1037,11 @@ function collectTableRows(table: PdfKnowledgeTable, columnCount: number): readon
     });
 }
 
-function createBlockCard(ownerDocument: Document, block: PdfLayoutBlock): HTMLElement {
+function createBlockCard(
+  ownerDocument: Document,
+  block: PdfLayoutBlock,
+  searchQuery: string,
+): HTMLElement {
   const article = createElement(ownerDocument, "article", "pdf-engine-viewer__block");
   article.dataset["role"] = block.role;
   article.dataset["blockId"] = block.id;
@@ -633,11 +1055,130 @@ function createBlockCard(ownerDocument: Document, block: PdfLayoutBlock): HTMLEl
     meta.append(ownerDocument.createTextNode(` • ${block.writingMode}`));
   }
 
-  const text = createElement(ownerDocument, "div", "pdf-engine-viewer__block-text");
-  text.textContent = block.text;
+  const text = ownerDocument.createElement("div");
+  appendHighlightedText(ownerDocument, text, block.text, searchQuery, "pdf-engine-viewer__block-text");
 
   article.append(meta, text);
   return article;
+}
+
+function collectOutlineItems(pipelineResult: PdfPipelineResult): readonly PdfViewerOutlineItem[] {
+  return (pipelineResult.layout.value?.pages ?? []).flatMap((page) =>
+    page.blocks
+      .filter((block) => block.role === "heading" && block.text.trim().length > 0)
+      .map((block) => ({
+        blockId: block.id,
+        pageNumber: block.pageNumber,
+        text: block.text,
+      })),
+  );
+}
+
+function collectSearchResults(
+  pipelineResult: PdfPipelineResult,
+  query: string,
+): readonly PdfViewerSearchResult[] {
+  const normalizedQuery = normalizeSearchQuery(query);
+  if (normalizedQuery.length === 0) {
+    return [];
+  }
+
+  const results: PdfViewerSearchResult[] = [];
+
+  for (const page of pipelineResult.layout.value?.pages ?? []) {
+    for (const block of page.blocks) {
+      if (matchesSearch(block.text, normalizedQuery)) {
+        results.push({
+          id: `block:${block.id}`,
+          pageNumber: block.pageNumber,
+          kind: "block",
+          label: `Page ${String(block.pageNumber)} • ${block.role}`,
+          text: block.text,
+        });
+      }
+    }
+  }
+
+  for (const chunk of pipelineResult.knowledge.value?.chunks ?? []) {
+    if (matchesSearch(chunk.text, normalizedQuery)) {
+      results.push({
+        id: `chunk:${chunk.id}`,
+        pageNumber: chunk.pageNumbers[0] ?? 1,
+        kind: "chunk",
+        label: `Chunk ${chunk.id} • page ${String(chunk.pageNumbers[0] ?? 1)}`,
+        text: chunk.text,
+        chunkId: chunk.id,
+      });
+    }
+  }
+
+  for (const table of pipelineResult.knowledge.value?.tables ?? []) {
+    const flattenedTableText = [...(table.headers ?? []), ...table.cells.map((cell) => cell.text)].join(" ");
+    if (matchesSearch(flattenedTableText, normalizedQuery)) {
+      results.push({
+        id: `table:${table.id}`,
+        pageNumber: table.pageNumber,
+        kind: "table",
+        label: `Table ${table.id} • page ${String(table.pageNumber)}`,
+        text: flattenedTableText,
+      });
+    }
+  }
+
+  return results;
+}
+
+function findChunkById(
+  pipelineResult: PdfPipelineResult,
+  chunkId: string,
+): PdfKnowledgeChunk | undefined {
+  return (pipelineResult.knowledge.value?.chunks ?? []).find((chunk) => chunk.id === chunkId);
+}
+
+function normalizeSearchQuery(query: string): string {
+  return query.trim().toLowerCase();
+}
+
+function matchesSearch(text: string, normalizedQuery: string): boolean {
+  return text.toLowerCase().includes(normalizedQuery);
+}
+
+function appendHighlightedText(
+  ownerDocument: Document,
+  parent: HTMLElement,
+  text: string,
+  query: string,
+  className?: string,
+): void {
+  if (className) {
+    parent.className = className;
+  }
+
+  const normalizedQuery = normalizeSearchQuery(query);
+  if (normalizedQuery.length === 0) {
+    parent.textContent = text;
+    return;
+  }
+
+  const normalizedText = text.toLowerCase();
+  let cursor = 0;
+  while (cursor < text.length) {
+    const matchIndex = normalizedText.indexOf(normalizedQuery, cursor);
+    if (matchIndex < 0) {
+      parent.append(ownerDocument.createTextNode(text.slice(cursor)));
+      break;
+    }
+
+    if (matchIndex > cursor) {
+      parent.append(ownerDocument.createTextNode(text.slice(cursor, matchIndex)));
+    }
+
+    const highlight = ownerDocument.createElement("mark");
+    highlight.className = "pdf-engine-viewer__highlight";
+    highlight.textContent = text.slice(matchIndex, matchIndex + normalizedQuery.length);
+    parent.append(highlight);
+    cursor = matchIndex + normalizedQuery.length;
+  }
 }
 
 function createSectionTitle(ownerDocument: Document, text: string): HTMLElement {
@@ -652,11 +1193,37 @@ function createEmptyText(ownerDocument: Document, text: string): HTMLElement {
   return paragraph;
 }
 
-function createButton(ownerDocument: Document, text: string, onClick: () => void): HTMLButtonElement {
+function createButton(
+  ownerDocument: Document,
+  text: string,
+  onClick: () => void,
+): HTMLButtonElement {
   const button = ownerDocument.createElement("button");
   button.className = "pdf-engine-viewer__button";
   button.type = "button";
   button.textContent = text;
+  button.addEventListener("click", onClick);
+  return button;
+}
+
+function createToggleButton(
+  ownerDocument: Document,
+  text: string,
+  pressed: boolean,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = createButton(ownerDocument, text, onClick);
+  button.setAttribute("aria-pressed", pressed ? "true" : "false");
+  return button;
+}
+
+function createActionButton(
+  ownerDocument: Document,
+  onClick: () => void,
+): HTMLButtonElement {
+  const button = ownerDocument.createElement("button");
+  button.className = "pdf-engine-viewer__action";
+  button.type = "button";
   button.addEventListener("click", onClick);
   return button;
 }
