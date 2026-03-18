@@ -521,6 +521,16 @@ function buildObservationStage(
       });
     }
 
+    if (observedPageResult.hasLiteralFontEncodingGap) {
+      diagnostics.push({
+        code: "literal-font-encoding-not-implemented",
+        stage: "observation",
+        level: "medium",
+        message:
+          "The shell suppressed unreadable literal-text runs that still need font-encoding support or marked-content recovery before they can be emitted honestly.",
+      });
+    }
+
     diagnostics.push({
       code: "shell-observation-empty",
       stage: "observation",
@@ -534,7 +544,12 @@ function buildObservationStage(
     strategy: "decoded-text-operators",
     extractedText,
     pages,
-    knownLimits: collectObservationKnownLimits(inspection, observedPageResult.hasFontMappingGap, extractedText.length > 0),
+    knownLimits: collectObservationKnownLimits(
+      inspection,
+      observedPageResult.hasFontMappingGap,
+      observedPageResult.hasLiteralFontEncodingGap,
+      extractedText.length > 0,
+    ),
   };
 
   return stageResult(
@@ -584,17 +599,19 @@ function buildKnowledgeStage(
 function buildObservedPages(
   inspection: PdfShellInspection,
   diagnostics: PdfDiagnostic[],
-): { pages: readonly PdfObservedPage[]; hasFontMappingGap: boolean } {
+): { pages: readonly PdfObservedPage[]; hasFontMappingGap: boolean; hasLiteralFontEncodingGap: boolean } {
   let hasFontMappingGap = false;
+  let hasLiteralFontEncodingGap = false;
   const observedPages = inspection.analysis.pageEntries.map((pageEntry) => {
     const observedPage = buildObservedPage(pageEntry, inspection);
     hasFontMappingGap = hasFontMappingGap || observedPage.hasFontMappingGap;
+    hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || observedPage.hasLiteralFontEncodingGap;
     return observedPage.page;
   });
 
   const hasTextRuns = observedPages.some((page) => page.runs.length > 0);
   if (hasTextRuns || inspection.analysis.pageEntries.length > 0) {
-    return { pages: observedPages, hasFontMappingGap };
+    return { pages: observedPages, hasFontMappingGap, hasLiteralFontEncodingGap };
   }
 
   diagnostics.push({
@@ -620,6 +637,7 @@ function buildObservedPages(
   return {
     pages: [fallbackPage.page],
     hasFontMappingGap: hasFontMappingGap || fallbackPage.hasFontMappingGap,
+    hasLiteralFontEncodingGap: hasLiteralFontEncodingGap || fallbackPage.hasLiteralFontEncodingGap,
   };
 }
 
@@ -632,7 +650,7 @@ function buildObservedPage(
   },
   inspection: PdfShellInspection,
   resolutionMethodOverride?: "page-tree" | "recovered-page-order" | "stream-fallback",
-): { page: PdfObservedPage; hasFontMappingGap: boolean } {
+): { page: PdfObservedPage; hasFontMappingGap: boolean; hasLiteralFontEncodingGap: boolean } {
   const resolutionMethod = resolutionMethodOverride ??
     (inspection.analysis.pageTreeResolved ? "page-tree" : "recovered-page-order");
   const pageNumber = pageEntry.pageNumber;
@@ -640,6 +658,7 @@ function buildObservedPage(
   const runs: PdfObservedTextRun[] = [];
   let contentOrder = 0;
   let hasFontMappingGap = false;
+  let hasLiteralFontEncodingGap = false;
   const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
   const unicodeCMapByFontKey = new Map<string, ReturnType<typeof parsePdfUnicodeCMap>>();
   const embeddedFontMappingByFontKey = new Map<string, PdfEmbeddedFontMapping | undefined>();
@@ -660,6 +679,7 @@ function buildObservedPage(
         inspection,
       );
       hasFontMappingGap = hasFontMappingGap || observedRun.hasFontMappingGap;
+      hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || observedRun.hasLiteralFontEncodingGap;
       if (observedRun.text.length === 0) {
         continue;
       }
@@ -732,6 +752,7 @@ function buildObservedPage(
       runs: normalizedRuns,
     },
     hasFontMappingGap,
+    hasLiteralFontEncodingGap,
   };
 }
 
@@ -744,6 +765,7 @@ function observeParsedTextRun(
 ): {
   text: string;
   hasFontMappingGap: boolean;
+  hasLiteralFontEncodingGap: boolean;
   fontRef?: PdfObjectRef;
   textEncodingKind?: PdfTextEncodingKind;
   unicodeMappingSource?: PdfUnicodeMappingSource;
@@ -754,6 +776,7 @@ function observeParsedTextRun(
 } {
   let text = "";
   let hasFontMappingGap = false;
+  let hasLiteralFontEncodingGap = false;
   let textEncodingKind: PdfTextEncodingKind | undefined;
   let unicodeMappingSource: PdfUnicodeMappingSource | undefined;
   let pendingTextAdjustment: number | undefined;
@@ -764,6 +787,9 @@ function observeParsedTextRun(
     ? resolveEmbeddedFontMappingForFont(fontRef, embeddedFontMappingByFontKey, inspection)
     : undefined;
   const writingMode = fontRef ? resolveWritingModeForFont(fontRef, inspection) : undefined;
+  const hasHiddenTextFeature = inspection.featureSignals.some(
+    (signal) => signal.kind === "hidden-text" && signal.detected,
+  );
 
   for (const operand of parsedRun.operands) {
     if (operand.kind === "adjustment") {
@@ -772,7 +798,43 @@ function observeParsedTextRun(
     }
 
     if (operand.kind === "literal") {
-      text = appendObservedOperandText(text, decodePdfLiteral(operand.token), pendingTextAdjustment, parsedRun.fontSize);
+      const rawLiteralText = decodePdfLiteral(operand.token);
+      const shouldUseHiddenTextRecovery = hasHiddenTextFeature ||
+        parsedRun.markedContentKind !== undefined ||
+        parsedRun.actualText !== undefined;
+
+      if (shouldUseHiddenTextRecovery) {
+        const sanitizedLiteralText = sanitizeLiteralText(rawLiteralText);
+        const preferredActualText = resolvePreferredActualText(
+          parsedRun.actualText,
+          sanitizedLiteralText.length > 0 ? sanitizedLiteralText : rawLiteralText,
+        );
+        if (preferredActualText !== undefined) {
+          text = appendObservedOperandText(text, preferredActualText, pendingTextAdjustment, parsedRun.fontSize);
+          pendingTextAdjustment = undefined;
+          textEncodingKind = textEncodingKind ?? "literal";
+          unicodeMappingSource = unicodeMappingSource ?? "actual-text";
+          continue;
+        }
+
+        if (sanitizedLiteralText.length > 0 && !looksUnreadableLiteralText(sanitizedLiteralText)) {
+          text = appendObservedOperandText(text, sanitizedLiteralText, pendingTextAdjustment, parsedRun.fontSize);
+          pendingTextAdjustment = undefined;
+          textEncodingKind = textEncodingKind ?? "literal";
+          unicodeMappingSource = unicodeMappingSource ?? "literal";
+          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || sanitizedLiteralText !== rawLiteralText;
+          continue;
+        }
+
+        if (shouldSuppressUnreadableLiteralText(rawLiteralText, parsedRun.markedContentKind)) {
+          pendingTextAdjustment = undefined;
+          textEncodingKind = textEncodingKind ?? "literal";
+          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || parsedRun.markedContentKind !== "artifact";
+          continue;
+        }
+      }
+
+      text = appendObservedOperandText(text, rawLiteralText, pendingTextAdjustment, parsedRun.fontSize);
       pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
       unicodeMappingSource = unicodeMappingSource ?? "literal";
@@ -800,9 +862,11 @@ function observeParsedTextRun(
     unicodeMappingSource = unicodeMappingSource ?? decodedText.mappingSource;
   }
 
+  const normalizedText = normalizeObservedRunText(text);
   return {
-    text: text.trim(),
+    text: normalizedText,
     hasFontMappingGap,
+    hasLiteralFontEncodingGap,
     startsNewLine: parsedRun.startsNewLine,
     ...(fontRef !== undefined ? { fontRef } : {}),
     ...(textEncodingKind !== undefined ? { textEncodingKind } : {}),
@@ -865,6 +929,68 @@ function shouldInsertSyntheticSpace(
   }
 
   return /\S$/u.test(currentTail) && /^\S/u.test(operandHead);
+}
+
+function resolvePreferredActualText(actualText: string | undefined, observedText: string): string | undefined {
+  if (actualText === undefined) {
+    return undefined;
+  }
+
+  const normalizedActualText = actualText
+    .replaceAll(/\r\n?/g, "\n")
+    .replaceAll(/[^\S\n]+/g, " ")
+    .trim();
+  if (normalizedActualText.length === 0) {
+    return undefined;
+  }
+
+  if (looksUnreadableLiteralText(observedText) || normalizedActualText.length >= observedText.trim().length) {
+    return normalizedActualText;
+  }
+
+  return undefined;
+}
+
+function sanitizeLiteralText(text: string): string {
+  return text
+    .replaceAll(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]+/gu, "")
+    .replaceAll(/[\t\r\n]+/g, " ")
+    .replaceAll(/[ ]{2,}/g, " ")
+    .trim();
+}
+
+function shouldSuppressUnreadableLiteralText(
+  text: string,
+  markedContentKind: "artifact" | "span" | "other" | undefined,
+): boolean {
+  void markedContentKind;
+  return looksUnreadableLiteralText(text);
+}
+
+function looksUnreadableLiteralText(text: string): boolean {
+  if (text.length === 0) {
+    return false;
+  }
+
+  const characters = Array.from(text);
+  const controlCharacterCount = characters.filter((character) => /[\u0000-\u0008\u000b-\u001f\u007f-\u009f]/u.test(character)).length;
+  if (controlCharacterCount === 0) {
+    return false;
+  }
+
+  const letterOrDigitCount = characters.filter((character) => /[\p{L}\p{N}]/u.test(character)).length;
+  if (letterOrDigitCount === 0) {
+    return true;
+  }
+
+  return controlCharacterCount / characters.length > 0.25 && letterOrDigitCount / characters.length < 0.3;
+}
+
+function normalizeObservedRunText(text: string): string {
+  return text
+    .replaceAll(/[\u0000-\u001f\u007f-\u009f]+/gu, " ")
+    .replaceAll(/[ ]{2,}/g, " ")
+    .trim();
 }
 
 function decodeHexTextOperand(
@@ -1293,6 +1419,7 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
 function collectObservationKnownLimits(
   inspection: PdfShellInspection,
   hasFontMappingGap: boolean,
+  hasLiteralFontEncodingGap: boolean,
   hasParagraphText: boolean,
 ): readonly PdfKnownLimitCode[] {
   const knownLimits: PdfKnownLimitCode[] = [...collectIrKnownLimits(inspection)];
@@ -1304,6 +1431,9 @@ function collectObservationKnownLimits(
   }
   if (hasFontMappingGap) {
     knownLimits.push("font-unicode-mapping-not-implemented");
+  }
+  if (hasLiteralFontEncodingGap) {
+    knownLimits.push("literal-font-encoding-not-implemented");
   }
   return dedupeKnownLimits(knownLimits);
 }
