@@ -490,6 +490,57 @@ const fieldLabelFormPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const contractAwardTablePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 742 Tm",
+    "(2) Tj",
+    "1 0 0 1 72 726 Tm",
+    "(Serial) Tj",
+    "1 0 0 1 72 712 Tm",
+    "(No.) Tj",
+    "1 0 0 1 140 726 Tm",
+    "(Contract) Tj",
+    "1 0 0 1 140 712 Tm",
+    "(Description) Tj",
+    "1 0 0 1 320 726 Tm",
+    "(Contractor) Tj",
+    "1 0 0 1 320 712 Tm",
+    "(/Consultant) Tj",
+    "1 0 0 1 460 726 Tm",
+    "(Contract) Tj",
+    "1 0 0 1 460 712 Tm",
+    "(Amount) Tj",
+    "1 0 0 1 540 726 Tm",
+    "(Remarks) Tj",
+    "1 0 0 1 72 676 Tm",
+    "(24 Procurement of Traffic Engineering) Tj",
+    "1 0 0 1 72 662 Tm",
+    "(MRH/IDA/TSP/ICB/G-14/LOT2) Tj",
+    "1 0 0 1 72 648 Tm",
+    "(ICB Comicel Limited 44 Pangbourine Drive Stanmore) Tj",
+    "1 0 0 1 72 634 Tm",
+    "(98,439.82 GHS 18-Jun-13 9-Jul-13 Completed) Tj",
+    "1 0 0 1 72 606 Tm",
+    "(23 Procurement of Software) Tj",
+    "1 0 0 1 72 592 Tm",
+    "(MRH/IDA/TSP/SHP/G-10) Tj",
+    "1 0 0 1 72 578 Tm",
+    "(Shopping Harley Reed Ghana Ltd Box KIA 18128, Airport - Accra) Tj",
+    "1 0 0 1 72 564 Tm",
+    "(227,115.00 GHS 11-Dec-13 15-Jan-14 Completed) Tj",
+    "1 0 0 1 72 536 Tm",
+    "(22 Production of Road Safety Posters) Tj",
+    "1 0 0 1 72 522 Tm",
+    "(MRH/IDA/TSP/SHP/G-20) Tj",
+    "1 0 0 1 72 508 Tm",
+    "(Shopping Samster Ltd Box CO 2803 Tema) Tj",
+    "1 0 0 1 72 494 Tm",
+    "(244,950.00 GHS 23-Dec-13 17-Feb-14 Completed) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const scientificTextFlowPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1340,6 +1391,13 @@ const fieldLabelFormResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const contractAwardTableResult = await engine.run({
+  source: {
+    bytes: encodeText(contractAwardTablePdf),
+    fileName: "contract-award-table.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const scientificTextFlowResult = await engine.run({
   source: {
     bytes: encodeText(scientificTextFlowPdf),
@@ -1654,6 +1712,39 @@ assert(
 assert(
   fieldLabelFormResult.knowledge.value?.tables[0]?.cells.every((cell) => cell.citations.length > 0),
   "Field-label form projection emitted a cell without citations.",
+);
+assert(
+  contractAwardTableResult.knowledge.value?.tables.length === 1,
+  `Contract-award projection emitted ${String(contractAwardTableResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
+  contractAwardTableResult.knowledge.value?.tables[0]?.heuristic === "contract-award-sequence",
+  `Contract-award heuristic was ${contractAwardTableResult.knowledge.value?.tables[0]?.heuristic ?? "missing"}.`,
+);
+assert(
+  contractAwardTableResult.knowledge.value?.tables[0]?.headers?.join(",") ===
+    "Serial No.,Contract Description,Contractor,Amount,Remarks",
+  `Contract-award headers were ${JSON.stringify(contractAwardTableResult.knowledge.value?.tables[0]?.headers ?? null)}.`,
+);
+assert(
+  contractAwardTableResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 1 && cell.columnIndex === 2 && cell.text === "ICB Comicel Limited",
+  ),
+  "Contract-award projection did not recover the first contractor cell.",
+);
+assert(
+  contractAwardTableResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 3 && cell.columnIndex === 3 && cell.text === "244,950.00 GHS",
+  ),
+  "Contract-award projection did not recover the final amount cell.",
+);
+assert(
+  !contractAwardTableResult.knowledge.value?.tables.some((table) => table.heuristic === "field-label-form"),
+  "Contract-award projection still emitted a field-label form false positive.",
+);
+assert(
+  contractAwardTableResult.knowledge.value?.tables[0]?.cells.every((cell) => cell.citations.length > 0),
+  "Contract-award projection emitted a cell without citations.",
 );
 assert(
   regulatoryTextRecoveryResult.observation.value?.extractedText === "Introduction Readable text",

@@ -755,7 +755,8 @@ export type PdfKnowledgeTableHeuristic =
   | "row-sequence"
   | "stacked-header-sequence"
   | "field-value-form"
-  | "field-label-form";
+  | "field-label-form"
+  | "contract-award-sequence";
 
 /**
  * One provenance record attached to a knowledge chunk or table cell.
