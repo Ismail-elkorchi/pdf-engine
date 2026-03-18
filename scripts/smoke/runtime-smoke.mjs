@@ -693,6 +693,90 @@ const tableRowRolePdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const contentsEntryRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Contents) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 688 Tm",
+    "(Introduction) Tj",
+    "1 0 0 1 300 688 Tm",
+    "(1) Tj",
+    "1 0 0 1 72 664 Tm",
+    "(Installation) Tj",
+    "1 0 0 1 300 664 Tm",
+    "(2) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const legalMetadataRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Neutral Citation Number: [2017] EWHC 3175 (IPEC)) Tj",
+    "1 0 0 1 72 690 Tm",
+    "(IN THE HIGH COURT OF JUSTICE) Tj",
+    "1 0 0 1 72 660 Tm",
+    "(Background paragraph starts here.) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const metricHeadingRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(January 2024) Tj",
+    "1 0 0 1 72 696 Tm",
+    "(37,725 MW) Tj",
+    "1 0 0 1 72 664 Tm",
+    "(2024 Generating Capacity) Tj",
+    "1 0 0 1 72 636 Tm",
+    "(Natural Gas 44.3% Wind 25.2%) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const smallTableHeaderRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 7 Tf",
+    "1 0 0 1 48 720 Tm",
+    "(Rub) Tj",
+    "1 0 0 1 110 720 Tm",
+    "(Libelle) Tj",
+    "1 0 0 1 220 720 Tm",
+    "(Base ou Nombre) Tj",
+    "1 0 0 1 360 720 Tm",
+    "(Taux) Tj",
+    "1 0 0 1 48 700 Tm",
+    "(100040) Tj",
+    "1 0 0 1 110 700 Tm",
+    "(SALAIRE DE BASE) Tj",
+    "1 0 0 1 220 700 Tm",
+    "(151,67) Tj",
+    "1 0 0 1 360 700 Tm",
+    "(12,00000) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const repeatedFieldGroupHeadingPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(9. Type of Applicant 1: Select Applicant Type:) Tj",
+    "1 0 0 1 72 692 Tm",
+    "(Type of Applicant 2: Select Applicant Type:) Tj",
+    "1 0 0 1 72 664 Tm",
+    "(Type of Applicant 3: Select Applicant Type:) Tj",
+    "1 0 0 1 72 636 Tm",
+    "(* Other (specify):) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const regulatoryTextRecoveryPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1628,6 +1712,41 @@ const tableRowRoleResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const contentsEntryRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(contentsEntryRolePdf),
+    fileName: "contents-entry-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const legalMetadataRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(legalMetadataRolePdf),
+    fileName: "legal-metadata-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const metricHeadingRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(metricHeadingRolePdf),
+    fileName: "metric-heading-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const smallTableHeaderRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(smallTableHeaderRolePdf),
+    fileName: "small-table-header-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const repeatedFieldGroupHeadingResult = await engine.run({
+  source: {
+    bytes: encodeText(repeatedFieldGroupHeadingPdf),
+    fileName: "repeated-field-group-heading.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const regulatoryTextRecoveryResult = await engine.run({
   source: {
     bytes: encodeText(regulatoryTextRecoveryPdf),
@@ -2151,6 +2270,36 @@ assert(
 assert(
   tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Unicorn")?.role === "body",
   `Table-row second descriptor role was ${tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Unicorn")?.role ?? "missing"}.`,
+);
+assert(
+  findBlockRole(contentsEntryRoleResult.layout.value?.pages[0]?.blocks ?? [], "Introduction") === "heading" &&
+    findBlockRole(contentsEntryRoleResult.layout.value?.pages[0]?.blocks ?? [], "Installation") === "heading",
+  `Contents-entry roles were ${JSON.stringify(contentsEntryRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  legalMetadataRoleResult.layout.value?.pages[0]?.blocks[0]?.role === "heading" &&
+    legalMetadataRoleResult.layout.value?.pages[0]?.blocks[0]?.text.includes("Neutral Citation Number: [2017] EWHC 3175 (IPEC)"),
+  `Legal-metadata roles were ${JSON.stringify(legalMetadataRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  (metricHeadingRoleResult.layout.value?.pages[0]?.blocks ?? []).some(
+    (block) => block.role === "heading" && block.text.includes("2024 Generating Capacity"),
+  ),
+  `Metric-heading roles were ${JSON.stringify(metricHeadingRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  findBlockRole(smallTableHeaderRoleResult.layout.value?.pages[0]?.blocks ?? [], "Rub") === "heading" &&
+    findBlockRole(smallTableHeaderRoleResult.layout.value?.pages[0]?.blocks ?? [], "Libelle") === "heading" &&
+    findBlockRole(smallTableHeaderRoleResult.layout.value?.pages[0]?.blocks ?? [], "Base ou Nombre") === "heading" &&
+    findBlockRole(smallTableHeaderRoleResult.layout.value?.pages[0]?.blocks ?? [], "Taux") === "heading",
+  `Small-table header roles were ${JSON.stringify(smallTableHeaderRoleResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  (repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks ?? []).some(
+    (block) => block.role === "heading" && block.text.includes("Type of Applicant 2: Select Applicant Type:"),
+  ) &&
+    findBlockRole(repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks ?? [], "Type of Applicant 3: Select Applicant Type:") === "heading",
+  `Repeated field-group roles were ${JSON.stringify(repeatedFieldGroupHeadingResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(

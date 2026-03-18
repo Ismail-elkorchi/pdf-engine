@@ -868,6 +868,14 @@ function classifyLayoutBlock(
     };
   }
 
+  if (looksLikePromotedHeading(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "heading",
+      roleConfidence: 0.65,
+    };
+  }
+
   if (looksLikeTableRowDescriptor(block, blockIndex, blocks)) {
     return {
       ...block,
@@ -978,6 +986,129 @@ function looksLikeNumberedBodyParagraph(text: string): boolean {
   }
 
   return startsLikeSentence(bodyText) || /[.!?]["')\]]*$/u.test(normalized);
+}
+
+function looksLikePromotedHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  return looksLikeContentsEntryHeading(block, blockIndex, blocks) ||
+    looksLikeLegalMetadataHeading(block, blockIndex, blocks) ||
+    looksLikeMetricSectionHeading(block, blockIndex, blocks) ||
+    looksLikeRepeatedFieldGroupHeading(block, blockIndex, blocks) ||
+    looksLikeTableHeaderLabel(block, blocks);
+}
+
+function looksLikeContentsEntryHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 80 || countLabelMarkers(normalized) > 0 || /[.!?]$/.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 6 || !looksLikeTitleCaseHeading(normalized)) {
+    return false;
+  }
+
+  return blocks
+    .slice(Math.max(0, blockIndex - 8), blockIndex)
+    .some((candidate) => /\bcontents\b/iu.test(normalizeBlockText(candidate.text)));
+}
+
+function looksLikeLegalMetadataHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 160 || /[.!?]$/.test(normalized)) {
+    return false;
+  }
+
+  if (!/\b(?:citation number|neutral citation|claim number|claim no\.?|case number|case no\.?)\b/iu.test(normalized)) {
+    return false;
+  }
+
+  return hasHeadingNeighbor(blockIndex, blocks) || /\[\d{4}\]/u.test(normalized);
+}
+
+function looksLikeMetricSectionHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 64 || /[.!?]$/.test(normalized)) {
+    return false;
+  }
+
+  if (!/^\d{4}\s+/u.test(normalized) || !looksLikeTitleCaseHeading(normalized)) {
+    return false;
+  }
+
+  return blocks
+    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
+    .some((candidate, candidateIndex) => {
+      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
+      if (originalIndex === blockIndex) {
+        return false;
+      }
+
+      return looksLikeMetricValueText(candidate.text) || looksLikeHeadingLikeText(candidate.text, candidate.fontSize);
+    });
+}
+
+function looksLikeMetricValueText(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  return /\d/u.test(normalized) && /(?:[%$€£¥]|(?:\b(?:kw|mw|gw|kwh|mwh|gwh|twh)\b))/iu.test(normalized);
+}
+
+function looksLikeRepeatedFieldGroupHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 120 || countLabelMarkers(normalized) < 2 || /[.!?]$/.test(normalized)) {
+    return false;
+  }
+
+  if (!looksLikeTitleCaseHeading(normalized)) {
+    return false;
+  }
+
+  const stem = normalizeHeadingStem(normalized);
+  if (stem.length === 0) {
+    return false;
+  }
+
+  return blocks
+    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
+    .some((candidate, candidateIndex) => {
+      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
+      if (originalIndex === blockIndex) {
+        return false;
+      }
+
+      const candidateText = normalizeBlockText(candidate.text);
+      return normalizeHeadingStem(candidateText) === stem &&
+        (looksLikeSectionHeading(candidateText) || looksLikeHeadingLikeText(candidateText, candidate.fontSize));
+    });
+}
+
+function normalizeHeadingStem(text: string): string {
+  return normalizeBlockText(text)
+    .toLowerCase()
+    .replace(/^\d+(?:\.\d+)*[.)]?\s+/u, "")
+    .replace(/\b\d+\b/gu, " ")
+    .replace(/[:*]/gu, " ")
+    .replaceAll(/\s+/g, " ")
+    .trim();
 }
 
 function looksLikeFieldLabelBody(
@@ -1253,6 +1384,68 @@ function looksLikeTableRowDescriptor(
   });
 
   return dataNeighbor;
+}
+
+function looksLikeTableHeaderLabel(
+  block: PdfLayoutBlock,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (!block.anchor) {
+    return false;
+  }
+
+  const anchor = block.anchor;
+  const normalized = normalizeBlockText(block.text);
+  if (!looksLikeShortTabularHeaderText(normalized)) {
+    return false;
+  }
+
+  const fontSize = block.fontSize ?? 12;
+  const rowTolerance = Math.max(10, fontSize * 0.9);
+  const columnTolerance = Math.max(16, fontSize * 1.8);
+  const sameRowHeaderCount = blocks.filter((candidate) => {
+    if (!candidate.anchor || candidate.id === block.id) {
+      return false;
+    }
+
+    return Math.abs(candidate.anchor.y - anchor.y) <= rowTolerance &&
+      Math.abs(candidate.anchor.x - anchor.x) >= columnTolerance &&
+      looksLikeShortTabularHeaderText(normalizeBlockText(candidate.text));
+  }).length;
+  if (sameRowHeaderCount < 2) {
+    return false;
+  }
+
+  return blocks.some((candidate) => {
+    if (!candidate.anchor || candidate.id === block.id) {
+      return false;
+    }
+
+    const verticalGap = Math.abs(candidate.anchor.y - anchor.y);
+    if (verticalGap <= rowTolerance || verticalGap > Math.max(84, fontSize * 10)) {
+      return false;
+    }
+
+    return looksLikeTabularDataText(candidate.text);
+  });
+}
+
+function looksLikeShortTabularHeaderText(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0 || normalized.length > 48 || countLabelMarkers(normalized) > 0) {
+    return false;
+  }
+
+  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized) || /[.!?]$/.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 4) {
+    return false;
+  }
+
+  return /^[\p{Lu}\p{Lt}\p{N}][\p{L}\p{N}\s/'’().-]*$/u.test(normalized);
 }
 
 function looksLikeTabularDataText(text: string): boolean {
