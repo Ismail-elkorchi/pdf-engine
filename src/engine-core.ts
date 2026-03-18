@@ -3,6 +3,12 @@ import {
   type PdfCidCollectionIdentifier,
 } from "./cid-collection-unicode.ts";
 import { decodePdfHexTextWithUnicodeCMap, parsePdfUnicodeCMap } from "./cmap.ts";
+import {
+  buildPdfSingleByteFontEncoding,
+  decodePdfSingleByteHexText,
+  decodePdfSingleByteLiteralText,
+  type PdfSingleByteFontEncoding,
+} from "./font-encoding.ts";
 import { buildKnowledgeDocument } from "./knowledge.ts";
 import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts";
 import {
@@ -663,6 +669,7 @@ function buildObservedPage(
   const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
   const unicodeCMapByFontKey = new Map<string, ReturnType<typeof parsePdfUnicodeCMap>>();
   const embeddedFontMappingByFontKey = new Map<string, PdfEmbeddedFontMapping | undefined>();
+  const singleByteFontEncodingByFontKey = new Map<string, PdfSingleByteFontEncoding | undefined>();
 
   for (const contentStreamRef of pageEntry.contentStreamRefs) {
     const contentStream = inspection.analysis.objectIndex.get(keyOfObjectRef(contentStreamRef));
@@ -677,6 +684,7 @@ function buildObservedPage(
         fontRefByResourceName,
         unicodeCMapByFontKey,
         embeddedFontMappingByFontKey,
+        singleByteFontEncodingByFontKey,
         inspection,
       );
       hasFontMappingGap = hasFontMappingGap || observedRun.hasFontMappingGap;
@@ -762,6 +770,7 @@ function observeParsedTextRun(
   fontRefByResourceName: ReadonlyMap<string, PdfObjectRef>,
   unicodeCMapByFontKey: Map<string, ReturnType<typeof parsePdfUnicodeCMap>>,
   embeddedFontMappingByFontKey: Map<string, PdfEmbeddedFontMapping | undefined>,
+  singleByteFontEncodingByFontKey: Map<string, PdfSingleByteFontEncoding | undefined>,
   inspection: PdfShellInspection,
 ): {
   text: string;
@@ -787,6 +796,9 @@ function observeParsedTextRun(
   const embeddedFontMapping = fontRef
     ? resolveEmbeddedFontMappingForFont(fontRef, embeddedFontMappingByFontKey, inspection)
     : undefined;
+  const singleByteFontEncoding = fontRef
+    ? resolveSingleByteFontEncodingForFont(fontRef, singleByteFontEncodingByFontKey, inspection)
+    : undefined;
   const writingMode = fontRef ? resolveWritingModeForFont(fontRef, inspection) : undefined;
   const hasHiddenTextFeature = inspection.featureSignals.some(
     (signal) => signal.kind === "hidden-text" && signal.detected,
@@ -800,15 +812,21 @@ function observeParsedTextRun(
 
     if (operand.kind === "literal") {
       const rawLiteralText = decodePdfLiteral(operand.token);
+      const decodedLiteralText = singleByteFontEncoding
+        ? decodePdfSingleByteLiteralText(rawLiteralText, singleByteFontEncoding)
+        : undefined;
+      const preferredLiteralText = decodedLiteralText && decodedLiteralText.text.length > 0
+        ? decodedLiteralText.text
+        : rawLiteralText;
       const shouldUseHiddenTextRecovery = hasHiddenTextFeature ||
         parsedRun.markedContentKind !== undefined ||
         parsedRun.actualText !== undefined;
 
       if (shouldUseHiddenTextRecovery) {
-        const sanitizedLiteralText = sanitizeLiteralText(rawLiteralText);
+        const sanitizedLiteralText = sanitizeLiteralText(preferredLiteralText);
         const preferredActualText = resolvePreferredActualText(
           parsedRun.actualText,
-          sanitizedLiteralText.length > 0 ? sanitizedLiteralText : rawLiteralText,
+          sanitizedLiteralText.length > 0 ? sanitizedLiteralText : preferredLiteralText,
         );
         if (preferredActualText !== undefined) {
           text = appendObservedOperandText(text, preferredActualText, pendingTextAdjustment, parsedRun.fontSize);
@@ -822,12 +840,12 @@ function observeParsedTextRun(
           text = appendObservedOperandText(text, sanitizedLiteralText, pendingTextAdjustment, parsedRun.fontSize);
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
-          unicodeMappingSource = unicodeMappingSource ?? "literal";
-          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || sanitizedLiteralText !== rawLiteralText;
+          unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
+          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || decodedLiteralText?.complete === false;
           continue;
         }
 
-        if (shouldSuppressUnreadableLiteralText(rawLiteralText, parsedRun.markedContentKind)) {
+        if (shouldSuppressUnreadableLiteralText(preferredLiteralText, parsedRun.markedContentKind)) {
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
           hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || parsedRun.markedContentKind !== "artifact";
@@ -835,10 +853,11 @@ function observeParsedTextRun(
         }
       }
 
-      text = appendObservedOperandText(text, rawLiteralText, pendingTextAdjustment, parsedRun.fontSize);
+      text = appendObservedOperandText(text, preferredLiteralText, pendingTextAdjustment, parsedRun.fontSize);
       pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
-      unicodeMappingSource = unicodeMappingSource ?? "literal";
+      unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
+      hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || decodedLiteralText?.complete === false;
       continue;
     }
 
@@ -849,6 +868,7 @@ function observeParsedTextRun(
       unicodeCMap,
       cidCollection,
       embeddedFontMapping,
+      singleByteFontEncoding,
     );
     if (!decodedText) {
       hasFontMappingGap = true;
@@ -1000,6 +1020,7 @@ function decodeHexTextOperand(
   unicodeCMap: ReturnType<typeof parsePdfUnicodeCMap> | undefined,
   cidCollection: PdfCidCollectionIdentifier | undefined,
   embeddedFontMapping: PdfEmbeddedFontMapping | undefined,
+  singleByteFontEncoding: PdfSingleByteFontEncoding | undefined,
 ): PdfTextDecodeResult | undefined {
   if (unicodeCMap) {
     const decodedText = decodePdfHexTextWithUnicodeCMap(hexToken, unicodeCMap);
@@ -1011,7 +1032,16 @@ function decodeHexTextOperand(
   }
 
   if (textEncodingKind !== "cid") {
-    return undefined;
+    if (!singleByteFontEncoding) {
+      return undefined;
+    }
+
+    const decodedText = decodePdfSingleByteHexText(hexToken, singleByteFontEncoding);
+    return {
+      text: decodedText.text,
+      complete: decodedText.complete,
+      mappingSource: "font-encoding",
+    };
   }
 
   const collectionDecodedText = decodePdfCidHexTextWithKnownCollectionMap(hexToken, cidCollection);
@@ -1028,6 +1058,34 @@ function decodeHexTextOperand(
   }
 
   return decodePdfCidHexTextWithEmbeddedFont(hexToken, embeddedFontMapping);
+}
+
+function resolveSingleByteFontEncodingForFont(
+  fontRef: PdfObjectRef,
+  singleByteFontEncodingByFontKey: Map<string, PdfSingleByteFontEncoding | undefined>,
+  inspection: PdfShellInspection,
+): PdfSingleByteFontEncoding | undefined {
+  const fontKey = keyOfObjectRef(fontRef);
+  if (singleByteFontEncodingByFontKey.has(fontKey)) {
+    return singleByteFontEncodingByFontKey.get(fontKey);
+  }
+
+  const fontObject = inspection.analysis.objectIndex.get(fontKey);
+  const subtype = fontObject?.dictionaryEntries.get("Subtype")?.trim();
+  if (!fontObject || subtype === "/Type0" || fontObject.dictionaryEntries.has("DescendantFonts")) {
+    singleByteFontEncodingByFontKey.set(fontKey, undefined);
+    return undefined;
+  }
+
+  const encodingValue = resolveFontEncodingValue(fontObject.dictionaryEntries.get("Encoding"), inspection);
+  const baseEncodingName = readBaseEncodingName(encodingValue) ?? inferDefaultBaseEncodingName(subtype);
+  const differencesText = readDifferencesArrayText(encodingValue);
+  const singleByteFontEncoding = buildPdfSingleByteFontEncoding({
+    ...(baseEncodingName !== undefined ? { baseEncodingName } : {}),
+    ...(differencesText !== undefined ? { differencesText } : {}),
+  });
+  singleByteFontEncodingByFontKey.set(fontKey, singleByteFontEncoding);
+  return singleByteFontEncoding;
 }
 
 function resolveUnicodeCMapForFont(
@@ -1225,6 +1283,62 @@ function resolveDescendantFontObject(
   const descendantFontRefs = readOptionalObjectRefs(fontObject.dictionaryEntries.get("DescendantFonts"));
   const descendantFontRef = descendantFontRefs[0];
   return descendantFontRef ? inspection.analysis.objectIndex.get(keyOfObjectRef(descendantFontRef)) : fontObject;
+}
+
+function resolveFontEncodingValue(
+  value: string | undefined,
+  inspection: PdfShellInspection,
+): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  if (trimmedValue.startsWith("<<") && trimmedValue.endsWith(">>")) {
+    return trimmedValue;
+  }
+
+  if (trimmedValue.startsWith("/")) {
+    return trimmedValue;
+  }
+
+  const objectRef = readOptionalObjectRef(trimmedValue);
+  if (!objectRef) {
+    return undefined;
+  }
+
+  return inspection.analysis.objectIndex.get(keyOfObjectRef(objectRef))?.objectValueText?.trim();
+}
+
+function readBaseEncodingName(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  if (trimmedValue.startsWith("/") && trimmedValue.length > 1) {
+    return trimmedValue.slice(1);
+  }
+
+  const baseEncodingMatch = trimmedValue.match(/\/BaseEncoding\s*\/([A-Za-z0-9_.-]+)/u);
+  return baseEncodingMatch?.[1];
+}
+
+function readDifferencesArrayText(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const differencesMatch = value.match(/\/Differences\s*(\[[\s\S]*\])/u);
+  return differencesMatch?.[1];
+}
+
+function inferDefaultBaseEncodingName(subtype: string | undefined): string | undefined {
+  if (subtype === "/Type1" || subtype === "/TrueType") {
+    return "StandardEncoding";
+  }
+
+  return undefined;
 }
 
 function resolveCidToGidMap(

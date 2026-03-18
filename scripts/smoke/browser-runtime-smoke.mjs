@@ -189,6 +189,49 @@ async function runBrowserSmoke(baseUrl, browserName) {
           "ET",
         ].join("\n"),
       ]);
+      const singleByteEncodedContentStreamText = [
+        "BT",
+        "/F1 12 Tf",
+        "<01020304050605070806090A> Tj",
+        "ET"
+      ].join("\n");
+      const singleByteEncodedPdfTemplate = [
+        "%PDF-1.4",
+        "1 0 obj",
+        "<< /Type /Catalog /Pages 2 0 R >>",
+        "endobj",
+        "2 0 obj",
+        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+        "endobj",
+        "3 0 obj",
+        "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+        "endobj",
+        "4 0 obj",
+        `<< /Length ${String(encodeText(singleByteEncodedContentStreamText).byteLength)} >>`,
+        "stream",
+        singleByteEncodedContentStreamText,
+        "endstream",
+        "endobj",
+        "5 0 obj",
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+        "endobj",
+        "6 0 obj",
+        "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /E /n /c /o /d /e 7 /space /T 9 /x /t] >>",
+        "endobj",
+        "xref",
+        "0 7",
+        "0000000000 65535 f",
+        "trailer",
+        "<< /Root 1 0 R /Size 7 >>",
+        "startxref",
+        "__SINGLE_BYTE_STARTXREF__",
+        "%%EOF",
+        ""
+      ].join("\n");
+      const singleByteStartXref = singleByteEncodedPdfTemplate.indexOf("xref\n0 7");
+      const singleByteEncodedPdf = encodeText(
+        singleByteEncodedPdfTemplate.replace("__SINGLE_BYTE_STARTXREF__", String(singleByteStartXref))
+      );
 
       const plainPdfTemplate = [
         "%PDF-1.4",
@@ -298,6 +341,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: gridTablePdf
           }
         });
+        const singleByteEncodedResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: singleByteEncodedPdf
+          }
+        });
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
@@ -333,7 +382,11 @@ async function runBrowserSmoke(baseUrl, browserName) {
           gridTableCitations: gridTableResult.knowledge.value?.tables[0]?.cells.every((cell) =>
             cell.citations.length > 0
           ) === true,
-          gridTableLimit: gridTableResult.knowledge.value?.knownLimits.includes("table-projection-heuristic") === true
+          gridTableLimit: gridTableResult.knowledge.value?.knownLimits.includes("table-projection-heuristic") === true,
+          singleByteText: singleByteEncodedResult.observation.value?.extractedText === "Encoded Text",
+          singleByteMapping: singleByteEncodedResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
+          singleByteLimitCleared:
+            !singleByteEncodedResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented")
         };
         const stablePayload = {
           runtime: plainResult.runtime.kind,
@@ -343,7 +396,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
           identityHText: identityHCidFontResult.observation.value?.extractedText ?? null,
           identityVText: identityVCidFontResult.observation.value?.extractedText ?? null,
           verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null,
-          gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null
+          gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
+          singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null
         };
 
         return {
