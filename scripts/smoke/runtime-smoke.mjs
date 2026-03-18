@@ -488,6 +488,31 @@ const gridTablePdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const denseGridTablePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Code) Tj",
+    "1 0 0 1 180 720 Tm",
+    "(Label) Tj",
+    "1 0 0 1 320 720 Tm",
+    "(Amount) Tj",
+    "1 0 0 1 72 711 Tm",
+    "(100040) Tj",
+    "1 0 0 1 180 711 Tm",
+    "(Base Salary) Tj",
+    "1 0 0 1 320 711 Tm",
+    "(1820.04) Tj",
+    "1 0 0 1 72 702 Tm",
+    "(109510) Tj",
+    "1 0 0 1 180 702 Tm",
+    "(Hours 25%) Tj",
+    "1 0 0 1 320 702 Tm",
+    "(259.95) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const rowSequenceTablePdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1076,6 +1101,13 @@ const gridTableResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const denseGridTableResult = await engine.run({
+  source: {
+    bytes: encodeText(denseGridTablePdf),
+    fileName: "dense-grid-table.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const rowSequenceTableResult = await engine.run({
   source: {
     bytes: encodeText(rowSequenceTablePdf),
@@ -1286,6 +1318,26 @@ assert(
 assert(
   gridTableResult.knowledge.value?.tables[0]?.cells.every((cell) => cell.citations.length > 0),
   "Grid table projection emitted a cell without citations.",
+);
+assert(
+  denseGridTableResult.knowledge.value?.tables.length === 1,
+  `Dense grid table projection emitted ${String(denseGridTableResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
+  denseGridTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Code,Label,Amount",
+  `Dense grid table headers were ${JSON.stringify(denseGridTableResult.knowledge.value?.tables[0]?.headers ?? null)}.`,
+);
+assert(
+  denseGridTableResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 1 && cell.columnIndex === 1 && cell.text === "Base Salary",
+  ),
+  "Dense grid table projection did not preserve the Base Salary row.",
+);
+assert(
+  denseGridTableResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 2 && cell.columnIndex === 1 && cell.text === "Hours 25%",
+  ),
+  "Dense grid table projection did not preserve the Hours 25% row.",
 );
 assert(
   gridTableResult.knowledge.value?.knownLimits.includes("table-projection-heuristic"),
