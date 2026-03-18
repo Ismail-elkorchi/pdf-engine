@@ -22,6 +22,10 @@ function assert(condition, message) {
   }
 }
 
+function findBlockRole(blocks, text) {
+  return blocks.find((block) => block.text === text)?.role;
+}
+
 function hasUnreadableControlCharacters(value) {
   for (const character of value) {
     const codePoint = character.codePointAt(0) ?? 0;
@@ -477,16 +481,33 @@ const fieldLabelFormPdf = buildPdfWithPageContents([
     "1 0 0 1 72 720 Tm",
     "(Person Of Impact) Tj",
     "/F1 12 Tf",
+    "1 0 0 1 72 704 Tm",
+    "(Gender:) Tj",
     "1 0 0 1 72 684 Tm",
-    "(First Name) Tj",
+    "(First Name:) Tj",
     "1 0 0 1 220 684 Tm",
-    "(Last Name) Tj",
+    "(Last Name:) Tj",
     "1 0 0 1 72 660 Tm",
-    "(Birthday) Tj",
+    "(Birthday:) Tj",
     "1 0 0 1 72 636 Tm",
     "(Agree to privacy policy) Tj",
     "1 0 0 1 72 612 Tm",
     "(Other) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const fieldValueRowPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Title:) Tj",
+    "1 0 0 1 180 720 Tm",
+    "(MBL-SF424Family-AllForms) Tj",
+    "1 0 0 1 72 692 Tm",
+    "(Competition Identification Number:) Tj",
+    "1 0 0 1 260 692 Tm",
+    "(ABC-123) Tj",
     "ET",
   ].join("\n"),
 ]);
@@ -1511,6 +1532,13 @@ const fieldLabelFormResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const fieldValueRowResult = await engine.run({
+  source: {
+    bytes: encodeText(fieldValueRowPdf),
+    fileName: "field-value-row.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const contractAwardTableResult = await engine.run({
   source: {
     bytes: encodeText(contractAwardTablePdf),
@@ -1829,6 +1857,17 @@ assert(
   `Compact label-cluster body role was ${compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role ?? "missing"}.`,
 );
 assert(
+  (fieldLabelFormResult.layout.value?.pages[0]?.blocks ?? []).some(
+    (block) => block.role === "body" && block.text.includes("First Name:") && block.text.includes("Last Name:"),
+  ),
+  `Field-label form rows were ${JSON.stringify(fieldLabelFormResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
+  findBlockRole(fieldValueRowResult.layout.value?.pages[0]?.blocks ?? [], "MBL-SF424Family-AllForms") === "body" &&
+    findBlockRole(fieldValueRowResult.layout.value?.pages[0]?.blocks ?? [], "ABC-123") === "body",
+  `Field-value row roles were ${JSON.stringify(fieldValueRowResult.layout.value?.pages[0]?.blocks?.map((block) => ({ text: block.text, role: block.role })) ?? null)}.`,
+);
+assert(
   fieldLabelFormResult.knowledge.value?.tables.length === 1,
   `Field-label form projection emitted ${String(fieldLabelFormResult.knowledge.value?.tables.length ?? "missing")} tables.`,
 );
@@ -1842,13 +1881,13 @@ assert(
 );
 assert(
   fieldLabelFormResult.knowledge.value?.tables[0]?.cells.some(
-    (cell) => cell.rowIndex === 1 && cell.columnIndex === 0 && cell.text === "First Name",
+    (cell) => cell.columnIndex === 0 && cell.text === "First Name",
   ),
   "Field-label form projection did not recover the first field label.",
 );
 assert(
   fieldLabelFormResult.knowledge.value?.tables[0]?.cells.some(
-    (cell) => cell.rowIndex === 4 && cell.columnIndex === 0 && cell.text === "Agree to privacy policy",
+    (cell) => cell.columnIndex === 0 && cell.text === "Agree to privacy policy",
   ),
   "Field-label form projection did not recover the privacy field label.",
 );
