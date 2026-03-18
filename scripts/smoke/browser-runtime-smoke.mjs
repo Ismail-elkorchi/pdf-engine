@@ -530,17 +530,23 @@ async function runBrowserSmoke(baseUrl, browserName) {
           viewerContainer.querySelectorAll(".pdf-engine-viewer__table td"),
           (element) => element.textContent ?? "",
         );
+        const readSearchHighlights = () =>
+          Array.from(viewerContainer.querySelectorAll(".pdf-engine-viewer__highlight")).length;
 
         const viewerHandle = renderPdfViewer(viewerContainer, viewerNavigationResult, {
           initialPage: 2,
           showBlockOutlines: true,
           showChunkAnchors: true,
+          showSearch: true,
+          showOutline: true,
         });
         const initialViewerLabel =
           viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
         const initialViewerBlocks = readBlockTexts();
         const initialPreviousDisabled = findButton("Previous")?.disabled ?? null;
         const initialNextDisabled = findButton("Next")?.disabled ?? null;
+        const initialOutlineCount =
+          viewerContainer.querySelector("[data-viewer-outline-count]")?.dataset.viewerOutlineCount ?? null;
 
         viewerHandle.goToPage(1);
         const navigatedViewerLabel =
@@ -549,7 +555,32 @@ async function runBrowserSmoke(baseUrl, browserName) {
         const navigatedPreviousDisabled = findButton("Previous")?.disabled ?? null;
         const navigatedNextDisabled = findButton("Next")?.disabled ?? null;
 
-        viewerHandle.update(denseGridTableResult, { showTables: true });
+        viewerHandle.setView("reader");
+        viewerHandle.setSearchQuery("Second");
+        const readerViewerLabel =
+          viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
+        const readerViewerMode =
+          viewerContainer.querySelector("[data-viewer-current-view]")?.dataset.viewerCurrentView ?? null;
+        const readerViewerPageCount =
+          viewerContainer.querySelector("[data-viewer-reader-page-count]")?.dataset.viewerReaderPageCount ?? null;
+        const readerSearchCount =
+          viewerContainer.querySelector("[data-viewer-search-count]")?.dataset.viewerSearchCount ?? null;
+        const readerOutlineCount =
+          viewerContainer.querySelector("[data-viewer-outline-count]")?.dataset.viewerOutlineCount ?? null;
+        const readerSearchHighlights = readSearchHighlights();
+        const firstPageChunkId = viewerNavigationResult.knowledge.value?.chunks.find((chunk) =>
+          chunk.pageNumbers.includes(1)
+        )?.id ?? null;
+        if (firstPageChunkId) {
+          viewerHandle.goToChunk(firstPageChunkId);
+        }
+        const readerChunkLabel =
+          viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
+        const activeChunkId =
+          viewerContainer.querySelector("[data-viewer-active-chunk]")?.dataset.viewerActiveChunk ?? null;
+
+        viewerHandle.setView("page");
+        viewerHandle.update(denseGridTableResult, { showTables: true, showSearch: true, showOutline: true });
         const updatedViewerLabel =
           viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
         const updatedViewerBlocks = readBlockTexts();
@@ -561,6 +592,10 @@ async function runBrowserSmoke(baseUrl, browserName) {
           viewerContainer.querySelector("[data-viewer-block-count]")?.dataset.viewerBlockCount ?? null;
         const updatedViewerHeaders = readTableHeaders();
         const updatedViewerCells = readTableCells();
+        const updatedViewerOutlineCount =
+          viewerContainer.querySelector("[data-viewer-outline-count]")?.dataset.viewerOutlineCount ?? null;
+        const updatedViewerSearchCount =
+          viewerContainer.querySelector("[data-viewer-search-count]")?.dataset.viewerSearchCount ?? null;
 
         viewerHandle.destroy();
         const viewerDestroyed = viewerContainer.childElementCount === 0;
@@ -643,11 +678,22 @@ async function runBrowserSmoke(baseUrl, browserName) {
           viewerInitialPage: initialViewerLabel === "Page 2 of 2",
           viewerInitialBlocks: initialViewerBlocks.some((text) => text.includes("Second Page Overview")),
           viewerInitialButtons: initialPreviousDisabled === false && initialNextDisabled === true,
+          viewerInitialOutline: initialOutlineCount === "2",
           viewerNavigatedPage: navigatedViewerLabel === "Page 1 of 2",
           viewerNavigatedBlocks: navigatedViewerBlocks.some((text) => text.includes("First Page Summary")),
           viewerNavigatedButtons: navigatedPreviousDisabled === true && navigatedNextDisabled === false,
+          viewerReaderMode: readerViewerMode === "reader",
+          viewerReaderLabel: readerViewerLabel === "Reader view • page 1 of 2",
+          viewerReaderPages: readerViewerPageCount === "2",
+          viewerReaderSearch: Number(readerSearchCount ?? "0") >= 2 && readerSearchHighlights >= 2,
+          viewerReaderOutline: readerOutlineCount === "2",
+          viewerGoToChunk: readerChunkLabel === "Reader view • page 1 of 2" && activeChunkId === firstPageChunkId,
           viewerUpdatePreservedPage: updatedViewerLabel === "Page 1 of 1",
-          viewerUpdatePreservedPanels: updatedViewerChunkCount !== null && updatedViewerBlockCount !== null,
+          viewerUpdatePreservedPanels:
+            updatedViewerChunkCount !== null &&
+            updatedViewerBlockCount !== null &&
+            updatedViewerOutlineCount !== null &&
+            updatedViewerSearchCount !== null,
           viewerUpdatedBlocks: updatedViewerBlocks.some((text) => text.includes("Code")) === true,
           viewerTableCount: updatedViewerTableCount === "1",
           viewerTableHeaders: updatedViewerHeaders.join(",") === "Code,Label,Amount",
@@ -674,6 +720,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
           singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null,
           viewerInitialPage: initialViewerLabel,
           viewerNavigatedPage: navigatedViewerLabel,
+          viewerReaderPage: readerViewerLabel,
           viewerUpdatedPage: updatedViewerLabel,
           viewerHeaders: updatedViewerHeaders.join(","),
         };
