@@ -522,6 +522,45 @@ const encodedTextPdfTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+const singleByteEncodedTextContentStreamText = [
+  "BT",
+  "/F1 12 Tf",
+  "<01020304050605070806090A> Tj",
+  "ET",
+].join("\n");
+const singleByteEncodedTextPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(singleByteEncodedTextContentStreamText).byteLength)} >>`,
+  "stream",
+  singleByteEncodedTextContentStreamText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+  "endobj",
+  "6 0 obj",
+  "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /E /n /c /o /d /e 7 /space /T 9 /x /t] >>",
+  "endobj",
+  "xref",
+  "0 7",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 7 >>",
+  "startxref",
+  "__SINGLE_BYTE_ENCODED_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
 const toUnicodeCMapFlateBytes = decodeBase64(
   "eJxdkM1qxCAQx+8+xRy3h0UT2qUHCZSUQA79oGkfwOgkFRoVYw55+0502UIPOr9h5j9fvO2fe2cT8Pfo9YAJJutMxNVvUSOMOFvHqhqM1enq5V8vKjBO4mFfEy69mzxICfyDgmuKO5yejB/xDvhbNBitm+H01Q7kD1sIP7igSyCgacDgRIVeVHhVCwLPsnNvKG7TfibNX8bnHhDq7FdlGO0NrkFpjMrNyKQQDciuaxg68y92KYpx0t8qMnn/SJlCkGHy8pCZDHFbuD24K0z1ZC0ykyGuCle5z7Xi0fE4ym0VvcVIW+TL5fGPwa3D23GDD4cqv18KDXoH",
 );
@@ -571,11 +610,17 @@ const nestedStartXrefOffset = nestedPageTreeTemplate.indexOf("xref\n0 8");
 assert(nestedStartXrefOffset >= 0, "Nested page-tree PDF did not contain an xref section.");
 const encodedTextStartXrefOffset = encodedTextPdfTemplate.indexOf("xref\n0 5");
 assert(encodedTextStartXrefOffset >= 0, "Encoded-text PDF did not contain an xref section.");
+const singleByteEncodedTextStartXrefOffset = singleByteEncodedTextPdfTemplate.indexOf("xref\n0 7");
+assert(singleByteEncodedTextStartXrefOffset >= 0, "Single-byte encoded-text PDF did not contain an xref section.");
 
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
 const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
 const nestedPageTreePdf = nestedPageTreeTemplate.replace("__NESTED_STARTXREF__", String(nestedStartXrefOffset));
 const encodedTextPdf = encodedTextPdfTemplate.replace("__ENCODED_TEXT_STARTXREF__", String(encodedTextStartXrefOffset));
+const singleByteEncodedTextPdf = singleByteEncodedTextPdfTemplate.replace(
+  "__SINGLE_BYTE_ENCODED_STARTXREF__",
+  String(singleByteEncodedTextStartXrefOffset),
+);
 const flateXrefOffset = encodeText(flatePdfPrefix).byteLength + flateStreamBytes.byteLength + encodeText(flatePdfMiddle).byteLength;
 const flatePdfSuffix = [
   "xref",
@@ -826,6 +871,13 @@ const encodedTextResult = await engine.run({
   source: {
     bytes: encodeText(encodedTextPdf),
     fileName: "encoded-text.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const singleByteEncodedTextResult = await engine.run({
+  source: {
+    bytes: encodeText(singleByteEncodedTextPdf),
+    fileName: "single-byte-encoded-text.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -1414,6 +1466,22 @@ assert(
 assert(
   encodedTextResult.observation.diagnostics.some((diagnostic) => diagnostic.code === "font-unicode-mapping-not-implemented"),
   "Encoded-text observation did not surface font-unicode-mapping-not-implemented.",
+);
+assert(
+  singleByteEncodedTextResult.observation.status === "completed",
+  `Single-byte encoded-text observation status was ${singleByteEncodedTextResult.observation.status}.`,
+);
+assert(
+  singleByteEncodedTextResult.observation.value?.extractedText === "Encoded Text",
+  `Unexpected single-byte encoded-text extraction: ${JSON.stringify(singleByteEncodedTextResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  singleByteEncodedTextResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
+  `Unexpected single-byte unicode mapping source: ${JSON.stringify(singleByteEncodedTextResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource ?? null)}.`,
+);
+assert(
+  !singleByteEncodedTextResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "Single-byte encoded-text observation still reported font-unicode-mapping-not-implemented.",
 );
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);

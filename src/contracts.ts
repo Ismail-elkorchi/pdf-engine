@@ -78,6 +78,7 @@ export type PdfTextEncodingKind = "literal" | "hex" | "cid";
 export type PdfUnicodeMappingSource =
   | "literal"
   | "actual-text"
+  | "font-encoding"
   | "tounicode-cmap"
   | "cid-collection-ucs2"
   | "embedded-font-cmap";
