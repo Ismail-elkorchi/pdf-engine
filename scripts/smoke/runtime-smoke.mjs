@@ -604,6 +604,22 @@ const numberedBodyPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const continuedNumberedBodyPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Introduction) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 686 Tm",
+    "(1. This is a numbered body paragraph that should stay in the body flow even when it wraps) Tj",
+    "1 0 0 1 108 672 Tm",
+    "(onto a second line without becoming a new paragraph.) Tj",
+    "1 0 0 1 72 644 Tm",
+    "(2. Another numbered body paragraph follows as a separate paragraph.) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const tableRowRolePdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1530,6 +1546,13 @@ const numberedBodyResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const continuedNumberedBodyResult = await engine.run({
+  source: {
+    bytes: encodeText(continuedNumberedBodyPdf),
+    fileName: "continued-numbered-body.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const tableRowRoleResult = await engine.run({
   source: {
     bytes: encodeText(tableRowRolePdf),
@@ -1784,6 +1807,22 @@ assert(
 assert(
   numberedBodyResult.layout.value?.pages[0]?.blocks[2]?.role === "body",
   `Numbered-body second paragraph role was ${numberedBodyResult.layout.value?.pages[0]?.blocks[2]?.role ?? "missing"}.`,
+);
+assert(
+  continuedNumberedBodyResult.observation.value?.extractedText ===
+    "Introduction\n\n1. This is a numbered body paragraph that should stay in the body flow even when it wraps onto a second line without becoming a new paragraph.\n\n2. Another numbered body paragraph follows as a separate paragraph.",
+  `Continued numbered-body observation text was ${JSON.stringify(continuedNumberedBodyResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  continuedNumberedBodyResult.layout.value?.pages[0]?.blocks[1]?.startsParagraph === true &&
+    continuedNumberedBodyResult.layout.value?.pages[0]?.blocks[2]?.startsParagraph === false &&
+    continuedNumberedBodyResult.layout.value?.pages[0]?.blocks[3]?.startsParagraph === true,
+  "Continued numbered-body paragraph boundaries were not preserved across the wrapped body lines.",
+);
+assert(
+  continuedNumberedBodyResult.layout.value?.extractedText ===
+    "Introduction\n\n1. This is a numbered body paragraph that should stay in the body flow even when it wraps onto a second line without becoming a new paragraph.\n\n2. Another numbered body paragraph follows as a separate paragraph.",
+  `Continued numbered-body layout text was ${JSON.stringify(continuedNumberedBodyResult.layout.value?.extractedText ?? null)}.`,
 );
 assert(
   compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role === "body",

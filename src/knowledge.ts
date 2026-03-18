@@ -1541,8 +1541,12 @@ function serializeChunkBlocks(blocks: readonly PdfLayoutBlock[]): string {
   let text = "";
 
   for (const [blockIndex, block] of blocks.entries()) {
+    const normalizedBlockText = block.text.replaceAll(/\s+/g, " ").trim();
+    if (normalizedBlockText.length === 0) {
+      continue;
+    }
     const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
-    text += `${separator}${block.text}`;
+    text += `${separator}${normalizedBlockText}`;
   }
 
   return text.trim();
