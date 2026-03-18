@@ -50,6 +50,7 @@ export interface ParsedTextOperatorRun {
   readonly operands: ReadonlyArray<
     | { readonly kind: "literal"; readonly token: string }
     | { readonly kind: "hex"; readonly token: string }
+    | { readonly kind: "adjustment"; readonly value: number }
   >;
 }
 
@@ -1396,6 +1397,7 @@ function readTrailingNumericOperands(
       readonly items: ReadonlyArray<
         | { readonly kind: "literal"; readonly token: string }
         | { readonly kind: "hex"; readonly token: string }
+        | { readonly kind: "adjustment"; readonly value: number }
       >;
     }
     | { readonly kind: "other"; readonly token: string }
@@ -1457,6 +1459,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
       items: ReadonlyArray<
         | { readonly kind: "literal"; readonly token: string }
         | { readonly kind: "hex"; readonly token: string }
+        | { readonly kind: "adjustment"; readonly value: number }
       >;
     }
     | { kind: "other"; token: string }
@@ -1721,7 +1724,15 @@ export function analyzeTextOperators(text: string): {
   const parsedRuns = parseTextOperatorRuns(text);
   const runs = parsedRuns
     .map((parsedRun) =>
-      parsedRun.operands.map((operand) => (operand.kind === "literal" ? decodePdfLiteral(operand.token) : "")).join("").trim()
+      parsedRun.operands
+        .map((operand) => {
+          if (operand.kind === "literal") {
+            return decodePdfLiteral(operand.token);
+          }
+          return "";
+        })
+        .join("")
+        .trim()
     )
     .filter((value) => value.length > 0);
 
@@ -1742,6 +1753,7 @@ function readPdfTextArrayToken(
   readonly items: ReadonlyArray<
     | { readonly kind: "literal"; readonly token: string }
     | { readonly kind: "hex"; readonly token: string }
+    | { readonly kind: "adjustment"; readonly value: number }
   >;
   readonly nextIndex: number;
 } | undefined {
@@ -1752,6 +1764,7 @@ function readPdfTextArrayToken(
   const items: Array<
     | { readonly kind: "literal"; readonly token: string }
     | { readonly kind: "hex"; readonly token: string }
+    | { readonly kind: "adjustment"; readonly value: number }
   > = [];
   let depth = 1;
 
@@ -1783,6 +1796,20 @@ function readPdfTextArrayToken(
       items.push({ kind: "hex", token: hex.token });
       index = hex.nextIndex - 1;
       continue;
+    }
+
+    if (/[+\-.\d]/.test(current)) {
+      const tokenEnd = readUntilDelimiter(text, index);
+      if (tokenEnd <= index) {
+        return undefined;
+      }
+
+      const numericValue = readNumericTokenValue(text.slice(index, tokenEnd));
+      if (numericValue !== undefined) {
+        items.push({ kind: "adjustment", value: numericValue });
+        index = tokenEnd - 1;
+        continue;
+      }
     }
 
     if (current === "[") {

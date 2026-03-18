@@ -356,6 +356,23 @@ const paragraphPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const scientificTextFlowPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 12 Tf",
+    "72 720 Td",
+    "[(Dense)-225(retrieval,)-250(which)-220(describes)-180(the)] TJ",
+    "0 -14 Td",
+    "[(use)-250(of)-220(contextualised)-180(language)] TJ",
+    "0 -14 Td",
+    "[(models)-250(such)-180(as)-220(BERT,)-180(is)-220(rep-)] TJ",
+    "0 -14 Td",
+    "[(resented)-220(here.)] TJ",
+    "0 -28 Td",
+    "[(Second)-220(paragraph)-220(starts)-220(here.)] TJ",
+    "ET",
+  ].join("\n"),
+]);
 const repeatedBoundaryPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -819,6 +836,13 @@ const paragraphResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const scientificTextFlowResult = await engine.run({
+  source: {
+    bytes: encodeText(scientificTextFlowPdf),
+    fileName: "scientific-text-flow.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const repeatedBoundaryResult = await engine.toLayout({
   source: {
     bytes: encodeText(repeatedBoundaryPdf),
@@ -946,6 +970,21 @@ assert(
 assert(
   paragraphResult.knowledge.value?.chunks[0]?.text === "First paragraph line one line two\n\nSecond paragraph starts here line four",
   `Paragraph-aware knowledge text was ${JSON.stringify(paragraphResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
+);
+assert(
+  scientificTextFlowResult.observation.value?.extractedText ===
+    "Dense retrieval, which describes the use of contextualised language models such as BERT, is represented here.\n\nSecond paragraph starts here.",
+  `Scientific text-flow observation text was ${JSON.stringify(scientificTextFlowResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  scientificTextFlowResult.layout.value?.extractedText ===
+    "Dense retrieval, which describes the use of contextualised language models such as BERT, is represented here.\n\nSecond paragraph starts here.",
+  `Scientific text-flow layout text was ${JSON.stringify(scientificTextFlowResult.layout.value?.extractedText ?? null)}.`,
+);
+assert(
+  scientificTextFlowResult.knowledge.value?.chunks[0]?.text ===
+    "Dense retrieval, which describes the use of contextualised language models such as BERT, is represented here.\n\nSecond paragraph starts here.",
+  `Scientific text-flow knowledge text was ${JSON.stringify(scientificTextFlowResult.knowledge.value?.chunks[0]?.text ?? null)}.`,
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(

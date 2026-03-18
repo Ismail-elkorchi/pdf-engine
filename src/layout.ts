@@ -245,8 +245,15 @@ function shouldMergeAdjacentBlocks(
   currentBlock: GroupedBlockSeed,
   writingMode: PdfWritingMode | undefined,
 ): boolean {
+  const previousText = normalizeBlockText(previousBlock.text);
+  const currentText = normalizeBlockText(currentBlock.text);
+
   if (/^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentBlock.text)) {
     return false;
+  }
+
+  if (writingMode !== "vertical" && endsWithHyphenatedContinuation(previousText) && startsWithContinuation(currentText)) {
+    return true;
   }
 
   const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
@@ -283,7 +290,11 @@ function shouldMergeAdjacentBlocks(
     return false;
   }
 
-  return previousBlock.text.length < 60 || !/[.!?:]$/.test(previousBlock.text);
+  if (/[.!?]["')\]]*$/u.test(previousText) && startsLikeSentence(currentText)) {
+    return verticalGap <= Math.max(12, previousFontSize * 1.1);
+  }
+
+  return previousText.length < 60 || !/[.!?:]$/.test(previousText);
 }
 
 function shouldStartParagraph(
@@ -374,6 +385,10 @@ function joinBlockText(
   currentText: string,
   writingMode: PdfWritingMode | undefined,
 ): string {
+  if (writingMode !== "vertical" && endsWithHyphenatedContinuation(previousText) && startsWithContinuation(currentText)) {
+    return `${previousText.replace(/[-\u2010-\u2015]$/u, "")}${currentText.trimStart()}`;
+  }
+
   const separator = writingMode === "vertical" ? "\n" : " ";
   return `${previousText}${separator}${currentText}`.replaceAll(/[ \t]+/g, " ").trim();
 }
