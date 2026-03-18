@@ -13,7 +13,7 @@ const recommendedTypeChecked = tseslint.configs.recommendedTypeChecked.map((conf
 
 const publicBoundaryRestrictions = [
   {
-    group: ["**/tse-workbench/**", "**/projects/pdf-engine/**", "**/private/control/**", "**/clusters/**", "**/research/**"],
+    group: ["**/private/**", "**/clusters/**", "**/research/**"],
     message: "Public pdf-engine files must not import workbench-private surfaces or evidence artifacts.",
   },
 ];

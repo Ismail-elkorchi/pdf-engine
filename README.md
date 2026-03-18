@@ -28,7 +28,11 @@ npm run smoke:all
 The published surface is still early, but it is no longer contracts-only. This repository currently ships:
 
 - staged public contracts for admission, IR, observation, a first heuristic layout stage, and a first provenance-backed knowledge stage
-- an object-aware shell engine that recovers indirect objects, xref/trailer structure, repair state, page-resolution provenance, inherited page-resource state, content-stream provenance for observed text, run-level anchor and font-size hints, operator-ready stream bodies for unfiltered and `FlateDecode` streams, decoded text-operator observation, a line-oriented layout stage with explicit heuristic limitation markers, and extractive knowledge chunks with source citations while still refusing to invent unsupported tables, alongside runtime support claims and a no-op disposal contract for future worker or WASM backends
+- an object-aware shell engine that recovers indirect objects, xref/trailer structure, repair state, and page-resolution provenance
+- inherited page-resource state, content-stream provenance for observed text, run-level anchor and font-size hints, and operator-ready stream bodies for unfiltered and `FlateDecode` streams
+- decoded text-operator observation, a line-oriented layout stage with explicit heuristic limitation markers, and extractive knowledge chunks with source citations
+- a first heuristic table projection that stays citation-backed and emits no table when layout evidence is too weak
+- runtime support claims and a no-op disposal contract for future worker or WASM backends
 - runtime smoke coverage for Node.js, Deno, Bun, and a real Chromium browser session, plus a browser bundle compatibility proof
 - JSR/npm publication scaffolding and public GitHub automation
 
