@@ -803,6 +803,7 @@ function observeParsedTextRun(
   const hasHiddenTextFeature = inspection.featureSignals.some(
     (signal) => signal.kind === "hidden-text" && signal.detected,
   );
+  const fontEncodingSpacingProfile = resolveFontEncodingSpacingProfile(parsedRun);
 
   for (const operand of parsedRun.operands) {
     if (operand.kind === "adjustment") {
@@ -837,7 +838,13 @@ function observeParsedTextRun(
         }
 
         if (sanitizedLiteralText.length > 0 && !looksUnreadableLiteralText(sanitizedLiteralText)) {
-          text = appendObservedOperandText(text, sanitizedLiteralText, pendingTextAdjustment, parsedRun.fontSize);
+          text = appendObservedOperandText(
+            text,
+            sanitizedLiteralText,
+            pendingTextAdjustment,
+            parsedRun.fontSize,
+            decodedLiteralText ? fontEncodingSpacingProfile : "default",
+          );
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
           unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
@@ -853,7 +860,13 @@ function observeParsedTextRun(
         }
       }
 
-      text = appendObservedOperandText(text, preferredLiteralText, pendingTextAdjustment, parsedRun.fontSize);
+      text = appendObservedOperandText(
+        text,
+        preferredLiteralText,
+        pendingTextAdjustment,
+        parsedRun.fontSize,
+        decodedLiteralText ? fontEncodingSpacingProfile : "default",
+      );
       pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
       unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
@@ -878,7 +891,13 @@ function observeParsedTextRun(
     if (!decodedText.complete) {
       hasFontMappingGap = true;
     }
-    text = appendObservedOperandText(text, decodedText.text, pendingTextAdjustment, parsedRun.fontSize);
+    text = appendObservedOperandText(
+      text,
+      decodedText.text,
+      pendingTextAdjustment,
+      parsedRun.fontSize,
+      decodedText.mappingSource === "font-encoding" ? fontEncodingSpacingProfile : "default",
+    );
     pendingTextAdjustment = undefined;
     unicodeMappingSource = unicodeMappingSource ?? decodedText.mappingSource;
   }
@@ -903,12 +922,13 @@ function appendObservedOperandText(
   operandText: string,
   adjustment: number | undefined,
   fontSize: number | undefined,
+  spacingProfile: "default" | "font-encoding-compact" | "font-encoding-wide" = "default",
 ): string {
   if (operandText.length === 0) {
     return currentText;
   }
 
-  if (!shouldInsertSyntheticSpace(currentText, operandText, adjustment, fontSize)) {
+  if (!shouldInsertSyntheticSpace(currentText, operandText, adjustment, fontSize, spacingProfile)) {
     return `${currentText}${operandText}`;
   }
 
@@ -920,6 +940,7 @@ function shouldInsertSyntheticSpace(
   operandText: string,
   adjustment: number | undefined,
   fontSize: number | undefined,
+  spacingProfile: "default" | "font-encoding-compact" | "font-encoding-wide",
 ): boolean {
   if (currentText.length === 0 || operandText.length === 0 || adjustment === undefined) {
     return false;
@@ -944,12 +965,28 @@ function shouldInsertSyntheticSpace(
     return false;
   }
 
-  const spaceThreshold = -Math.max(120, (fontSize ?? 10) * 12);
+  const spaceThreshold = spacingProfile === "font-encoding-compact"
+    ? -Math.max(18, (fontSize ?? 10) * 1.8)
+    : spacingProfile === "font-encoding-wide"
+    ? -Math.max(100, (fontSize ?? 10) * 8)
+    : -Math.max(120, (fontSize ?? 10) * 12);
   if (adjustment > spaceThreshold) {
     return false;
   }
 
   return /\S$/u.test(currentTail) && /^\S/u.test(operandHead);
+}
+
+function resolveFontEncodingSpacingProfile(
+  parsedRun: ReturnType<typeof parseTextOperatorRuns>[number],
+): "font-encoding-compact" | "font-encoding-wide" {
+  let minimumAdjustment = Number.POSITIVE_INFINITY;
+  for (const operand of parsedRun.operands) {
+    if (operand.kind === "adjustment") {
+      minimumAdjustment = Math.min(minimumAdjustment, operand.value);
+    }
+  }
+  return minimumAdjustment <= -100 ? "font-encoding-wide" : "font-encoding-compact";
 }
 
 function resolvePreferredActualText(actualText: string | undefined, observedText: string): string | undefined {
@@ -1508,7 +1545,7 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
     inspection.analysis.crossReferenceKind === "xref-stream" ||
     inspection.analysis.crossReferenceKind === "hybrid"
   ) {
-    if (!inspection.analysis.decodedXrefStreamEntries) {
+    if (!inspection.analysis.decodedXrefStreamEntries && !hasRecoveredStablePageStructure(inspection)) {
       knownLimits.push("xref-stream-entries-not-decoded");
     }
   }
@@ -1565,16 +1602,53 @@ function hasDecodedStreams(inspection: PdfShellInspection): boolean {
 
 function hasUndecodedStreams(inspection: PdfShellInspection): boolean {
   return inspection.analysis.indirectObjects.some(
-    (objectShell) => objectShell.hasStream && objectShell.streamDecodeState !== "available" && objectShell.streamDecodeState !== "decoded",
+    (objectShell) =>
+      objectShell.hasStream &&
+      isParserRelevantStream(objectShell) &&
+      objectShell.streamDecodeState !== "available" &&
+      objectShell.streamDecodeState !== "decoded",
   );
 }
 
 function hasUnsupportedStreamFilters(inspection: PdfShellInspection): boolean {
-  return inspection.analysis.indirectObjects.some((objectShell) => objectShell.streamDecodeState === "unsupported-filter");
+  return inspection.analysis.indirectObjects.some(
+    (objectShell) => isParserRelevantStream(objectShell) && objectShell.streamDecodeState === "unsupported-filter",
+  );
 }
 
 function hasFailedStreamDecodes(inspection: PdfShellInspection): boolean {
-  return inspection.analysis.indirectObjects.some((objectShell) => objectShell.streamDecodeState === "failed");
+  return inspection.analysis.indirectObjects.some(
+    (objectShell) => isParserRelevantStream(objectShell) && objectShell.streamDecodeState === "failed",
+  );
+}
+
+function hasRecoveredStablePageStructure(inspection: PdfShellInspection): boolean {
+  return inspection.analysis.pageTreeResolved && (
+    inspection.analysis.pageEntries.length === 0 ||
+    inspection.analysis.inheritedPageStateResolved
+  );
+}
+
+function isParserRelevantStream(
+  objectShell: PdfShellInspection["analysis"]["indirectObjects"][number],
+): boolean {
+  if (!objectShell.hasStream) {
+    return false;
+  }
+
+  if (objectShell.streamRole !== "unknown") {
+    return true;
+  }
+
+  if (objectShell.dictionaryEntries.get("Subtype")?.trim() === "/Image") {
+    return false;
+  }
+
+  if (objectShell.dictionaryEntries.get("Filter")?.trim() === "/DCTDecode") {
+    return false;
+  }
+
+  return objectShell.typeName?.trim() !== "/XObject";
 }
 
 function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
@@ -1666,7 +1740,7 @@ function createIrDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
   }
 
   for (const objectShell of inspection.analysis.indirectObjects) {
-    if (objectShell.streamDecodeState === "unsupported-filter") {
+    if (isParserRelevantStream(objectShell) && objectShell.streamDecodeState === "unsupported-filter") {
       diagnostics.push({
         code: "stream-filter-unsupported",
         stage: "ir",
@@ -1676,7 +1750,7 @@ function createIrDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
       });
     }
 
-    if (objectShell.streamDecodeState === "failed") {
+    if (isParserRelevantStream(objectShell) && objectShell.streamDecodeState === "failed") {
       diagnostics.push({
         code: "stream-decoding-failed",
         stage: "ir",
