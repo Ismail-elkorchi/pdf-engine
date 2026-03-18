@@ -876,6 +876,22 @@ function classifyLayoutBlock(
     };
   }
 
+  if (looksLikeFieldValueBody(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "body",
+      roleConfidence: 0.58,
+    };
+  }
+
+  if (looksLikeFieldLabelBody(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "body",
+      roleConfidence: 0.6,
+    };
+  }
+
   if (looksLikeCoverTitleHeading(block, blockIndex, blocks)) {
     return {
       ...block,
@@ -897,14 +913,6 @@ function classifyLayoutBlock(
       ...block,
       role: "body",
       roleConfidence: 0.62,
-    };
-  }
-
-  if (looksLikeFieldLabelBody(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.6,
     };
   }
 
@@ -986,14 +994,25 @@ function looksLikeFieldLabelBody(
     return false;
   }
 
-  if (looksLikeDateLine(normalized)) {
+  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized)) {
     return false;
   }
 
   const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
   const colonCount = countLabelMarkers(normalized);
   const containsLowercase = /[\p{Ll}]/u.test(normalized);
-  if (!containsLowercase) {
+  const hasFieldContext = blocks
+    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
+    .some((candidate, candidateIndex) => {
+      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
+      if (originalIndex === blockIndex) {
+        return false;
+      }
+      const candidateText = normalizeBlockText(candidate.text);
+      return looksLikeShortFieldLabel(candidateText, candidate.fontSize);
+    });
+
+  if (!containsLowercase && !hasFieldContext) {
     return false;
   }
 
@@ -1017,7 +1036,7 @@ function looksLikeFieldLabelBody(
     return words.length <= 8 && (block.fontSize ?? 12) <= 12;
   }
 
-  if ((block.fontSize ?? 12) > 12 || words.length < 3 || words.length > 8) {
+  if ((block.fontSize ?? 12) > 12 || words.length < 2 || words.length > 8) {
     return false;
   }
 
@@ -1025,7 +1044,114 @@ function looksLikeFieldLabelBody(
     return false;
   }
 
-  return words.every((word) => isTitleCaseWord(word) || isConnectorWord(word));
+  return hasFieldContext && words.every((word) => isTitleCaseWord(word) || isConnectorWord(word));
+}
+
+function looksLikeFieldValueBody(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 160 || /^[*•-]\s*/u.test(normalized)) {
+    return false;
+  }
+
+  if (
+    looksLikeSectionHeading(normalized) ||
+    looksLikeStandaloneQuestionHeading(normalized) ||
+    looksLikeDateLine(normalized) ||
+    looksLikePaginationLine(normalized)
+  ) {
+    return false;
+  }
+
+  if (looksLikeProductionMetadata(normalized)) {
+    return false;
+  }
+
+  if (countLabelMarkers(normalized) > 0) {
+    return false;
+  }
+
+  const labelNeighbor = findNearbyFieldLabelNeighbor(block, blockIndex, blocks);
+  if (!labelNeighbor) {
+    return false;
+  }
+
+  const fontSize = block.fontSize ?? labelNeighbor.fontSize ?? 12;
+  if (fontSize > 14) {
+    return false;
+  }
+
+  if (block.anchor && labelNeighbor.anchor) {
+    const verticalGap = Math.abs(block.anchor.y - labelNeighbor.anchor.y);
+    if (verticalGap > Math.max(36, fontSize * 3.2)) {
+      return false;
+    }
+  }
+
+  if (!/[\p{L}\p{N}]/u.test(normalized)) {
+    return false;
+  }
+
+  return !looksLikeHeading(normalized, block.fontSize) || /[:]/u.test(normalizeBlockText(labelNeighbor.text)) || /[\p{Ll}\p{Nd}-]/u.test(normalized);
+}
+
+function findNearbyFieldLabelNeighbor(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): PdfLayoutBlock | undefined {
+  const fontSize = block.fontSize ?? 12;
+  const labelCandidates = blocks.filter((candidate, candidateIndex) => {
+    if (candidateIndex === blockIndex) {
+      return false;
+    }
+
+    const candidateText = normalizeBlockText(candidate.text);
+    if (!(looksLikeShortFieldLabel(candidateText, candidate.fontSize) || looksLikeFieldLikeClusterText(candidateText, candidate.fontSize))) {
+      return false;
+    }
+
+    if (!block.anchor || !candidate.anchor) {
+      return Math.abs(candidateIndex - blockIndex) <= 2;
+    }
+
+    const verticalGap = Math.abs(block.anchor.y - candidate.anchor.y);
+    if (verticalGap > Math.max(36, fontSize * 3.2)) {
+      return false;
+    }
+
+    if (candidate.anchor.x > block.anchor.x + Math.max(28, fontSize * 2.4)) {
+      return false;
+    }
+
+    return true;
+  });
+  if (labelCandidates.length === 0) {
+    return undefined;
+  }
+
+  return [...labelCandidates].sort((left, right) => compareFieldLabelCandidates(block, left, right))[0];
+}
+
+function compareFieldLabelCandidates(
+  block: PdfLayoutBlock,
+  left: PdfLayoutBlock,
+  right: PdfLayoutBlock,
+): number {
+  if (!block.anchor || !left.anchor || !right.anchor) {
+    return 0;
+  }
+
+  const leftVerticalGap = Math.abs(block.anchor.y - left.anchor.y);
+  const rightVerticalGap = Math.abs(block.anchor.y - right.anchor.y);
+  if (leftVerticalGap !== rightVerticalGap) {
+    return leftVerticalGap - rightVerticalGap;
+  }
+
+  return Math.abs(block.anchor.x - left.anchor.x) - Math.abs(block.anchor.x - right.anchor.x);
 }
 
 function looksLikeLeadingMetadataLabel(
@@ -1300,6 +1426,28 @@ function hasHeadingNeighbor(blockIndex: number, blocks: readonly PdfLayoutBlock[
 
 function looksLikeDateLine(text: string): boolean {
   return /^(?:\p{L}{3,12}\s+\d{1,2},\s+\d{4}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})$/u.test(text);
+}
+
+function looksLikePaginationLine(text: string): boolean {
+  return /\bpage\s+\d+\s+of\s+\d+\b/iu.test(text);
+}
+
+function looksLikeShortFieldLabel(text: string, fontSize: number | undefined): boolean {
+  const normalized = normalizeBlockText(text);
+  if (countLabelMarkers(normalized) === 0) {
+    return false;
+  }
+
+  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized) || /[.!?]$/.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 4) {
+    return false;
+  }
+
+  return (fontSize ?? 12) <= 12;
 }
 
 function looksLikeTitleCaseHeading(text: string): boolean {
