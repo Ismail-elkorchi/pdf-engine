@@ -848,7 +848,8 @@ function observeParsedTextRun(
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
           unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
-          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || decodedLiteralText?.complete === false;
+          hasLiteralFontEncodingGap = hasLiteralFontEncodingGap ||
+            (decodedLiteralText?.complete === false && shouldReportTextMappingGap(parsedRun));
           continue;
         }
 
@@ -870,7 +871,8 @@ function observeParsedTextRun(
       pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
       unicodeMappingSource = unicodeMappingSource ?? (decodedLiteralText ? "font-encoding" : "literal");
-      hasLiteralFontEncodingGap = hasLiteralFontEncodingGap || decodedLiteralText?.complete === false;
+      hasLiteralFontEncodingGap = hasLiteralFontEncodingGap ||
+        (decodedLiteralText?.complete === false && shouldReportTextMappingGap(parsedRun));
       continue;
     }
 
@@ -884,11 +886,11 @@ function observeParsedTextRun(
       singleByteFontEncoding,
     );
     if (!decodedText) {
-      hasFontMappingGap = true;
+      hasFontMappingGap = hasFontMappingGap || shouldReportTextMappingGap(parsedRun);
       continue;
     }
 
-    if (!decodedText.complete) {
+    if (!decodedText.complete && shouldReportTextMappingGap(parsedRun)) {
       hasFontMappingGap = true;
     }
     text = appendObservedOperandText(
@@ -1049,6 +1051,12 @@ function normalizeObservedRunText(text: string): string {
     .replaceAll(/[\u0000-\u001f\u007f-\u009f]+/gu, " ")
     .replaceAll(/[ ]{2,}/g, " ")
     .trim();
+}
+
+function shouldReportTextMappingGap(
+  parsedRun: ReturnType<typeof parseTextOperatorRuns>[number],
+): boolean {
+  return parsedRun.markedContentKind !== "artifact";
 }
 
 function decodeHexTextOperand(
