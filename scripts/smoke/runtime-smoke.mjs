@@ -953,6 +953,70 @@ const encodedTextPdfTemplate = [
   "%%EOF",
   "",
 ].join("\n");
+const noFontCidLikeHexContentStreamText = [
+  "BT",
+  "<0013009400910085> Tj",
+  "ET",
+].join("\n");
+const noFontCidLikeHexPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(noFontCidLikeHexContentStreamText).byteLength)} >>`,
+  "stream",
+  noFontCidLikeHexContentStreamText,
+  "endstream",
+  "endobj",
+  "xref",
+  "0 5",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 5 >>",
+  "startxref",
+  "__NO_FONT_CID_LIKE_HEX_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
+const noFontControlHexContentStreamText = [
+  "BT",
+  "<1C181A1C05> Tj",
+  "ET",
+].join("\n");
+const noFontControlHexPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(noFontControlHexContentStreamText).byteLength)} >>`,
+  "stream",
+  noFontControlHexContentStreamText,
+  "endstream",
+  "endobj",
+  "xref",
+  "0 5",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 5 >>",
+  "startxref",
+  "__NO_FONT_CONTROL_HEX_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
 const singleByteEncodedTextContentStreamText = [
   "BT",
   "/F1 12 Tf",
@@ -1067,6 +1131,45 @@ const extendedNamedGlyphPdfTemplate = [
   "<< /Root 1 0 R /Size 7 >>",
   "startxref",
   "__EXTENDED_NAMED_GLYPH_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
+const commonSymbolGlyphContentStreamText = [
+  "BT",
+  "/F1 12 Tf",
+  "<0102030405060708090A0B> Tj",
+  "ET",
+].join("\n");
+const commonSymbolGlyphPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 5 0 R >> >> /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(commonSymbolGlyphContentStreamText).byteLength)} >>`,
+  "stream",
+  commonSymbolGlyphContentStreamText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding 6 0 R >>",
+  "endobj",
+  "6 0 obj",
+  "<< /Type /Encoding /BaseEncoding /WinAnsiEncoding /Differences [1 /pi 2 /nonbreakingspace 3 /Omega 4 /space 5 /greaterequal 6 /space 7 /integral 8 /space 9 /approxequal 10 /space 11 /arrowright] >>",
+  "endobj",
+  "xref",
+  "0 7",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 7 >>",
+  "startxref",
+  "__COMMON_SYMBOL_GLYPH_STARTXREF__",
   "%%EOF",
   "",
 ].join("\n");
@@ -1197,12 +1300,18 @@ const nestedStartXrefOffset = nestedPageTreeTemplate.indexOf("xref\n0 8");
 assert(nestedStartXrefOffset >= 0, "Nested page-tree PDF did not contain an xref section.");
 const encodedTextStartXrefOffset = encodedTextPdfTemplate.indexOf("xref\n0 5");
 assert(encodedTextStartXrefOffset >= 0, "Encoded-text PDF did not contain an xref section.");
+const noFontCidLikeHexStartXrefOffset = noFontCidLikeHexPdfTemplate.indexOf("xref\n0 5");
+assert(noFontCidLikeHexStartXrefOffset >= 0, "No-font CID-like hex PDF did not contain an xref section.");
+const noFontControlHexStartXrefOffset = noFontControlHexPdfTemplate.indexOf("xref\n0 5");
+assert(noFontControlHexStartXrefOffset >= 0, "No-font control hex PDF did not contain an xref section.");
 const singleByteEncodedTextStartXrefOffset = singleByteEncodedTextPdfTemplate.indexOf("xref\n0 7");
 assert(singleByteEncodedTextStartXrefOffset >= 0, "Single-byte encoded-text PDF did not contain an xref section.");
 const ligatureEncodedTextStartXrefOffset = ligatureEncodedTextPdfTemplate.indexOf("xref\n0 7");
 assert(ligatureEncodedTextStartXrefOffset >= 0, "Ligature encoded-text PDF did not contain an xref section.");
 const extendedNamedGlyphStartXrefOffset = extendedNamedGlyphPdfTemplate.indexOf("xref\n0 7");
 assert(extendedNamedGlyphStartXrefOffset >= 0, "Extended named-glyph PDF did not contain an xref section.");
+const commonSymbolGlyphStartXrefOffset = commonSymbolGlyphPdfTemplate.indexOf("xref\n0 7");
+assert(commonSymbolGlyphStartXrefOffset >= 0, "Common symbol glyph PDF did not contain an xref section.");
 const partialSingleByteEncodedTextStartXrefOffset = partialSingleByteEncodedTextPdfTemplate.indexOf("xref\n0 7");
 assert(partialSingleByteEncodedTextStartXrefOffset >= 0, "Partial single-byte encoded-text PDF did not contain an xref section.");
 const compactSpacingEncodedTextStartXrefOffset = compactSpacingEncodedTextPdfTemplate.indexOf("xref\n0 7");
@@ -1212,6 +1321,14 @@ const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startX
 const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
 const nestedPageTreePdf = nestedPageTreeTemplate.replace("__NESTED_STARTXREF__", String(nestedStartXrefOffset));
 const encodedTextPdf = encodedTextPdfTemplate.replace("__ENCODED_TEXT_STARTXREF__", String(encodedTextStartXrefOffset));
+const noFontCidLikeHexPdf = noFontCidLikeHexPdfTemplate.replace(
+  "__NO_FONT_CID_LIKE_HEX_STARTXREF__",
+  String(noFontCidLikeHexStartXrefOffset),
+);
+const noFontControlHexPdf = noFontControlHexPdfTemplate.replace(
+  "__NO_FONT_CONTROL_HEX_STARTXREF__",
+  String(noFontControlHexStartXrefOffset),
+);
 const singleByteEncodedTextPdf = singleByteEncodedTextPdfTemplate.replace(
   "__SINGLE_BYTE_ENCODED_STARTXREF__",
   String(singleByteEncodedTextStartXrefOffset),
@@ -1223,6 +1340,10 @@ const ligatureEncodedTextPdf = ligatureEncodedTextPdfTemplate.replace(
 const extendedNamedGlyphPdf = extendedNamedGlyphPdfTemplate.replace(
   "__EXTENDED_NAMED_GLYPH_STARTXREF__",
   String(extendedNamedGlyphStartXrefOffset),
+);
+const commonSymbolGlyphPdf = commonSymbolGlyphPdfTemplate.replace(
+  "__COMMON_SYMBOL_GLYPH_STARTXREF__",
+  String(commonSymbolGlyphStartXrefOffset),
 );
 const partialSingleByteEncodedTextPdf = partialSingleByteEncodedTextPdfTemplate.replace(
   "__PARTIAL_SINGLE_BYTE_ENCODED_STARTXREF__",
@@ -1338,6 +1459,52 @@ const toUnicodeMalformedPdfBytes = buildPdfWithFontResourceStream({
   ],
   resourceStreamObject: toUnicodeMalformedStreamObject,
 });
+const ignoredFunctionStreamBody = "not-deflate";
+const ignoredFunctionStreamText = "BT\n(Parser Safe) Tj\nET";
+const ignoredFunctionStreamPdfTemplate = [
+  "%PDF-1.4",
+  "1 0 obj",
+  "<< /Type /Catalog /Pages 2 0 R >>",
+  "endobj",
+  "2 0 obj",
+  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+  "endobj",
+  "3 0 obj",
+  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+  "endobj",
+  "4 0 obj",
+  `<< /Length ${String(encodeText(ignoredFunctionStreamText).byteLength)} >>`,
+  "stream",
+  ignoredFunctionStreamText,
+  "endstream",
+  "endobj",
+  "5 0 obj",
+  `<< /FunctionType 0 /Domain [0 1] /Range [0 1] /Size [2] /BitsPerSample 8 /Filter /FlateDecode /Length ${String(encodeText(ignoredFunctionStreamBody).byteLength)} >>`,
+  "stream",
+  ignoredFunctionStreamBody,
+  "endstream",
+  "endobj",
+  "xref",
+  "0 6",
+  "0000000000 65535 f",
+  "trailer",
+  "<< /Root 1 0 R /Size 6 >>",
+  "startxref",
+  "__IGNORED_FUNCTION_STREAM_STARTXREF__",
+  "%%EOF",
+  "",
+].join("\n");
+const ignoredFunctionStreamStartXrefOffset = ignoredFunctionStreamPdfTemplate.indexOf("xref\n0 6");
+assert(
+  ignoredFunctionStreamStartXrefOffset >= 0,
+  "Ignored function-stream PDF did not contain an xref section.",
+);
+const ignoredFunctionStreamPdfBytes = encodeText(
+  ignoredFunctionStreamPdfTemplate.replace(
+    "__IGNORED_FUNCTION_STREAM_STARTXREF__",
+    String(ignoredFunctionStreamStartXrefOffset),
+  ),
+);
 const cidToUnicodePdfBytes = buildPdfWithFontResourceStream({
   contentStreamText: "BT\n/F1 12 Tf\n<0045003D000400520034001300B1> Tj\nET",
   fontDictionaryLines: [
@@ -1492,6 +1659,20 @@ const encodedTextResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const noFontCidLikeHexResult = await engine.run({
+  source: {
+    bytes: encodeText(noFontCidLikeHexPdf),
+    fileName: "no-font-cid-like-hex.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const noFontControlHexResult = await engine.run({
+  source: {
+    bytes: encodeText(noFontControlHexPdf),
+    fileName: "no-font-control-hex.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const singleByteEncodedTextResult = await engine.run({
   source: {
     bytes: encodeText(singleByteEncodedTextPdf),
@@ -1510,6 +1691,13 @@ const extendedNamedGlyphResult = await engine.run({
   source: {
     bytes: encodeText(extendedNamedGlyphPdf),
     fileName: "extended-named-glyphs.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const commonSymbolGlyphResult = await engine.run({
+  source: {
+    bytes: encodeText(commonSymbolGlyphPdf),
+    fileName: "common-symbol-glyphs.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -1545,6 +1733,13 @@ const toUnicodeMalformedResult = await engine.run({
   source: {
     bytes: toUnicodeMalformedPdfBytes,
     fileName: "tounicode-malformed.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const ignoredFunctionStreamResult = await engine.run({
+  source: {
+    bytes: ignoredFunctionStreamPdfBytes,
+    fileName: "ignored-function-stream.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2424,6 +2619,36 @@ assert(
   "Malformed ToUnicode stream did not surface stream-decoding-failed.",
 );
 assert(
+  ignoredFunctionStreamResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 5)
+    ?.streamDecodeState === "failed",
+  `Ignored function stream decode state was ${ignoredFunctionStreamResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 5)?.streamDecodeState ?? "missing"}.`,
+);
+assert(
+  ignoredFunctionStreamResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 5)
+    ?.streamRole === "unknown",
+  `Ignored function stream role was ${ignoredFunctionStreamResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 5)?.streamRole ?? "missing"}.`,
+);
+assert(
+  !ignoredFunctionStreamResult.ir.value?.knownLimits.includes("streams-not-decoded"),
+  "Ignored function stream still reported streams-not-decoded.",
+);
+assert(
+  !ignoredFunctionStreamResult.ir.value?.knownLimits.includes("stream-decoding-failed"),
+  "Ignored function stream still reported stream-decoding-failed.",
+);
+assert(
+  ignoredFunctionStreamResult.observation.value?.extractedText === "Parser Safe",
+  `Unexpected ignored function-stream extraction: ${JSON.stringify(ignoredFunctionStreamResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  !ignoredFunctionStreamResult.observation.value?.knownLimits.includes("streams-not-decoded"),
+  "Ignored function stream observation still reported streams-not-decoded.",
+);
+assert(
+  !ignoredFunctionStreamResult.observation.value?.knownLimits.includes("stream-decoding-failed"),
+  "Ignored function stream observation still reported stream-decoding-failed.",
+);
+assert(
   cidToUnicodeResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
   "CID ToUnicode stream role was not classified as tounicode.",
 );
@@ -2542,6 +2767,22 @@ assert(
   "Encoded-text observation did not surface font-unicode-mapping-not-implemented.",
 );
 assert(
+  !noFontCidLikeHexResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "No-font CID-like hex observation still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  !noFontCidLikeHexResult.observation.diagnostics.some((diagnostic) => diagnostic.code === "font-unicode-mapping-not-implemented"),
+  "No-font CID-like hex observation still surfaced font-unicode-mapping-not-implemented.",
+);
+assert(
+  !noFontControlHexResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "No-font control hex observation still reported font-unicode-mapping-not-implemented.",
+);
+assert(
+  !noFontControlHexResult.observation.diagnostics.some((diagnostic) => diagnostic.code === "font-unicode-mapping-not-implemented"),
+  "No-font control hex observation still surfaced font-unicode-mapping-not-implemented.",
+);
+assert(
   singleByteEncodedTextResult.observation.status === "completed",
   `Single-byte encoded-text observation status was ${singleByteEncodedTextResult.observation.status}.`,
 );
@@ -2588,6 +2829,22 @@ assert(
 assert(
   !extendedNamedGlyphResult.observation.value?.knownLimits.includes("literal-font-encoding-not-implemented"),
   "Extended named-glyph observation still reported literal-font-encoding-not-implemented.",
+);
+assert(
+  commonSymbolGlyphResult.observation.status === "completed",
+  `Common symbol-glyph observation status was ${commonSymbolGlyphResult.observation.status}.`,
+);
+assert(
+  commonSymbolGlyphResult.observation.value?.extractedText === "π Ω ≥ ∫ ≈ →",
+  `Unexpected common symbol-glyph extraction: ${JSON.stringify(commonSymbolGlyphResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  commonSymbolGlyphResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
+  `Unexpected common symbol-glyph unicode mapping source: ${JSON.stringify(commonSymbolGlyphResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource ?? null)}.`,
+);
+assert(
+  !commonSymbolGlyphResult.observation.value?.knownLimits.includes("literal-font-encoding-not-implemented"),
+  "Common symbol-glyph observation still reported literal-font-encoding-not-implemented.",
 );
 assert(
   partialSingleByteEncodedTextResult.observation.status === "completed",
