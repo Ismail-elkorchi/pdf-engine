@@ -4,26 +4,71 @@ import type {
   PdfKnowledgeChunkRole,
   PdfKnowledgeCitation,
   PdfKnowledgeDocument,
+  PdfKnowledgeStrategy,
+  PdfKnowledgeTableHeuristic,
+  PdfKnowledgeTable,
+  PdfKnowledgeTableCell,
   PdfLayoutBlock,
   PdfLayoutDocument,
+  PdfLayoutPage,
+  PdfObservedDocument,
+  PdfObservedPage,
+  PdfObservedTextRun,
+  PdfPoint,
 } from "./contracts.ts";
 
 const DEFAULT_CHUNK_TARGET = 420;
+const GRID_HEADER_ROW_MIN_COLUMNS = 3;
+const GRID_ROW_CELL_MIN_COUNT = 2;
+const ROW_SEQUENCE_MIN_HEADERS = 3;
+const ROW_SEQUENCE_MIN_ROWS = 2;
 
-export function buildKnowledgeDocument(layout: PdfLayoutDocument): PdfKnowledgeDocument {
+interface ProjectedTableCellSeed {
+  readonly columnIndex: number;
+  readonly text: string;
+  readonly blocks: readonly PdfLayoutBlock[];
+}
+
+interface ProjectedTableRowSeed {
+  readonly cells: readonly ProjectedTableCellSeed[];
+}
+
+interface ProjectedTableCandidate {
+  readonly pageNumber: number;
+  readonly heuristic: PdfKnowledgeTableHeuristic;
+  readonly headers: readonly string[];
+  readonly blockIds: readonly string[];
+  readonly confidence: number;
+  readonly rows: readonly ProjectedTableRowSeed[];
+}
+
+interface RowBand {
+  readonly centerY: number;
+  readonly blocks: readonly AnchoredLayoutBlock[];
+}
+
+type AnchoredLayoutBlock = PdfLayoutBlock & { readonly anchor: PdfPoint };
+
+export function buildKnowledgeDocument(
+  layout: PdfLayoutDocument,
+  observation?: PdfObservedDocument,
+): PdfKnowledgeDocument {
   const chunks = buildKnowledgeChunks(layout);
+  const tables = buildKnowledgeTables(layout, observation);
+  const strategy: PdfKnowledgeStrategy =
+    tables.length === 0 ? "layout-chunks" : "layout-chunks-and-heuristic-tables";
 
   return {
     kind: "shell-knowledge",
-    strategy: "layout-chunks",
+    strategy,
     chunks,
-    tables: [],
+    tables,
     extractedText: chunks.map((chunk) => chunk.text).join("\n\n"),
-    knownLimits: dedupeKnownLimits([
-      ...layout.knownLimits,
-      "knowledge-chunk-heuristic",
-      "table-projection-not-implemented",
-    ]),
+    knownLimits: dedupeKnownLimits(
+      tables.length === 0
+        ? [...layout.knownLimits, "knowledge-chunk-heuristic", "table-projection-not-implemented"]
+        : [...layout.knownLimits, "knowledge-chunk-heuristic", "table-projection-heuristic"],
+    ),
   };
 }
 
@@ -61,6 +106,41 @@ function buildKnowledgeChunks(layout: PdfLayoutDocument): readonly PdfKnowledgeC
   flushBlocks();
 
   return chunks;
+}
+
+function buildKnowledgeTables(
+  layout: PdfLayoutDocument,
+  observation?: PdfObservedDocument,
+): readonly PdfKnowledgeTable[] {
+  const tables: PdfKnowledgeTable[] = [];
+  const observationPages = new Map((observation?.pages ?? []).map((page) => [page.pageNumber, page]));
+  const runToBlock = buildRunToBlockIndex(layout);
+  let tableIndex = 0;
+
+  for (const page of layout.pages) {
+    const candidates: ProjectedTableCandidate[] = [];
+    const layoutGridCandidate = projectLayoutGridTable(page);
+    if (layoutGridCandidate) {
+      candidates.push(layoutGridCandidate);
+    }
+
+    const observationPage = observationPages.get(page.pageNumber);
+    const rowSequenceCandidate =
+      observationPage === undefined ? undefined : projectRowSequenceTable(page, observationPage, runToBlock);
+    if (
+      rowSequenceCandidate &&
+      !candidates.some((candidate) => projectedTableOverlap(candidate, rowSequenceCandidate))
+    ) {
+      candidates.push(rowSequenceCandidate);
+    }
+
+    for (const candidate of candidates) {
+      tableIndex += 1;
+      tables.push(finalizeProjectedTable(tableIndex, candidate));
+    }
+  }
+
+  return tables;
 }
 
 function shouldStartNewChunk(
@@ -112,12 +192,459 @@ function summarizeChunkRole(blocks: readonly PdfLayoutBlock[]): PdfKnowledgeChun
   return roles[0] as PdfKnowledgeChunkRole;
 }
 
+function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
+  const anchoredBlocks = page.blocks
+    .filter((block): block is AnchoredLayoutBlock => block.anchor !== undefined)
+    .filter((block) => block.role !== "header" && block.role !== "footer");
+  if (anchoredBlocks.length < 8) {
+    return undefined;
+  }
+
+  const rowBands = clusterBlocksIntoRows(anchoredBlocks);
+  let bestCandidate: ProjectedTableCandidate | undefined;
+  let bestScore = -1;
+
+  for (const [rowIndex, headerBand] of rowBands.entries()) {
+    const headerBlocks = [...headerBand.blocks].sort(compareBlocksByX);
+    if (!looksLikeGridHeaderRow(headerBlocks)) {
+      continue;
+    }
+
+    const columnAnchors = headerBlocks.map((block) => block.anchor.x);
+    const rowSeeds: ProjectedTableRowSeed[] = [
+      {
+        cells: headerBlocks.map((block, columnIndex) => ({
+          columnIndex,
+          text: normalizeCellText(block.text),
+          blocks: [block],
+        })),
+      },
+    ];
+
+    let previousCenterY = headerBand.centerY;
+    for (const candidateBand of rowBands.slice(rowIndex + 1)) {
+      const fontSize = candidateBand.blocks[0]?.fontSize ?? headerBlocks[0]?.fontSize ?? 12;
+      const rowGap = previousCenterY - candidateBand.centerY;
+      if (rowGap > Math.max(20, fontSize * 2.8)) {
+        break;
+      }
+
+      const rowCells = matchBlocksToColumns(candidateBand.blocks, columnAnchors);
+      if (rowCells.length < GRID_ROW_CELL_MIN_COUNT) {
+        if (rowSeeds.length > 1) {
+          break;
+        }
+        continue;
+      }
+
+      rowSeeds.push({ cells: rowCells });
+      previousCenterY = candidateBand.centerY;
+    }
+
+    const bodyRowCount = rowSeeds.length - 1;
+    if (bodyRowCount < ROW_SEQUENCE_MIN_ROWS) {
+      continue;
+    }
+
+    const headers = rowSeeds[0]?.cells.map((cell) => cell.text).filter((text) => text.length > 0) ?? [];
+    if (headers.length < GRID_HEADER_ROW_MIN_COLUMNS) {
+      continue;
+    }
+
+    const candidate: ProjectedTableCandidate = {
+      pageNumber: page.pageNumber,
+      heuristic: "layout-grid",
+      headers,
+      blockIds: dedupeStrings(rowSeeds.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
+      confidence: Number(
+        Math.min(0.86, 0.48 + headers.length * 0.035 + bodyRowCount * 0.03).toFixed(2),
+      ),
+      rows: rowSeeds,
+    };
+    const score = headers.length * 10 + bodyRowCount;
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate;
+}
+
+function projectRowSequenceTable(
+  layoutPage: PdfLayoutPage,
+  observationPage: PdfObservedPage,
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): ProjectedTableCandidate | undefined {
+  const runs = observationPage.runs.filter((run) => normalizeCellText(run.text).length > 0);
+  const headerGroup = findBestHeaderRunGroup(runs);
+  if (!headerGroup) {
+    return undefined;
+  }
+
+  const headerCount = headerGroup.runs.length;
+  const dataRuns = collectSequenceDataRuns(runs, headerGroup.startIndex);
+  if (dataRuns.length < headerCount * 2 - 1) {
+    return undefined;
+  }
+
+  const bodyRows = chunkSequenceRuns(dataRuns, headerCount);
+  if (bodyRows.length < ROW_SEQUENCE_MIN_ROWS) {
+    return undefined;
+  }
+
+  const headerRow: ProjectedTableRowSeed = {
+    cells: headerGroup.runs.map((run, columnIndex) => ({
+      columnIndex,
+      text: normalizeCellText(run.text),
+      blocks: toRunBlocks([run], runToBlock),
+    })),
+  };
+  const bodyRowSeeds = bodyRows.map((rowRuns) => ({
+    cells: rowRuns.map((run, columnIndex) => ({
+      columnIndex,
+      text: normalizeCellText(run.text),
+      blocks: toRunBlocks([run], runToBlock),
+    })),
+  }));
+
+  const headers = headerRow.cells.map((cell) => cell.text).filter((text) => text.length > 0);
+  if (headers.length < ROW_SEQUENCE_MIN_HEADERS) {
+    return undefined;
+  }
+
+  const rows = [headerRow, ...bodyRowSeeds];
+  return {
+    pageNumber: layoutPage.pageNumber,
+    heuristic: "row-sequence",
+    headers,
+    blockIds: dedupeStrings(rows.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
+    confidence: Number(Math.min(0.72, 0.44 + headers.length * 0.03 + bodyRows.length * 0.025).toFixed(2)),
+    rows,
+  };
+}
+
+function findBestHeaderRunGroup(
+  runs: readonly PdfObservedTextRun[],
+): { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined {
+  const fontSizes = runs.map((run) => run.fontSize ?? 0).filter((value) => value > 0).sort((left, right) => left - right);
+  const medianFontSize =
+    fontSizes.length === 0 ? 0 : fontSizes[Math.floor(fontSizes.length / 2)] ?? 0;
+  let bestGroup: { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined;
+  let bestScore = -1;
+
+  for (let startIndex = 0; startIndex < runs.length; startIndex += 1) {
+    const startRun = runs[startIndex] as PdfObservedTextRun;
+    const fontSize = startRun.fontSize ?? 0;
+    if (fontSize <= medianFontSize + 1) {
+      continue;
+    }
+
+    const group: PdfObservedTextRun[] = [startRun];
+    for (let nextIndex = startIndex + 1; nextIndex < runs.length; nextIndex += 1) {
+      const nextRun = runs[nextIndex] as PdfObservedTextRun;
+      if (!isHeaderRunText(nextRun.text) || (nextRun.fontSize ?? 0) !== fontSize) {
+        break;
+      }
+      group.push(nextRun);
+    }
+
+    if (group.length < ROW_SEQUENCE_MIN_HEADERS) {
+      continue;
+    }
+
+    const score = fontSize * 10 + group.length;
+    if (score > bestScore) {
+      bestScore = score;
+      bestGroup = { startIndex, runs: group };
+    }
+  }
+
+  return bestGroup;
+}
+
+function collectSequenceDataRuns(
+  runs: readonly PdfObservedTextRun[],
+  headerStartIndex: number,
+): readonly PdfObservedTextRun[] {
+  const collectedRuns: PdfObservedTextRun[] = [];
+
+  for (let index = headerStartIndex - 1; index >= 0; index -= 1) {
+    const run = runs[index] as PdfObservedTextRun;
+    if (!isSequenceDataRunText(run.text)) {
+      break;
+    }
+    collectedRuns.unshift(run);
+  }
+
+  return collectedRuns;
+}
+
+function chunkSequenceRuns(
+  runs: readonly PdfObservedTextRun[],
+  columnCount: number,
+): readonly (readonly PdfObservedTextRun[])[] {
+  const rows: PdfObservedTextRun[][] = [];
+  let offset = 0;
+
+  while (offset < runs.length) {
+    const remaining = runs.length - offset;
+    const rowLength = remaining > columnCount ? columnCount : remaining;
+    if (rowLength < 2) {
+      return [];
+    }
+    rows.push(runs.slice(offset, offset + rowLength));
+    offset += rowLength;
+  }
+
+  return rows;
+}
+
+function clusterBlocksIntoRows(blocks: readonly AnchoredLayoutBlock[]): readonly RowBand[] {
+  const sortedBlocks = [...blocks].sort((left, right) => {
+    if (left.anchor.y !== right.anchor.y) {
+      return right.anchor.y - left.anchor.y;
+    }
+    return left.anchor.x - right.anchor.x;
+  });
+
+  const rows: { centerY: number; blocks: AnchoredLayoutBlock[] }[] = [];
+  for (const block of sortedBlocks) {
+    const previousRow = rows.at(-1);
+    const threshold = Math.max(8, (block.fontSize ?? 12) * 0.9);
+    if (previousRow && Math.abs(previousRow.centerY - block.anchor.y) <= threshold) {
+      previousRow.blocks.push(block);
+      previousRow.centerY =
+        previousRow.blocks.reduce((sum, currentBlock) => sum + currentBlock.anchor.y, 0) / previousRow.blocks.length;
+      continue;
+    }
+
+    rows.push({
+      centerY: block.anchor.y,
+      blocks: [block],
+    });
+  }
+
+  return rows.map((row) => ({
+    centerY: row.centerY,
+    blocks: [...row.blocks].sort(compareBlocksByX),
+  }));
+}
+
+function matchBlocksToColumns(
+  blocks: readonly AnchoredLayoutBlock[],
+  columnAnchors: readonly number[],
+): readonly ProjectedTableCellSeed[] {
+  const matchedCells = new Map<number, ProjectedTableCellSeed>();
+
+  for (const block of [...blocks].sort(compareBlocksByX)) {
+    const nearestColumnIndex = findNearestColumnIndex(block.anchor.x, columnAnchors);
+    if (nearestColumnIndex < 0) {
+      continue;
+    }
+
+    const columnAnchor = columnAnchors[nearestColumnIndex];
+    if (columnAnchor === undefined) {
+      continue;
+    }
+
+    const nearestDistance = Math.abs(columnAnchor - block.anchor.x);
+    const threshold = Math.max(18, (block.fontSize ?? 12) * 1.6);
+    if (nearestDistance > threshold) {
+      continue;
+    }
+
+    const existingCell = matchedCells.get(nearestColumnIndex);
+    if (!existingCell) {
+      matchedCells.set(nearestColumnIndex, {
+        columnIndex: nearestColumnIndex,
+        text: normalizeCellText(block.text),
+        blocks: [block],
+      });
+      continue;
+    }
+
+    matchedCells.set(nearestColumnIndex, {
+      columnIndex: nearestColumnIndex,
+      text: joinCellText(existingCell.text, block.text),
+      blocks: [...existingCell.blocks, block],
+    });
+  }
+
+  return [...matchedCells.values()]
+    .filter((cell) => cell.text.length > 0)
+    .sort((left, right) => left.columnIndex - right.columnIndex);
+}
+
+function looksLikeGridHeaderRow(blocks: readonly AnchoredLayoutBlock[]): boolean {
+  if (blocks.length < GRID_HEADER_ROW_MIN_COLUMNS) {
+    return false;
+  }
+
+  const texts = blocks.map((block) => normalizeCellText(block.text)).filter((text) => text.length > 0);
+  if (texts.length < GRID_HEADER_ROW_MIN_COLUMNS) {
+    return false;
+  }
+
+  if (texts.some((text) => text.length > 32 || looksLikeNumericCell(text))) {
+    return false;
+  }
+
+  const xValues = blocks.map((block) => block.anchor.x);
+  return Math.max(...xValues) - Math.min(...xValues) >= 60;
+}
+
+function finalizeProjectedTable(tableIndex: number, candidate: ProjectedTableCandidate): PdfKnowledgeTable {
+  const cells: PdfKnowledgeTableCell[] = [];
+
+  for (const [rowIndex, row] of candidate.rows.entries()) {
+    for (const cell of row.cells) {
+      cells.push({
+        rowIndex,
+        columnIndex: cell.columnIndex,
+        text: cell.text,
+        citations: createTableCellCitations(tableIndex, rowIndex, cell.columnIndex, cell.blocks),
+      });
+    }
+  }
+
+  return {
+    id: `table-${tableIndex}`,
+    pageNumber: candidate.pageNumber,
+    headers: candidate.headers,
+    ...(candidate.heuristic !== undefined ? { heuristic: candidate.heuristic } : {}),
+    blockIds: candidate.blockIds,
+    confidence: candidate.confidence,
+    cells,
+  };
+}
+
+function createTableCellCitations(
+  tableIndex: number,
+  rowIndex: number,
+  columnIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): readonly PdfKnowledgeCitation[] {
+  return blocks.map((block, citationIndex) => ({
+    id: `table-${tableIndex}-r${rowIndex}-c${columnIndex + 1}-${citationIndex + 1}`,
+    pageNumber: block.pageNumber,
+    blockId: block.id,
+    runIds: block.runIds,
+    text: block.text,
+    ...(block.pageRef !== undefined ? { pageRef: block.pageRef } : {}),
+  }));
+}
+
+function buildRunToBlockIndex(layout: PdfLayoutDocument): ReadonlyMap<string, PdfLayoutBlock> {
+  const runToBlock = new Map<string, PdfLayoutBlock>();
+  for (const page of layout.pages) {
+    for (const block of page.blocks) {
+      for (const runId of block.runIds) {
+        runToBlock.set(runId, block);
+      }
+    }
+  }
+  return runToBlock;
+}
+
+function toRunBlocks(
+  runs: readonly PdfObservedTextRun[],
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): readonly PdfLayoutBlock[] {
+  return dedupeById(
+    runs
+      .map((run) => runToBlock.get(run.id))
+      .filter((block): block is PdfLayoutBlock => block !== undefined),
+  );
+}
+
+function projectedTableOverlap(
+  left: ProjectedTableCandidate,
+  right: ProjectedTableCandidate,
+): boolean {
+  if (left.pageNumber !== right.pageNumber) {
+    return false;
+  }
+
+  const leftIds = new Set(left.blockIds);
+  return right.blockIds.some((blockId) => leftIds.has(blockId));
+}
+
+function compareBlocksByX(left: AnchoredLayoutBlock, right: AnchoredLayoutBlock): number {
+  if (left.anchor.x !== right.anchor.x) {
+    return left.anchor.x - right.anchor.x;
+  }
+  return right.anchor.y - left.anchor.y;
+}
+
+function findNearestColumnIndex(x: number, columnAnchors: readonly number[]): number {
+  let bestIndex = -1;
+  let bestDistance = Number.POSITIVE_INFINITY;
+
+  for (const [columnIndex, columnAnchor] of columnAnchors.entries()) {
+    const distance = Math.abs(columnAnchor - x);
+    if (distance < bestDistance) {
+      bestDistance = distance;
+      bestIndex = columnIndex;
+    }
+  }
+
+  return bestIndex;
+}
+
+function isHeaderRunText(text: string): boolean {
+  const normalized = normalizeCellText(text);
+  return normalized.length > 0 && normalized.length <= 24 && !normalized.includes(":") && !looksLikeNumericCell(normalized);
+}
+
+function isSequenceDataRunText(text: string): boolean {
+  const normalized = normalizeCellText(text);
+  if (normalized.length === 0 || normalized.length > 40) {
+    return false;
+  }
+
+  if (normalized.includes("\n")) {
+    return false;
+  }
+
+  return !/[/:]/u.test(normalized) && !/\.(?:json|pdf)$/iu.test(normalized);
+}
+
+function looksLikeNumericCell(text: string): boolean {
+  return /^[\d\s.,$()%+-]+$/u.test(text);
+}
+
+function normalizeCellText(text: string): string {
+  return text.replaceAll(/\s+/g, " ").trim();
+}
+
+function joinCellText(previousText: string, currentText: string): string {
+  return `${previousText} ${normalizeCellText(currentText)}`.replaceAll(/\s+/g, " ").trim();
+}
+
 function dedupeNumbers(values: readonly number[]): readonly number[] {
   return Array.from(new Set(values));
 }
 
 function dedupeKnownLimits(values: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {
   return Array.from(new Set(values));
+}
+
+function dedupeStrings(values: readonly string[]): readonly string[] {
+  return Array.from(new Set(values));
+}
+
+function dedupeById<T extends { readonly id: string }>(values: readonly T[]): readonly T[] {
+  const seenIds = new Set<string>();
+  const deduped: T[] = [];
+  for (const value of values) {
+    if (seenIds.has(value.id)) {
+      continue;
+    }
+    seenIds.add(value.id);
+    deduped.push(value);
+  }
+  return deduped;
 }
 
 function serializeChunkBlocks(blocks: readonly PdfLayoutBlock[]): string {

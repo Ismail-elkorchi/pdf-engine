@@ -117,6 +117,7 @@ export type PdfKnownLimitCode =
   | "layout-role-heuristic"
   | "layout-reading-order-heuristic"
   | "knowledge-chunk-heuristic"
+  | "table-projection-heuristic"
   | "table-projection-not-implemented";
 
 /**
@@ -743,7 +744,12 @@ export type PdfKnowledgeChunkRole = PdfLayoutRole | "mixed";
 /**
  * First knowledge-projection strategy used by the shell implementation.
  */
-export type PdfKnowledgeStrategy = "layout-chunks";
+export type PdfKnowledgeStrategy = "layout-chunks" | "layout-chunks-and-heuristic-tables";
+
+/**
+ * Heuristic used to project one knowledge table.
+ */
+export type PdfKnowledgeTableHeuristic = "layout-grid" | "row-sequence";
 
 /**
  * One provenance record attached to a knowledge chunk or table cell.
@@ -805,6 +811,10 @@ export interface PdfKnowledgeTable {
   readonly id: string;
   /** One-based page number. */
   readonly pageNumber: number;
+  /** Header row recovered for the current table when the shell can isolate one. */
+  readonly headers?: readonly string[];
+  /** Heuristic used to project the current table. */
+  readonly heuristic?: PdfKnowledgeTableHeuristic;
   /** Source layout block identifiers that fed this table. */
   readonly blockIds: readonly string[];
   /** Confidence attached to the current table projection. */
