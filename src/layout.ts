@@ -1127,6 +1127,30 @@ function classifyLayoutBlock(
     };
   }
 
+  if (looksLikeNumberedListPrompt(block.text)) {
+    return {
+      ...block,
+      role: "list",
+      roleConfidence: 0.66,
+    };
+  }
+
+  if (looksLikeNumberedBodyParagraph(block.text)) {
+    return {
+      ...block,
+      role: "body",
+      roleConfidence: 0.62,
+    };
+  }
+
+  if (looksLikeSimpleFieldLabelBody(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "body",
+      roleConfidence: 0.6,
+    };
+  }
+
   if (looksLikePromotedHeading(block, blockIndex, blocks)) {
     return {
       ...block,
@@ -1164,22 +1188,6 @@ function classifyLayoutBlock(
       ...block,
       role: "heading",
       roleConfidence: 0.64,
-    };
-  }
-
-  if (looksLikeNumberedListPrompt(block.text)) {
-    return {
-      ...block,
-      role: "list",
-      roleConfidence: 0.66,
-    };
-  }
-
-  if (looksLikeNumberedBodyParagraph(block.text)) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.62,
     };
   }
 
@@ -1271,6 +1279,7 @@ function looksLikePromotedHeading(
   blocks: readonly PdfLayoutBlock[],
 ): boolean {
   return looksLikeContentsEntryHeading(block, blockIndex, blocks) ||
+    looksLikeInlineNarrativeHeading(block, blockIndex, blocks) ||
     looksLikeLegalMetadataHeading(block, blockIndex, blocks) ||
     looksLikeFormPromptHeading(block, blockIndex, blocks) ||
     looksLikeLeafletTitleHeading(block, blockIndex, blocks) ||
@@ -1297,6 +1306,56 @@ function looksLikeContentsEntryHeading(
   return blocks
     .slice(Math.max(0, blockIndex - 8), blockIndex)
     .some((candidate) => /\bcontents\b/iu.test(normalizeBlockText(candidate.text)));
+}
+
+function looksLikeInlineNarrativeHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (blockIndex === 0 || blockIndex >= blocks.length - 1) {
+    return false;
+  }
+
+  const normalized = normalizeBlockText(block.text);
+  if (
+    normalized.length === 0 ||
+    normalized.length > 48 ||
+    looksLikeDateLine(normalized) ||
+    looksLikePaginationLine(normalized) ||
+    looksLikeProductionMetadata(normalized) ||
+    looksLikeNumberedBodyParagraph(normalized) ||
+    looksLikeStandaloneQuestionHeading(normalized)
+  ) {
+    return false;
+  }
+
+  if (
+    !/^[\p{Lu}][\p{L}'’.-]*(?:\s+[\p{Lu}][\p{L}'’.-]*){1,4}[.:]$/u.test(normalized) &&
+    !/^[\p{Lu}][\p{L}'’.-]*(?:\s+[\p{Lu}][\p{L}'’.-]*){1,4}\.$/u.test(normalized)
+  ) {
+    return false;
+  }
+
+  const previousBlock = blocks[blockIndex - 1];
+  const nextBlock = blocks[blockIndex + 1];
+  if (!previousBlock || !nextBlock) {
+    return false;
+  }
+
+  const previousText = normalizeBlockText(previousBlock.text);
+  const nextText = normalizeBlockText(nextBlock.text);
+  if (
+    previousText.length < 24 ||
+    nextText.length < 24 ||
+    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) ||
+    looksLikeHeadingLikeText(nextText, nextBlock.fontSize) ||
+    !startsLikeSentence(nextText)
+  ) {
+    return false;
+  }
+
+  return true;
 }
 
 function looksLikeLegalMetadataHeading(
@@ -1458,6 +1517,49 @@ function looksLikeLeafletTitleHeading(
   const hasDosePattern = /\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml)(?:\/(?:ml|l|g))?\b/iu.test(normalized);
   const hasInstructionTitle = /^[\p{Lu}\s&/'’().-]+:/u.test(normalized) && /[\p{Ll}]/u.test(normalized);
   return hasDosePattern && hasInstructionTitle;
+}
+
+function looksLikeSimpleFieldLabelBody(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (
+    normalized.length === 0 ||
+    normalized.length > 48 ||
+    looksLikeDateLine(normalized) ||
+    looksLikePaginationLine(normalized) ||
+    looksLikeProductionMetadata(normalized)
+  ) {
+    return false;
+  }
+
+  const trimmedLabel = normalized.replace(/^[*•]\s*/u, "");
+  if (
+    countLabelMarkers(trimmedLabel) !== 1 ||
+    /[.!?]$/u.test(trimmedLabel.slice(0, -1)) ||
+    /^\d+(?:\.\d+)*[.)]?\s+/u.test(trimmedLabel)
+  ) {
+    return false;
+  }
+
+  const labelText = trimmedLabel.slice(0, -1).trim();
+  const words = labelText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 3) {
+    return false;
+  }
+
+  return blocks
+    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
+    .some((candidate, candidateIndex) => {
+      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
+      if (originalIndex === blockIndex) {
+        return false;
+      }
+
+      return looksLikeShortFieldLabel(candidate.text, candidate.fontSize);
+    });
 }
 
 function looksLikeFieldLabelBody(
