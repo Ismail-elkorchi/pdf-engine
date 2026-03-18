@@ -33,7 +33,7 @@ interface GroupedBlockSeed {
 
 export function buildObservationParagraphText(observation: PdfObservedDocument): string {
   const groupedPages = observation.pages.map((page) => groupPageIntoBlocks(page));
-  return serializeLayoutPages(groupedPages);
+  return serializeObservationPages(groupedPages);
 }
 
 export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayoutDocument {
@@ -1563,6 +1563,33 @@ function serializeLayoutPages(pages: readonly PdfLayoutPage[]): string {
     .join("\n\n");
 }
 
+function serializeObservationPages(pages: readonly PdfLayoutPage[]): string {
+  return pages
+    .map((page) => serializeObservationBlocks(page.blocks))
+    .filter((text) => text.length > 0)
+    .join("\n\n");
+}
+
+function serializeObservationBlocks(blocks: readonly PdfLayoutBlock[]): string {
+  let text = "";
+  let previousBlock: PdfLayoutBlock | undefined;
+
+  for (const block of blocks) {
+    const normalizedBlockText = formatObservationBlockText(previousBlock, block);
+    if (normalizedBlockText.length === 0) {
+      continue;
+    }
+
+    const separator = previousBlock === undefined
+      ? ""
+      : (shouldSplitObservationAfterHeading(previousBlock, block) || block.startsParagraph ? "\n\n" : " ");
+    text += `${separator}${normalizedBlockText}`;
+    previousBlock = block;
+  }
+
+  return text;
+}
+
 function serializeLayoutBlocks(blocks: readonly PdfLayoutBlock[]): string {
   let text = "";
 
@@ -1576,6 +1603,31 @@ function serializeLayoutBlocks(blocks: readonly PdfLayoutBlock[]): string {
   }
 
   return text;
+}
+
+function formatObservationBlockText(previousBlock: PdfLayoutBlock | undefined, block: PdfLayoutBlock): string {
+  const normalizedBlockText = normalizeBlockText(block.text);
+  if (
+    previousBlock !== undefined &&
+    looksLikeHeadingLikeText(normalizeBlockText(previousBlock.text), previousBlock.fontSize) &&
+    /^\d+[.)]\s+/u.test(normalizedBlockText)
+  ) {
+    return normalizedBlockText.replace(/^(?<label>\d+[.)])\s+/u, "$<label>\n\n");
+  }
+
+  return normalizedBlockText;
+}
+
+function shouldSplitObservationAfterHeading(previousBlock: PdfLayoutBlock, block: PdfLayoutBlock): boolean {
+  const previousText = normalizeBlockText(previousBlock.text);
+  const currentText = normalizeBlockText(block.text);
+  return block.startsParagraph === false &&
+    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) &&
+    looksLikeHeadingLikeText(currentText, block.fontSize) === false &&
+    previousText.length >= 8 &&
+    previousText.length <= 40 &&
+    currentText.length >= 80 &&
+    /[:.]$/u.test(previousText) === false;
 }
 
 function normalizeBlockText(text: string): string {
