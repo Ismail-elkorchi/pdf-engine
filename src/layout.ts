@@ -761,6 +761,54 @@ function classifyLayoutBlock(
     };
   }
 
+  if (looksLikeLeadingMetadataLabel(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "heading",
+      roleConfidence: 0.64,
+    };
+  }
+
+  if (looksLikeTableRowDescriptor(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "body",
+      roleConfidence: 0.6,
+    };
+  }
+
+  if (looksLikeCoverTitleHeading(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "heading",
+      roleConfidence: 0.64,
+    };
+  }
+
+  if (looksLikeNumberedListPrompt(block.text)) {
+    return {
+      ...block,
+      role: "list",
+      roleConfidence: 0.66,
+    };
+  }
+
+  if (looksLikeNumberedBodyParagraph(block.text)) {
+    return {
+      ...block,
+      role: "body",
+      roleConfidence: 0.62,
+    };
+  }
+
+  if (looksLikeFieldLabelBody(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "body",
+      roleConfidence: 0.6,
+    };
+  }
+
   if (looksLikeSectionHeading(block.text)) {
     return {
       ...block,
@@ -799,6 +847,199 @@ function classifyLayoutBlock(
   }
 
   return block;
+}
+
+function looksLikeNumberedListPrompt(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  return /^\d+[)]\s+/u.test(normalized) && normalized.endsWith(":") && normalized.length <= 160;
+}
+
+function looksLikeNumberedBodyParagraph(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  const numberedPrefixMatch = normalized.match(/^\d+[.)]\s+/u);
+  if (!numberedPrefixMatch || /^\d+\.\d+/u.test(normalized)) {
+    return false;
+  }
+
+  if (normalized.endsWith(":")) {
+    return false;
+  }
+
+  const bodyText = normalized.slice(numberedPrefixMatch[0].length);
+  if (bodyText.length < 24 || !/[\p{Ll}]/u.test(bodyText)) {
+    return false;
+  }
+
+  return startsLikeSentence(bodyText) || /[.!?]["')\]]*$/u.test(normalized);
+}
+
+function looksLikeFieldLabelBody(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 120 || /[.!?]$/.test(normalized)) {
+    return false;
+  }
+
+  if (looksLikeSectionHeading(normalized) || looksLikeStandaloneQuestionHeading(normalized)) {
+    return false;
+  }
+
+  if (looksLikeDateLine(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  const colonCount = countLabelMarkers(normalized);
+  const containsLowercase = /[\p{Ll}]/u.test(normalized);
+  if (!containsLowercase) {
+    return false;
+  }
+
+  const hasTitleContext = blocks
+    .slice(Math.max(0, blockIndex - 2), blockIndex)
+    .some((candidate) => (candidate.fontSize ?? 0) >= 18 || looksLikeHeading(candidate.text, candidate.fontSize));
+  const isBodyLabelZone = blockIndex > 4 || hasTitleContext;
+  if (!isBodyLabelZone) {
+    return false;
+  }
+
+  if (/^[-*•]\s+/u.test(normalized) && words.length <= 4) {
+    return false;
+  }
+
+  if (colonCount >= 2) {
+    return true;
+  }
+
+  if (colonCount === 1) {
+    return words.length <= 8 && (block.fontSize ?? 12) <= 12;
+  }
+
+  if ((block.fontSize ?? 12) > 12 || words.length < 3 || words.length > 8) {
+    return false;
+  }
+
+  if (/\d/u.test(normalized)) {
+    return false;
+  }
+
+  return words.every((word) => isTitleCaseWord(word) || isConnectorWord(word));
+}
+
+function looksLikeLeadingMetadataLabel(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (blockIndex > 1) {
+    return false;
+  }
+
+  const normalized = normalizeBlockText(block.text);
+  if (!normalized.endsWith(":") || countLabelMarkers(normalized) !== 1) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 2) {
+    return false;
+  }
+
+  return blocks
+    .slice(blockIndex + 1, blockIndex + 4)
+    .some((candidate) => (candidate.fontSize ?? 0) >= 18 || looksLikeHeading(candidate.text, candidate.fontSize));
+}
+
+function looksLikeCoverTitleHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 140 || !isEarlyPageHeadingContext(blockIndex, blocks)) {
+    return false;
+  }
+
+  if (
+    /^[-*•]\s+/u.test(normalized) ||
+    looksLikeDateLine(normalized) ||
+    looksLikeProductionMetadata(normalized) ||
+    looksLikeNumberedBodyParagraph(normalized)
+  ) {
+    return false;
+  }
+
+  if (countLabelMarkers(normalized) >= 2) {
+    return false;
+  }
+
+  if (countLabelMarkers(normalized) === 1 && normalized.split(/\s+/u).length <= 2) {
+    return false;
+  }
+
+  if (looksLikeTitleCaseHeading(normalized)) {
+    return true;
+  }
+
+  if (/^[\p{Lu}\p{N}\s&/'’().:-]+$/u.test(normalized) && normalized.length <= 120) {
+    return true;
+  }
+
+  return normalized.includes(":") && !/[.!?]$/.test(normalized) && normalized.length <= 96;
+}
+
+function looksLikeTableRowDescriptor(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || normalized.length > 220 || !block.anchor) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  const looksLikeRowLabel =
+    (/^\d+\s+/u.test(normalized) && !/^\d+\.\d+/u.test(normalized)) ||
+    (words.length === 1 && /[\p{Ll}]/u.test(normalized));
+  if (!looksLikeRowLabel) {
+    return false;
+  }
+
+  const fontSize = block.fontSize ?? 12;
+  const rowTolerance = Math.max(10, fontSize * 0.9);
+  const dataNeighbor = blocks.some((candidate, candidateIndex) => {
+    if (candidateIndex === blockIndex || candidate.anchor === undefined) {
+      return false;
+    }
+
+    if (Math.abs(candidate.anchor.y - block.anchor!.y) > rowTolerance) {
+      return false;
+    }
+
+    if (Math.abs(candidate.anchor.x - block.anchor!.x) < Math.max(12, fontSize * 1.2)) {
+      return false;
+    }
+
+    return looksLikeTabularDataText(candidate.text);
+  });
+
+  return dataNeighbor;
+}
+
+function looksLikeTabularDataText(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0) {
+    return false;
+  }
+
+  return /[$€£¥]?\d/u.test(normalized) ||
+    /\b(?:completed|failed|paid|pending|received|rejected|total)\b/iu.test(normalized) ||
+    /\b[A-Z]{3}\b/u.test(normalized) ||
+    /\d{1,2}[-/]\p{L}{3,9}[-/]\d{2,4}/u.test(normalized);
 }
 
 function looksLikeHeading(text: string, fontSize: number | undefined): boolean {
