@@ -484,6 +484,22 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: denseGridTablePdf
           }
         });
+        const stackedHeaderTableResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: decodeFixturePdfBytes(
+              await (await fetch("/scripts/smoke/fixtures/stacked-header-table.base64.txt")).text()
+            )
+          }
+        });
+        const fieldValueFormResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: decodeFixturePdfBytes(
+              await (await fetch("/scripts/smoke/fixtures/field-value-form.base64.txt")).text()
+            )
+          }
+        });
         const delayedContentResult = await engine.run({
           source: {
             kind: "bytes",
@@ -603,6 +619,21 @@ async function runBrowserSmoke(baseUrl, browserName) {
           denseGridSecondRow: denseGridTableResult.knowledge.value?.tables[0]?.cells.some((cell) =>
             cell.rowIndex === 2 && cell.columnIndex === 1 && cell.text === "Hours 25%"
           ) === true,
+          stackedHeaderProjected: stackedHeaderTableResult.knowledge.value?.tables.length === 1,
+          stackedHeaderHeuristic:
+            stackedHeaderTableResult.knowledge.value?.tables[0]?.heuristic === "stacked-header-sequence",
+          stackedHeaderHeaders:
+            stackedHeaderTableResult.knowledge.value?.tables[0]?.headers?.join(",") ===
+            "Qty,Description with linebreak,Price,Amount",
+          stackedHeaderCell: stackedHeaderTableResult.knowledge.value?.tables[0]?.cells.some((cell) =>
+            cell.rowIndex === 2 && cell.columnIndex === 1 && cell.text === "Unicorn"
+          ) === true,
+          fieldValueProjected: fieldValueFormResult.knowledge.value?.tables.length === 1,
+          fieldValueHeuristic: fieldValueFormResult.knowledge.value?.tables[0]?.heuristic === "field-value-form",
+          fieldValueHeaders: fieldValueFormResult.knowledge.value?.tables[0]?.headers?.join(",") === "Field,Value",
+          fieldValueCell: fieldValueFormResult.knowledge.value?.tables[0]?.cells.some((cell) =>
+            cell.rowIndex === 3 && cell.columnIndex === 1 && cell.text === "MBL-SF424Family-AllForms"
+          ) === true,
           delayedContentText: delayedContentResult.observation.value?.extractedText === "Delayed Content",
           delayedContentOrder: delayedContentResult.observation.value?.pages[0]?.resolutionMethod === "page-tree",
           singleByteText: singleByteEncodedResult.observation.value?.extractedText === "Encoded Text",
@@ -637,6 +668,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
           coverMatterRoles: coverMatterResult.layout.value?.pages[0]?.blocks.slice(0, 3).map((block) => block.role).join(",") ?? null,
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           denseGridHeaders: denseGridTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
+          stackedHeaderHeaders: stackedHeaderTableResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
+          fieldValueHeaders: fieldValueFormResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           delayedContentText: delayedContentResult.observation.value?.extractedText ?? null,
           singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null,
           viewerInitialPage: initialViewerLabel,

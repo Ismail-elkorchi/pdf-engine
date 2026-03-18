@@ -45,6 +45,23 @@ function decodeBase64(value) {
   return Uint8Array.from(globalThis.atob(value), (character) => character.charCodeAt(0));
 }
 
+async function readSmokeAssetText(assetUrl) {
+  if (typeof Deno !== "undefined") {
+    return await Deno.readTextFile(assetUrl);
+  }
+
+  if (typeof Bun !== "undefined") {
+    return await Bun.file(assetUrl).text();
+  }
+
+  if (typeof process !== "undefined") {
+    const { readFile } = await import("node:fs/promises");
+    return await readFile(assetUrl, "utf8");
+  }
+
+  throw new Error("Unable to read smoke assets in the current runtime.");
+}
+
 function joinBytes(parts) {
   const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
   const joined = new Uint8Array(totalLength);
@@ -235,6 +252,12 @@ const viewerModuleSpecifier = resolveViewerModuleSpecifier(moduleSpecifier);
 assert(typeof viewerModuleSpecifier === "string", "Module path does not support resolving the viewer entrypoint.");
 const viewerModuleNamespace = await import(viewerModuleSpecifier);
 assert(typeof viewerModuleNamespace.renderPdfViewer === "function", "Viewer module does not export renderPdfViewer().");
+const stackedHeaderTableFixtureBytes = decodeBase64(
+  await readSmokeAssetText(new URL("./fixtures/stacked-header-table.base64.txt", import.meta.url)),
+);
+const fieldValueFormFixtureBytes = decodeBase64(
+  await readSmokeAssetText(new URL("./fixtures/field-value-form.base64.txt", import.meta.url)),
+);
 
 function resolveViewerModuleSpecifier(specifier) {
   if (specifier.endsWith("/index.js")) {
@@ -1170,6 +1193,20 @@ const rowSequenceTableResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const stackedHeaderTableResult = await engine.run({
+  source: {
+    bytes: stackedHeaderTableFixtureBytes,
+    fileName: "stacked-header-table.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const fieldValueFormResult = await engine.run({
+  source: {
+    bytes: fieldValueFormFixtureBytes,
+    fileName: "field-value-form.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const repeatedBoundaryResult = await engine.toLayout({
   source: {
     bytes: encodeText(repeatedBoundaryPdf),
@@ -1456,6 +1493,54 @@ assert(
 assert(
   rowSequenceTableResult.knowledge.value?.tables[0]?.cells.every((cell) => cell.citations.length > 0),
   "Row-sequence table projection emitted a cell without citations.",
+);
+assert(
+  stackedHeaderTableResult.knowledge.value?.tables.length === 1,
+  `Stacked-header table projection emitted ${String(stackedHeaderTableResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
+  stackedHeaderTableResult.knowledge.value?.tables[0]?.heuristic === "stacked-header-sequence",
+  `Stacked-header table heuristic was ${stackedHeaderTableResult.knowledge.value?.tables[0]?.heuristic ?? "missing"}.`,
+);
+assert(
+  stackedHeaderTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Qty,Description with linebreak,Price,Amount",
+  `Stacked-header table headers were ${JSON.stringify(stackedHeaderTableResult.knowledge.value?.tables[0]?.headers ?? null)}.`,
+);
+assert(
+  stackedHeaderTableResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 2 && cell.columnIndex === 1 && cell.text === "Unicorn",
+  ),
+  "Stacked-header table projection did not preserve the Unicorn row.",
+);
+assert(
+  stackedHeaderTableResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 3 && cell.columnIndex === 2 && cell.text === "(priceless)",
+  ),
+  "Stacked-header table projection did not preserve the final price cell.",
+);
+assert(
+  fieldValueFormResult.knowledge.value?.tables.length === 1,
+  `Field-value form projection emitted ${String(fieldValueFormResult.knowledge.value?.tables.length ?? "missing")} tables.`,
+);
+assert(
+  fieldValueFormResult.knowledge.value?.tables[0]?.heuristic === "field-value-form",
+  `Field-value form heuristic was ${fieldValueFormResult.knowledge.value?.tables[0]?.heuristic ?? "missing"}.`,
+);
+assert(
+  fieldValueFormResult.knowledge.value?.tables[0]?.headers?.join(",") === "Field,Value",
+  `Field-value form headers were ${JSON.stringify(fieldValueFormResult.knowledge.value?.tables[0]?.headers ?? null)}.`,
+);
+assert(
+  fieldValueFormResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 1 && cell.columnIndex === 0 && cell.text === "10. Name of Federal Agency",
+  ),
+  "Field-value form projection did not recover the agency field label.",
+);
+assert(
+  fieldValueFormResult.knowledge.value?.tables[0]?.cells.some(
+    (cell) => cell.rowIndex === 3 && cell.columnIndex === 1 && cell.text === "MBL-SF424Family-AllForms",
+  ),
+  "Field-value form projection did not recover the final field value.",
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(

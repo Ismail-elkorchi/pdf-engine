@@ -71,7 +71,7 @@
     "smoke:compiled:node": "node scripts/smoke/runtime-smoke.mjs ../../dist/index.js node",
     "smoke:compiled:bun": "bun scripts/smoke/runtime-smoke.mjs ../../dist/index.js bun",
     "smoke:node": "npm run build && npm run smoke:compiled:node",
-    "smoke:deno": "deno run --allow-read=./jsr,./src scripts/smoke/runtime-smoke.mjs ../../jsr/mod.ts deno",
+    "smoke:deno": "deno run --allow-read=./jsr,./src,./scripts/smoke/fixtures scripts/smoke/runtime-smoke.mjs ../../jsr/mod.ts deno",
     "smoke:bun": "npm run build && npm run smoke:compiled:bun",
     "smoke:all": "npm run build && npm run smoke:compiled:node && npm run smoke:deno && npm run smoke:compiled:bun && npm run smoke:web && npm run smoke:browser",
     "check:ci": "npm run check && npm run smoke:all && npm run test:fuzz"
