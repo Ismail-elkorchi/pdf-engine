@@ -519,6 +519,46 @@ const coverMatterPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const numberedBodyPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 18 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Introduction) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 686 Tm",
+    "(1. This is a numbered body paragraph that should stay in the body flow.) Tj",
+    "1 0 0 1 72 658 Tm",
+    "(2. Another numbered body paragraph follows without becoming a heading.) Tj",
+    "ET",
+  ].join("\n"),
+]);
+const tableRowRolePdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/F1 16 Tf",
+    "1 0 0 1 72 720 Tm",
+    "(Qty) Tj",
+    "1 0 0 1 180 720 Tm",
+    "(Description) Tj",
+    "1 0 0 1 320 720 Tm",
+    "(Amount) Tj",
+    "/F1 12 Tf",
+    "1 0 0 1 72 692 Tm",
+    "(1) Tj",
+    "1 0 0 1 180 692 Tm",
+    "(Mouse) Tj",
+    "1 0 0 1 320 692 Tm",
+    "($115.00) Tj",
+    "1 0 0 1 72 670 Tm",
+    "(3) Tj",
+    "1 0 0 1 180 670 Tm",
+    "(Unicorn) Tj",
+    "1 0 0 1 320 670 Tm",
+    "($750,000.00) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const regulatoryTextRecoveryPdf = buildPdfWithPageContents([
   [
     "BT",
@@ -1294,6 +1334,20 @@ const coverMatterResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const numberedBodyResult = await engine.run({
+  source: {
+    bytes: encodeText(numberedBodyPdf),
+    fileName: "numbered-body.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const tableRowRoleResult = await engine.run({
+  source: {
+    bytes: encodeText(tableRowRolePdf),
+    fileName: "table-row-role.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const regulatoryTextRecoveryResult = await engine.run({
   source: {
     bytes: encodeText(regulatoryTextRecoveryPdf),
@@ -1483,7 +1537,7 @@ assert(
 );
 assert(
   compactLabelClusterResult.knowledge.value?.extractedText ===
-    "Source: Person Of Impact Page 1 of 1\n\nFirst Name: Last Name: Country: Planet:\n\nOccupation: Date Of Birth:",
+    "Source: Person Of Impact Page 1 of 1\n\nFirst Name: Last Name: Country: Planet: Occupation: Date Of Birth:",
   `Compact label-cluster knowledge text was ${JSON.stringify(compactLabelClusterResult.knowledge.value?.extractedText ?? null)}.`,
 );
 assert(
@@ -1529,6 +1583,22 @@ assert(
 assert(
   coverMatterResult.layout.value?.pages[0]?.blocks[2]?.role === "body",
   `Cover-matter body role was ${coverMatterResult.layout.value?.pages[0]?.blocks[2]?.role ?? "missing"}.`,
+);
+assert(
+  numberedBodyResult.layout.value?.pages[0]?.blocks[0]?.role === "heading",
+  `Numbered-body title role was ${numberedBodyResult.layout.value?.pages[0]?.blocks[0]?.role ?? "missing"}.`,
+);
+assert(
+  numberedBodyResult.layout.value?.pages[0]?.blocks[1]?.role === "body",
+  `Numbered-body first paragraph role was ${numberedBodyResult.layout.value?.pages[0]?.blocks[1]?.role ?? "missing"}.`,
+);
+assert(
+  numberedBodyResult.layout.value?.pages[0]?.blocks[2]?.role === "body",
+  `Numbered-body second paragraph role was ${numberedBodyResult.layout.value?.pages[0]?.blocks[2]?.role ?? "missing"}.`,
+);
+assert(
+  compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role === "body",
+  `Compact label-cluster body role was ${compactLabelClusterResult.layout.value?.pages[0]?.blocks[1]?.role ?? "missing"}.`,
 );
 assert(
   regulatoryTextRecoveryResult.observation.value?.extractedText === "Introduction Readable text",
@@ -1692,6 +1762,18 @@ assert(
     (cell) => cell.rowIndex === 3 && cell.columnIndex === 1 && cell.text === "MBL-SF424Family-AllForms",
   ),
   "Field-value form projection did not recover the final field value.",
+);
+assert(
+  tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Qty")?.role === "heading",
+  `Table-row header role was ${tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Qty")?.role ?? "missing"}.`,
+);
+assert(
+  tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Mouse")?.role === "body",
+  `Table-row first descriptor role was ${tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Mouse")?.role ?? "missing"}.`,
+);
+assert(
+  tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Unicorn")?.role === "body",
+  `Table-row second descriptor role was ${tableRowRoleResult.layout.value?.pages[0]?.blocks.find((block) => block.text === "Unicorn")?.role ?? "missing"}.`,
 );
 assert(repeatedBoundaryResult.status === "partial", `Repeated-boundary layout status was ${repeatedBoundaryResult.status}.`);
 assert(
