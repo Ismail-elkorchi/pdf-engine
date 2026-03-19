@@ -75,6 +75,7 @@ export interface PdfShellAnalysis {
   readonly scanText: string;
   readonly byteLength: number;
   readonly isTruncated: boolean;
+  readonly usedFullStructureScan: boolean;
   readonly fileType: "pdf" | "unknown";
   readonly pdfVersion?: string;
   readonly startXrefOffset?: number;
@@ -193,6 +194,7 @@ export async function analyzePdfShell(
     scanText,
     byteLength,
     isTruncated,
+    usedFullStructureScan: shouldUseFullStructureScan,
     fileType,
     ...(header?.version !== undefined ? { pdfVersion: header.version } : {}),
     ...(startXrefOffset !== undefined ? { startXrefOffset } : {}),
@@ -217,6 +219,7 @@ export async function analyzePdfShell(
       fileType,
       parseCoverage,
       isTruncated,
+      usedFullStructureScan: shouldUseFullStructureScan,
       startXrefResolved,
       hasPages: pageEntries.length > 0,
     }),
@@ -1316,6 +1319,7 @@ function detectRepairState(input: {
   readonly fileType: "pdf" | "unknown";
   readonly parseCoverage: PdfParseCoverage;
   readonly isTruncated: boolean;
+  readonly usedFullStructureScan: boolean;
   readonly startXrefResolved: boolean;
   readonly hasPages: boolean;
 }): PdfRepairState {
@@ -1329,7 +1333,7 @@ function detectRepairState(input: {
     input.parseCoverage.startXref &&
     input.startXrefResolved;
 
-  if (cleanStructure && !input.isTruncated) {
+  if (cleanStructure && (!input.isTruncated || input.usedFullStructureScan)) {
     return "clean";
   }
 

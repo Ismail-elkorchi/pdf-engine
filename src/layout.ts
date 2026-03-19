@@ -67,7 +67,7 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
   }));
 
   return {
-    kind: "shell-layout",
+    kind: "pdf-layout",
     strategy: "line-blocks",
     pages,
     extractedText: serializeLayoutPages(pages),
@@ -2082,11 +2082,15 @@ function shouldTreatRepeatedBoundaryAsBody(
 
   const normalized = normalizeBlockText(block.text);
   if (blockIndex === 0) {
-    return looksLikeFormBoundaryMetadata(normalized);
+    return looksLikeFormBoundaryMetadata(normalized) ||
+      looksLikeShortFieldLabel(normalized, block.fontSize) ||
+      looksLikeFieldLikeClusterText(normalized, block.fontSize);
   }
 
   if (blockIndex === blocks.length - 1) {
-    return looksLikeFormFooterFieldClusterText(normalized);
+    return looksLikeFormFooterFieldClusterText(normalized) ||
+      looksLikeShortFieldLabel(normalized, block.fontSize) ||
+      looksLikeFieldLikeClusterText(normalized, block.fontSize);
   }
 
   return false;
