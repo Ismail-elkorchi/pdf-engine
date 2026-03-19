@@ -274,6 +274,44 @@ function buildDelayedContentPdf() {
   return encodeText(template.replace("__DELAYED_STARTXREF__", String(startXrefOffset)));
 }
 
+function buildStreamBoundaryPdf() {
+  const contentStreamText = [
+    "BT",
+    "(endobj inside stream) Tj",
+    "ET",
+  ].join("\n");
+  const template = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+    "endobj",
+    "4 0 obj",
+    `<< /Length ${String(encodeText(contentStreamText).byteLength)} >>`,
+    "stream",
+    contentStreamText,
+    "endstream",
+    "endobj",
+    "xref",
+    "0 5",
+    "0000000000 65535 f",
+    "trailer",
+    "<< /Root 1 0 R /Size 5 >>",
+    "startxref",
+    "__STREAM_BOUNDARY_STARTXREF__",
+    "%%EOF",
+    "",
+  ].join("\n");
+  const startXrefOffset = template.indexOf("\nxref\n0 5") + 1;
+  assert(startXrefOffset > 0, "Stream-boundary synthetic PDF did not contain an xref section.");
+  return encodeText(template.replace("__STREAM_BOUNDARY_STARTXREF__", String(startXrefOffset)));
+}
+
 function buildObjectStreamMembers(memberTexts) {
   const headerParts = [];
   let bodyOffset = 0;
@@ -385,6 +423,7 @@ const encryptedPdfTemplate = [
 
 const verticalWordColumnsPdf = buildVerticalWordColumnsPdf();
 const delayedContentPdfBytes = buildDelayedContentPdf();
+const streamBoundaryPdfBytes = buildStreamBoundaryPdf();
 
 const flateStreamBytes = decodeBase64("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
 const asciiHexStreamBytes = encodeText("42540A2841534349494845582048656C6C6F2920546A0A4554>");
@@ -1933,6 +1972,13 @@ const delayedContentResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const streamBoundaryResult = await engine.run({
+  source: {
+    bytes: streamBoundaryPdfBytes,
+    fileName: "stream-boundary.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const encodedTextResult = await engine.run({
   source: {
     bytes: encodeText(encodedTextPdf),
@@ -3363,6 +3409,14 @@ assert(
   delayedContentResult.observation.value?.extractedText === "Delayed Content",
   `Unexpected delayed-content extraction: ${JSON.stringify(delayedContentResult.observation.value?.extractedText ?? null)}.`,
 );
+assert(
+  streamBoundaryResult.ir.value?.pages[0]?.contentStreamRefs[0]?.objectNumber === 4,
+  `Stream-boundary IR did not preserve the content stream ref: ${JSON.stringify(streamBoundaryResult.ir.value?.pages[0]?.contentStreamRefs ?? null)}.`,
+);
+assert(
+  streamBoundaryResult.observation.value?.extractedText === "endobj inside stream",
+  `Unexpected stream-boundary extraction: ${JSON.stringify(streamBoundaryResult.observation.value?.extractedText ?? null)}.`,
+);
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
 assert(recoveredResult.admission.value?.repairState === "recovered", `Recovered repair state was ${recoveredResult.admission.value?.repairState ?? "missing"}.`);
@@ -3413,6 +3467,7 @@ console.log(
       chainedText: chainedFilterResult.observation.value?.extractedText ?? null,
       recoveredAdmission: recoveredResult.admission.status,
       recoveredRepairState: recoveredResult.admission.value?.repairState ?? null,
+      streamBoundaryText: streamBoundaryResult.observation.value?.extractedText ?? null,
       ir: result.ir.status,
       observation: result.observation.status,
       observationStrategy: result.observation.value?.strategy ?? null,

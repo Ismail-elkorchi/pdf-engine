@@ -1,3 +1,4 @@
+import { PdfByteCursor } from "./pdf-byte-cursor.ts";
 import { decodePdfStreamBytes } from "./stream-decode.ts";
 
 import type {
@@ -94,23 +95,25 @@ export async function analyzePdfShell(
   source: PdfDocumentSource,
   policy: PdfNormalizedAdmissionPolicy,
 ): Promise<PdfShellAnalysis> {
-  const scanText = decodePdfBytes(source.bytes, policy.resourceBudget.maxScanBytes);
   const byteLength = source.bytes.byteLength;
-  const isTruncated = scanText.length < byteLength;
+  const scanBytes = source.bytes.subarray(0, Math.min(policy.resourceBudget.maxScanBytes, byteLength));
+  const scanText = decodePdfBytes(scanBytes);
+  const isTruncated = scanBytes.byteLength < byteLength;
   const shouldUseFullStructureScan = isTruncated &&
     byteLength <= Math.min(policy.resourceBudget.maxBytes, FULL_STRUCTURE_SCAN_LIMIT);
   const structureText = shouldUseFullStructureScan ? decodePdfBytes(source.bytes) : scanText;
   const tailStartOffset = isTruncated
     ? Math.max(0, byteLength - policy.resourceBudget.maxScanBytes)
     : 0;
-  const tailText = isTruncated ? decodePdfBytes(source.bytes.subarray(tailStartOffset)) : scanText;
-  const header = findPdfHeader(scanText);
+  const tailBytes = isTruncated ? source.bytes.subarray(tailStartOffset) : scanBytes;
+  const tailText = isTruncated ? decodePdfBytes(tailBytes) : scanText;
+  const header = findPdfHeaderInBytes(scanBytes);
   const fileType = header ? "pdf" : "unknown";
   const parsedIndirectObjects = shouldUseFullStructureScan
-    ? parseIndirectObjects(structureText)
+    ? parseIndirectObjectsFromBytes(source.bytes)
     : dedupeIndirectObjectsByRef([
-      ...parseIndirectObjects(scanText),
-      ...(isTruncated ? parseIndirectObjects(tailText, tailStartOffset) : []),
+      ...parseIndirectObjectsFromBytes(scanBytes),
+      ...(isTruncated ? parseIndirectObjectsFromBytes(tailBytes, tailStartOffset) : []),
     ]);
   const provisionalObjectIndex = new Map(
     parsedIndirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const),
@@ -126,8 +129,8 @@ export async function analyzePdfShell(
       ...(isTruncated ? collectCrossReferenceSections(tailText, [], tailStartOffset, false) : []),
     ]);
   const startXrefOffset = shouldUseFullStructureScan
-    ? readStartXrefOffset(structureText)
-    : readStartXrefOffset(tailText) ?? (isTruncated ? readStartXrefOffset(scanText) : undefined);
+    ? readStartXrefOffsetFromBytes(source.bytes)
+    : readStartXrefOffsetFromBytes(tailBytes) ?? (isTruncated ? readStartXrefOffsetFromBytes(scanBytes) : undefined);
   const startXrefResolved = resolveStartXref(startXrefOffset, crossReferenceSections);
   const trailer = shouldUseFullStructureScan
     ? parseTrailerShell(structureText, indirectObjects)
@@ -198,19 +201,20 @@ function decodePdfBytes(bytes: Uint8Array, limit = bytes.byteLength): string {
   return output;
 }
 
-function findPdfHeader(text: string): { version: string; offset: number } | undefined {
+function findPdfHeaderInBytes(bytes: Uint8Array): { version: string; offset: number } | undefined {
+  const cursor = new PdfByteCursor(bytes);
   const marker = "%PDF-";
-  const offset = text.indexOf(marker);
+  const offset = cursor.findSequence(marker, 0);
   if (offset < 0) {
     return undefined;
   }
 
   const versionStart = offset + marker.length;
   let version = "";
-  for (let index = versionStart; index < text.length; index += 1) {
-    const current = text[index] ?? "";
-    if (isDigit(current) || current === ".") {
-      version += current;
+  for (let index = versionStart; index < bytes.byteLength; index += 1) {
+    const current = bytes[index];
+    if ((current !== undefined && current >= 0x30 && current <= 0x39) || current === 0x2e) {
+      version += String.fromCharCode(current);
       continue;
     }
     break;
@@ -219,15 +223,15 @@ function findPdfHeader(text: string): { version: string; offset: number } | unde
   return version.length === 0 ? undefined : { version, offset };
 }
 
-function readStartXrefOffset(text: string): number | undefined {
-  const keywordIndex = text.lastIndexOf("startxref");
+function readStartXrefOffsetFromBytes(bytes: Uint8Array): number | undefined {
+  const cursor = new PdfByteCursor(bytes);
+  const keywordIndex = cursor.findLastKeyword("startxref");
   if (keywordIndex < 0) {
     return undefined;
   }
 
-  const valueStart = skipPdfWhitespaceAndComments(text, keywordIndex + "startxref".length);
-  const integerToken = readUnsignedInteger(text, valueStart);
-  return integerToken?.value;
+  const valueStart = cursor.skipWhitespaceAndComments(keywordIndex + "startxref".length);
+  return cursor.readUnsignedInteger(valueStart)?.value;
 }
 
 function resolveStartXref(
@@ -259,17 +263,18 @@ function summarizeCrossReferenceKind(
   return "unknown";
 }
 
-function parseIndirectObjects(text: string, offsetBase = 0): ParsedIndirectObject[] {
+function parseIndirectObjectsFromBytes(bytes: Uint8Array, offsetBase = 0): ParsedIndirectObject[] {
+  const cursor = new PdfByteCursor(bytes);
   const objects: ParsedIndirectObject[] = [];
 
-  for (let index = 0; index < text.length; index += 1) {
-    const objectShell = readIndirectObject(text, index, offsetBase);
+  for (let index = 0; index < bytes.byteLength; index += 1) {
+    const objectShell = readIndirectObjectFromBytes(cursor, index, offsetBase);
     if (!objectShell) {
       continue;
     }
 
     objects.push(objectShell);
-    index = Math.max(index, objectShell.endOffset - 1);
+    index = Math.max(index, objectShell.endOffset - offsetBase - 1);
   }
 
   return objects;
@@ -296,41 +301,40 @@ function dedupeIndirectObjectsByRef(
   return [...objectByKey.values()].sort((leftObject, rightObject) => leftObject.offset - rightObject.offset);
 }
 
-function readIndirectObject(
-  text: string,
+function readIndirectObjectFromBytes(
+  cursor: PdfByteCursor,
   startIndex: number,
   offsetBase = 0,
 ): ParsedIndirectObject | undefined {
-  if (!isTokenBoundary(text, startIndex - 1)) {
+  if (!cursor.isTokenBoundary(startIndex - 1)) {
     return undefined;
   }
 
-  const objectNumber = readUnsignedInteger(text, startIndex);
+  const objectNumber = cursor.readUnsignedInteger(startIndex);
   if (!objectNumber) {
     return undefined;
   }
 
-  const generationStart = skipPdfWhitespaceAndComments(text, objectNumber.nextIndex);
-  const generationNumber = readUnsignedInteger(text, generationStart);
+  const generationStart = cursor.skipWhitespaceAndComments(objectNumber.nextOffset);
+  const generationNumber = cursor.readUnsignedInteger(generationStart);
   if (!generationNumber) {
     return undefined;
   }
 
-  const keywordStart = skipPdfWhitespaceAndComments(text, generationNumber.nextIndex);
-  if (!matchesPdfKeyword(text, keywordStart, "obj")) {
+  const keywordStart = cursor.skipWhitespaceAndComments(generationNumber.nextOffset);
+  if (!cursor.matchesKeyword(keywordStart, "obj")) {
     return undefined;
   }
 
-  const bodyStart = keywordStart + 3;
-  const endObjectIndex = findPdfKeyword(text, "endobj", bodyStart);
-  if (endObjectIndex < 0) {
+  const bodyStart = cursor.skipWhitespaceAndComments(keywordStart + 3);
+  const objectBody = readIndirectObjectBodyFromBytes(cursor, bodyStart);
+  if (!objectBody) {
     return undefined;
   }
 
-  const bodyText = text.slice(bodyStart, endObjectIndex);
-  const dictionaryText = findFirstDictionaryToken(bodyText);
+  const bodyText = decodePdfBytes(cursor.slice(bodyStart, objectBody.endObjectIndex));
+  const dictionaryText = objectBody.dictionaryText ?? findFirstDictionaryToken(bodyText);
   const dictionaryEntries = dictionaryText ? parseDictionaryEntries(dictionaryText) : new Map<string, string>();
-  const streamInfo = readObjectStream(bodyText, dictionaryEntries);
   const typeName = readNameValue(dictionaryEntries.get("Type"));
   const dictionaryKeys = Array.from(dictionaryEntries.keys());
 
@@ -340,48 +344,95 @@ function readIndirectObject(
       generationNumber: generationNumber.value,
     },
     offset: offsetBase + startIndex,
-    endOffset: offsetBase + endObjectIndex + "endobj".length,
-    hasStream: streamInfo !== undefined,
+    endOffset: offsetBase + objectBody.endObjectIndex + "endobj".length,
+    hasStream: objectBody.streamInfo !== undefined,
     ...(typeName !== undefined ? { typeName } : {}),
     dictionaryKeys,
     ...(bodyText.trim().length > 0 ? { objectValueText: bodyText.trim() } : {}),
-    ...(streamInfo?.dataStartOffset !== undefined ? { streamStartOffset: offsetBase + bodyStart + streamInfo.dataStartOffset } : {}),
-    ...(streamInfo?.dataEndOffset !== undefined ? { streamEndOffset: offsetBase + bodyStart + streamInfo.dataEndOffset } : {}),
-    ...(streamInfo?.lengthRef !== undefined ? { streamLengthRef: streamInfo.lengthRef } : {}),
+    ...(objectBody.streamInfo?.dataStartOffset !== undefined
+      ? { streamStartOffset: offsetBase + objectBody.streamInfo.dataStartOffset }
+      : {}),
+    ...(objectBody.streamInfo?.dataEndOffset !== undefined
+      ? { streamEndOffset: offsetBase + objectBody.streamInfo.dataEndOffset }
+      : {}),
+    ...(objectBody.streamInfo?.lengthRef !== undefined ? { streamLengthRef: objectBody.streamInfo.lengthRef } : {}),
     dictionaryEntries,
   };
 }
 
-function readObjectStream(
-  bodyText: string,
+function readIndirectObjectBodyFromBytes(
+  cursor: PdfByteCursor,
+  bodyStart: number,
+): {
+  endObjectIndex: number;
+  dictionaryText?: string;
+  streamInfo?: {
+    dataStartOffset: number;
+    dataEndOffset?: number;
+    lengthRef?: PdfObjectRef;
+  };
+} | undefined {
+  const firstEndObjectIndex = cursor.findKeyword("endobj", bodyStart);
+  if (firstEndObjectIndex < 0) {
+    return undefined;
+  }
+
+  const streamKeywordIndex = cursor.findKeyword("stream", bodyStart, firstEndObjectIndex);
+  if (streamKeywordIndex < 0 || streamKeywordIndex > firstEndObjectIndex) {
+    return {
+      endObjectIndex: firstEndObjectIndex,
+    };
+  }
+
+  const headerText = decodePdfBytes(cursor.slice(bodyStart, streamKeywordIndex));
+  const dictionaryText = findFirstDictionaryToken(headerText);
+  const dictionaryEntries = dictionaryText ? parseDictionaryEntries(dictionaryText) : new Map<string, string>();
+  const streamInfo = readObjectStreamFromBytes(cursor, streamKeywordIndex, dictionaryEntries);
+  if (!streamInfo) {
+    return {
+      endObjectIndex: firstEndObjectIndex,
+      ...(dictionaryText !== undefined ? { dictionaryText } : {}),
+    };
+  }
+
+  const endObjectIndex = cursor.findKeyword("endobj", streamInfo.dataEndOffset ?? streamInfo.dataStartOffset);
+  if (endObjectIndex < 0) {
+    return undefined;
+  }
+
+  return {
+    endObjectIndex,
+    ...(dictionaryText !== undefined ? { dictionaryText } : {}),
+    streamInfo,
+  };
+}
+
+function readObjectStreamFromBytes(
+  cursor: PdfByteCursor,
+  streamKeywordIndex: number,
   dictionaryEntries: ReadonlyMap<string, string>,
 ): {
   dataStartOffset: number;
   dataEndOffset?: number;
   lengthRef?: PdfObjectRef;
 } | undefined {
-  const streamKeywordIndex = findPdfKeyword(bodyText, "stream", 0);
-  if (streamKeywordIndex < 0) {
-    return undefined;
-  }
-
-  const dataStart = skipStreamLineBreak(bodyText, streamKeywordIndex + "stream".length);
+  const dataStartOffset = cursor.skipStreamLineBreak(streamKeywordIndex + "stream".length);
   const declaredLength = readIntegerValue(dictionaryEntries.get("Length"));
-  if (declaredLength !== undefined && dataStart + declaredLength <= bodyText.length) {
+  if (declaredLength !== undefined && dataStartOffset + declaredLength <= cursor.endOffset) {
     return {
-      dataStartOffset: dataStart,
-      dataEndOffset: dataStart + declaredLength,
+      dataStartOffset,
+      dataEndOffset: dataStartOffset + declaredLength,
     };
   }
 
   const lengthRef = readObjectRefValue(dictionaryEntries.get("Length"));
-  const endStreamIndex = findPdfKeyword(bodyText, "endstream", dataStart);
+  const endStreamIndex = cursor.findKeyword("endstream", dataStartOffset);
   if (endStreamIndex < 0) {
-    return lengthRef ? { dataStartOffset: dataStart, lengthRef } : undefined;
+    return lengthRef ? { dataStartOffset, lengthRef } : undefined;
   }
 
   return {
-    dataStartOffset: dataStart,
+    dataStartOffset,
     dataEndOffset: endStreamIndex,
     ...(lengthRef !== undefined ? { lengthRef } : {}),
   };
@@ -2230,17 +2281,6 @@ function skipPdfComment(text: string, startIndex: number): number {
       }
       break;
     }
-  }
-  return index;
-}
-
-function skipStreamLineBreak(text: string, startIndex: number): number {
-  let index = startIndex;
-  if (text[index] === "\r") {
-    index += 1;
-  }
-  if (text[index] === "\n") {
-    index += 1;
   }
   return index;
 }
