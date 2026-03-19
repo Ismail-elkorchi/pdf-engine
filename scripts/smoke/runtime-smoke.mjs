@@ -2522,6 +2522,14 @@ const observationWithPassword = await engine.observe({
   },
   passwordProvider: () => encryptedStandardTextFixture.userPassword,
 });
+const admissionWithPassword = await engine.admit({
+  source: {
+    bytes: encryptedStandardTextFixtureBytes,
+    fileName: encryptedStandardTextFixture.fileName,
+    mediaType: "application/pdf",
+  },
+  passwordProvider: () => encryptedStandardTextFixture.userPassword,
+});
 
 assert(result.runtime.kind === expectedRuntime, `Expected runtime ${expectedRuntime} but received ${result.runtime.kind}.`);
 assert(engine.identity.supportedRuntimes.includes(expectedRuntime), `Engine identity does not claim support for runtime ${expectedRuntime}.`);
@@ -3640,6 +3648,38 @@ assert(
 assert(
   !observationWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
   "Encrypted observe with password still surfaced decryption-not-implemented.",
+);
+const encryptedFeatureSignals = admissionWithPassword.value?.featureSignals ?? [];
+const encryptionSignal = encryptedFeatureSignals.find((signal) => signal.kind === "encryption");
+const objectStreamSignal = encryptedFeatureSignals.find((signal) => signal.kind === "object-streams");
+const xrefStreamSignal = encryptedFeatureSignals.find((signal) => signal.kind === "xref-streams");
+assert(
+  admissionWithPassword.status === "completed",
+  `Encrypted admission status with password was ${admissionWithPassword.status}.`,
+);
+assert(
+  encryptionSignal?.detected === true && encryptionSignal.evidenceSource === "object",
+  "Encrypted admission did not use parsed object evidence for encryption.",
+);
+assert(
+  encryptionSignal?.objectRef?.objectNumber === 12,
+  `Encrypted admission encryption object ref was ${encryptionSignal?.objectRef?.objectNumber ?? "missing"}.`,
+);
+assert(
+  objectStreamSignal?.detected === true && objectStreamSignal.evidenceSource === "object",
+  "Encrypted admission did not use parsed object evidence for object streams.",
+);
+assert(
+  objectStreamSignal?.objectRef?.objectNumber === 8,
+  `Encrypted admission object-stream ref was ${objectStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
+);
+assert(
+  xrefStreamSignal?.detected === true && xrefStreamSignal.evidenceSource === "object",
+  "Encrypted admission did not use parsed object evidence for xref streams.",
+);
+assert(
+  xrefStreamSignal?.objectRef?.objectNumber === 13,
+  `Encrypted admission xref-stream ref was ${xrefStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
 );
 await engine.dispose();
 

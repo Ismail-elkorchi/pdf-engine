@@ -637,6 +637,15 @@ async function runBrowserSmoke(baseUrl, browserName) {
           },
           passwordProvider: () => encryptedStandardTextFixture.userPassword
         });
+        const browserEncryptedAdmission = await engine.admit({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextFixtureBytes,
+            fileName: encryptedStandardTextFixture.fileName,
+            mediaType: "application/pdf"
+          },
+          passwordProvider: () => encryptedStandardTextFixture.userPassword
+        });
         const viewerContainer = globalThis.document.createElement("div");
         globalThis.document.body.append(viewerContainer);
 
@@ -725,6 +734,10 @@ async function runBrowserSmoke(baseUrl, browserName) {
         viewerHandle.destroy();
         const viewerDestroyed = viewerContainer.childElementCount === 0;
         viewerContainer.remove();
+        const browserEncryptedFeatureSignals = browserEncryptedAdmission.value?.featureSignals ?? [];
+        const browserEncryptionSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "encryption");
+        const browserObjectStreamSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "object-streams");
+        const browserXrefStreamSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "xref-streams");
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
@@ -829,6 +842,19 @@ async function runBrowserSmoke(baseUrl, browserName) {
           encryptedText: browserEncryptedWithPassword.value?.extractedText === encryptedStandardTextFixture.expectedText,
           encryptedLimitCleared:
             !browserEncryptedWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
+          encryptedAdmission: browserEncryptedAdmission.status === "completed",
+          encryptedObjectEvidence:
+            browserEncryptionSignal?.detected === true &&
+            browserEncryptionSignal.evidenceSource === "object" &&
+            browserEncryptionSignal.objectRef?.objectNumber === 12,
+          objectStreamEvidence:
+            browserObjectStreamSignal?.detected === true &&
+            browserObjectStreamSignal.evidenceSource === "object" &&
+            browserObjectStreamSignal.objectRef?.objectNumber === 8,
+          xrefStreamEvidence:
+            browserXrefStreamSignal?.detected === true &&
+            browserXrefStreamSignal.evidenceSource === "object" &&
+            browserXrefStreamSignal.objectRef?.objectNumber === 13,
           viewerInitialPage: initialViewerLabel === "Page 2 of 2",
           viewerInitialBlocks: initialViewerBlocks.some((text) => text.includes("Second Page Overview")),
           viewerInitialButtons: initialPreviousDisabled === false && initialNextDisabled === true,
