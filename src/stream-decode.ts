@@ -1,3 +1,7 @@
+import { decodeCcittFaxBytes } from "./ccitt-fax-decode.ts";
+import { decodeLzwBytes } from "./lzw-decode.ts";
+import { applyPdfStreamPredictor } from "./pdf-stream-predictor.ts";
+
 import type { PdfStreamDecodeState } from "./contracts.ts";
 
 export interface PdfDecodedStreamResult {
@@ -13,7 +17,9 @@ interface NodeZlibModule {
 const PDF_FILTER_NAME_ALIASES = new Map<string, string>([
   ["AHx", "ASCIIHexDecode"],
   ["A85", "ASCII85Decode"],
+  ["CCF", "CCITTFaxDecode"],
   ["Fl", "FlateDecode"],
+  ["LZW", "LZWDecode"],
   ["RL", "RunLengthDecode"],
 ]);
 
@@ -44,8 +50,10 @@ export function readPdfStreamFilters(value: string | undefined): readonly string
 export async function decodePdfStreamBytes(
   rawStreamBytes: Uint8Array | undefined,
   filterValue: string | undefined,
+  decodeParamsValue?: string,
 ): Promise<PdfDecodedStreamResult> {
   const filterNames = readPdfStreamFilters(filterValue);
+  const decodeParamValues = readPdfStreamDecodeParamValues(decodeParamsValue, filterNames.length);
   if (rawStreamBytes === undefined) {
     return {
       state: "failed",
@@ -64,8 +72,8 @@ export async function decodePdfStreamBytes(
   try {
     let decodedBytes = Uint8Array.from(rawStreamBytes);
 
-    for (const filterName of filterNames) {
-      const stepBytes = await decodePdfFilterBytes(decodedBytes, filterName);
+    for (const [index, filterName] of filterNames.entries()) {
+      const stepBytes = await decodePdfFilterBytes(decodedBytes, filterName, decodeParamValues[index]);
       if (stepBytes === undefined) {
         return {
           state: "unsupported-filter",
@@ -94,6 +102,33 @@ function readNameValue(value: string): string | undefined {
   return nameToken?.name;
 }
 
+function readPdfStreamDecodeParamValues(
+  value: string | undefined,
+  filterCount: number,
+): readonly (string | undefined)[] {
+  if (filterCount === 0) {
+    return [];
+  }
+
+  if (!value) {
+    return new Array<string | undefined>(filterCount).fill(undefined);
+  }
+
+  const trimmed = value.trim();
+  if (trimmed.startsWith("[")) {
+    const arrayItems = readPdfArrayItems(trimmed);
+    return Array.from({ length: filterCount }, (_, index) => {
+      const item = arrayItems[index]?.trim();
+      if (!item || item === "null") {
+        return undefined;
+      }
+      return item;
+    });
+  }
+
+  return [trimmed, ...new Array<string | undefined>(Math.max(0, filterCount - 1)).fill(undefined)];
+}
+
 function readPdfNameToken(
   text: string,
   startIndex: number,
@@ -117,23 +152,325 @@ function readPdfNameToken(
 async function decodePdfFilterBytes(
   rawStreamBytes: Uint8Array,
   filterName: string,
+  decodeParamsValue: string | undefined,
 ): Promise<Uint8Array | undefined> {
+  const decodeParamEntries = readDictionaryEntries(decodeParamsValue);
   switch (normalizePdfFilterName(filterName)) {
     case "ASCIIHexDecode":
       return decodeAsciiHexBytes(rawStreamBytes);
     case "ASCII85Decode":
       return decodeAscii85Bytes(rawStreamBytes);
     case "FlateDecode":
-      return await inflateStreamBytes(rawStreamBytes);
+      return applyPredictorIfNeeded(await inflateStreamBytes(rawStreamBytes), decodeParamsValue);
+    case "LZWDecode":
+      return applyPredictorIfNeeded(
+        decodeLzwBytes(rawStreamBytes, { earlyChange: readIntegerValue(decodeParamEntries.get("EarlyChange")) ?? 1 }),
+        decodeParamsValue,
+      );
     case "RunLengthDecode":
       return decodeRunLengthBytes(rawStreamBytes);
+    case "CCITTFaxDecode":
+      return decodeCcittFaxBytes(rawStreamBytes, {
+        k: readIntegerValue(decodeParamEntries.get("K")) ?? 0,
+        endOfLine: readBooleanValue(decodeParamEntries.get("EndOfLine")) ?? false,
+        encodedByteAlign: readBooleanValue(decodeParamEntries.get("EncodedByteAlign")) ?? false,
+        columns: readIntegerValue(decodeParamEntries.get("Columns")) ?? 1728,
+        rows: readIntegerValue(decodeParamEntries.get("Rows")) ?? 0,
+        endOfBlock: readBooleanValue(decodeParamEntries.get("EndOfBlock")) ?? true,
+        blackIs1: readBooleanValue(decodeParamEntries.get("BlackIs1")) ?? false,
+      });
     default:
       return undefined;
   }
 }
 
+function applyPredictorIfNeeded(
+  decodedBytes: Uint8Array,
+  decodeParamsValue: string | undefined,
+): Uint8Array {
+  const dictionaryEntries = readDictionaryEntries(decodeParamsValue);
+  const predictor = readIntegerValue(dictionaryEntries.get("Predictor")) ?? 1;
+  if (predictor <= 1) {
+    return decodedBytes;
+  }
+
+  return applyPdfStreamPredictor(decodedBytes, {
+    predictor,
+    colors: readIntegerValue(dictionaryEntries.get("Colors")) ?? 1,
+    bitsPerComponent:
+      readIntegerValue(dictionaryEntries.get("BitsPerComponent")) ?? readIntegerValue(dictionaryEntries.get("BPC")) ?? 8,
+    columns: readIntegerValue(dictionaryEntries.get("Columns")) ?? 1,
+  });
+}
+
 function normalizePdfFilterName(filterName: string): string {
   return PDF_FILTER_NAME_ALIASES.get(filterName) ?? filterName;
+}
+
+function readDictionaryEntries(value: string | undefined): ReadonlyMap<string, string> {
+  if (!value) {
+    return new Map<string, string>();
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("<<") || !trimmed.endsWith(">>")) {
+    return new Map<string, string>();
+  }
+
+  const innerText = trimmed.slice(2, -2);
+  const entries = new Map<string, string>();
+  let index = 0;
+
+  while (index < innerText.length) {
+    index = skipPdfWhitespaceAndComments(innerText, index);
+    const keyToken = readPdfNameToken(innerText, index);
+    if (!keyToken) {
+      index += 1;
+      continue;
+    }
+
+    const valueStart = skipPdfWhitespaceAndComments(innerText, keyToken.nextIndex);
+    const valueToken = readPdfValueToken(innerText, valueStart);
+    if (!valueToken) {
+      entries.set(keyToken.name, "");
+      index = keyToken.nextIndex;
+      continue;
+    }
+
+    entries.set(keyToken.name, valueToken.token.trim());
+    index = valueToken.nextIndex;
+  }
+
+  return entries;
+}
+
+function readPdfArrayItems(value: string): readonly string[] {
+  if (!value.startsWith("[") || !value.endsWith("]")) {
+    return [];
+  }
+
+  const items: string[] = [];
+  let index = 1;
+  while (index < value.length - 1) {
+    index = skipPdfWhitespaceAndComments(value, index);
+    const token = readPdfValueToken(value, index);
+    if (!token) {
+      index += 1;
+      continue;
+    }
+
+    items.push(token.token);
+    index = token.nextIndex;
+  }
+
+  return items;
+}
+
+function readPdfValueToken(
+  text: string,
+  startIndex: number,
+): {
+  readonly token: string;
+  readonly nextIndex: number;
+} | undefined {
+  const current = text[startIndex];
+  if (current === undefined) {
+    return undefined;
+  }
+
+  if (current === "<" && text[startIndex + 1] === "<") {
+    return readPdfDictionaryToken(text, startIndex);
+  }
+  if (current === "[") {
+    return readPdfArrayToken(text, startIndex);
+  }
+  if (current === "(") {
+    return readPdfLiteralToken(text, startIndex);
+  }
+  if (current === "<") {
+    return readPdfHexStringToken(text, startIndex);
+  }
+  if (current === "/") {
+    const nameToken = readPdfNameToken(text, startIndex);
+    return nameToken ? { token: text.slice(startIndex, nameToken.nextIndex), nextIndex: nameToken.nextIndex } : undefined;
+  }
+
+  const endIndex = readUntilDelimiter(text, startIndex);
+  if (endIndex <= startIndex) {
+    return undefined;
+  }
+
+  return {
+    token: text.slice(startIndex, endIndex),
+    nextIndex: endIndex,
+  };
+}
+
+function readPdfDictionaryToken(
+  text: string,
+  startIndex: number,
+): {
+  readonly token: string;
+  readonly nextIndex: number;
+} | undefined {
+  if (text[startIndex] !== "<" || text[startIndex + 1] !== "<") {
+    return undefined;
+  }
+
+  let depth = 1;
+  for (let index = startIndex + 2; index < text.length; index += 1) {
+    const current = text[index] ?? "";
+    const next = text[index + 1] ?? "";
+
+    if (current === "%") {
+      index = skipPdfComment(text, index);
+      continue;
+    }
+
+    if (current === "(") {
+      const literalToken = readPdfLiteralToken(text, index);
+      if (!literalToken) {
+        return undefined;
+      }
+      index = literalToken.nextIndex - 1;
+      continue;
+    }
+
+    if (current === "<" && next === "<") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+
+    if (current === ">" && next === ">") {
+      depth -= 1;
+      index += 1;
+      if (depth === 0) {
+        return {
+          token: text.slice(startIndex, index + 1),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfArrayToken(
+  text: string,
+  startIndex: number,
+): {
+  readonly token: string;
+  readonly nextIndex: number;
+} | undefined {
+  if (text[startIndex] !== "[") {
+    return undefined;
+  }
+
+  let depth = 1;
+  for (let index = startIndex + 1; index < text.length; index += 1) {
+    const current = text[index] ?? "";
+
+    if (current === "%") {
+      index = skipPdfComment(text, index);
+      continue;
+    }
+
+    if (current === "(") {
+      const literalToken = readPdfLiteralToken(text, index);
+      if (!literalToken) {
+        return undefined;
+      }
+      index = literalToken.nextIndex - 1;
+      continue;
+    }
+
+    if (current === "<" && text[index + 1] === "<") {
+      const dictionaryToken = readPdfDictionaryToken(text, index);
+      if (!dictionaryToken) {
+        return undefined;
+      }
+      index = dictionaryToken.nextIndex - 1;
+      continue;
+    }
+
+    if (current === "[") {
+      depth += 1;
+      continue;
+    }
+
+    if (current === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          token: text.slice(startIndex, index + 1),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfHexStringToken(
+  text: string,
+  startIndex: number,
+): {
+  readonly token: string;
+  readonly nextIndex: number;
+} | undefined {
+  if (text[startIndex] !== "<" || text[startIndex + 1] === "<") {
+    return undefined;
+  }
+
+  for (let index = startIndex + 1; index < text.length; index += 1) {
+    if (text[index] === ">") {
+      return {
+        token: text.slice(startIndex, index + 1),
+        nextIndex: index + 1,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfLiteralToken(
+  text: string,
+  startIndex: number,
+): {
+  readonly token: string;
+  readonly nextIndex: number;
+} | undefined {
+  if (text[startIndex] !== "(") {
+    return undefined;
+  }
+
+  let depth = 0;
+  for (let index = startIndex; index < text.length; index += 1) {
+    const current = text[index] ?? "";
+    if (current === "\\") {
+      index += 1;
+      continue;
+    }
+    if (current === "(") {
+      depth += 1;
+      continue;
+    }
+    if (current === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          token: text.slice(startIndex, index + 1),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
 }
 
 function decodeAsciiHexBytes(rawStreamBytes: Uint8Array): Uint8Array {
@@ -332,6 +669,67 @@ function readNodeBuiltinModule(moduleName: string): NodeZlibModule | undefined {
   }
 
   return builtinModule as NodeZlibModule;
+}
+
+function readIntegerValue(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  return /^-?\d+$/u.test(trimmed) ? Number(trimmed) : undefined;
+}
+
+function readBooleanValue(value: string | undefined): boolean | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  return undefined;
+}
+
+function readUntilDelimiter(text: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < text.length && !isPdfDelimiter(text[index] ?? "")) {
+    index += 1;
+  }
+  return index;
+}
+
+function skipPdfWhitespaceAndComments(text: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < text.length) {
+    const current = text[index] ?? "";
+    if (isPdfWhitespace(current)) {
+      index += 1;
+      continue;
+    }
+    if (current === "%") {
+      index = skipPdfComment(text, index);
+      continue;
+    }
+    break;
+  }
+  return index;
+}
+
+function skipPdfComment(text: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < text.length) {
+    const current = text[index] ?? "";
+    if (current === "\n" || current === "\r") {
+      break;
+    }
+    index += 1;
+  }
+  return index;
 }
 
 function isPdfDelimiter(value: string): boolean {

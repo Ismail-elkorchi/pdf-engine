@@ -186,7 +186,7 @@ function buildPdfWithPageContents(pageContents) {
   return template.replace("__STARTXREF__", String(xrefOffset));
 }
 
-function buildFilteredContentStreamPdfBytes({ streamBytes, filterValue }) {
+function buildFilteredContentStreamPdfBytes({ streamBytes, filterValue, decodeParamsValue }) {
   const prefix = [
     "%PDF-1.4",
     "1 0 obj",
@@ -199,7 +199,7 @@ function buildFilteredContentStreamPdfBytes({ streamBytes, filterValue }) {
     "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
     "endobj",
     "4 0 obj",
-    `<< /Length ${String(streamBytes.byteLength)} /Filter ${filterValue} >>`,
+    `<< /Length ${String(streamBytes.byteLength)} /Filter ${filterValue}${typeof decodeParamsValue === "string" ? ` /DecodeParms ${decodeParamsValue}` : ""} >>`,
     "stream",
   ].join("\n") + "\n";
   const middle = "\nendstream\nendobj\n";
@@ -409,6 +409,10 @@ const viewerModuleSpecifier = resolveViewerModuleSpecifier(moduleSpecifier);
 assert(typeof viewerModuleSpecifier === "string", "Module path does not support resolving the viewer entrypoint.");
 const viewerModuleNamespace = await import(viewerModuleSpecifier);
 assert(typeof viewerModuleNamespace.renderPdfViewer === "function", "Viewer module does not export renderPdfViewer().");
+const streamDecodeModuleSpecifier = resolveSiblingModuleSpecifier(moduleSpecifier, "stream-decode");
+assert(typeof streamDecodeModuleSpecifier === "string", "Module path does not support resolving the stream decoder entrypoint.");
+const streamDecodeModuleNamespace = await import(streamDecodeModuleSpecifier);
+assert(typeof streamDecodeModuleNamespace.decodePdfStreamBytes === "function", "Stream decoder module does not export decodePdfStreamBytes().");
 const stackedHeaderTableFixtureBytes = decodeBase64(
   await readSmokeAssetText(new URL("./fixtures/stacked-header-table.base64.txt", import.meta.url)),
 );
@@ -417,11 +421,18 @@ const fieldValueFormFixtureBytes = decodeBase64(
 );
 
 function resolveViewerModuleSpecifier(specifier) {
+  return resolveSiblingModuleSpecifier(specifier, "viewer");
+}
+
+function resolveSiblingModuleSpecifier(specifier, fileStem) {
   if (specifier.endsWith("/index.js")) {
-    return specifier.replace(/\/index\.js$/u, "/viewer.js");
+    return specifier.replace(/\/index\.js$/u, `/${fileStem}.js`);
+  }
+  if (specifier.endsWith("/jsr/mod.ts") && fileStem === "stream-decode") {
+    return specifier.replace(/\/jsr\/mod\.ts$/u, "/src/stream-decode.ts");
   }
   if (specifier.endsWith("/mod.ts")) {
-    return specifier.replace(/\/mod\.ts$/u, "/viewer.ts");
+    return specifier.replace(/\/mod\.ts$/u, `/${fileStem}.ts`);
   }
   return undefined;
 }
@@ -1599,18 +1610,29 @@ const compactSpacingEncodedTextPdfTemplate = [
 const toUnicodeCMapFlateBytes = decodeBase64(
   "eJxdkM1qxCAQx+8+xRy3h0UT2qUHCZSUQA79oGkfwOgkFRoVYw55+0502UIPOr9h5j9fvO2fe2cT8Pfo9YAJJutMxNVvUSOMOFvHqhqM1enq5V8vKjBO4mFfEy69mzxICfyDgmuKO5yejB/xDvhbNBitm+H01Q7kD1sIP7igSyCgacDgRIVeVHhVCwLPsnNvKG7TfibNX8bnHhDq7FdlGO0NrkFpjMrNyKQQDciuaxg68y92KYpx0t8qMnn/SJlCkGHy8pCZDHFbuD24K0z1ZC0ykyGuCle5z7Xi0fE4ym0VvcVIW+TL5fGPwa3D23GDD4cqv18KDXoH",
 );
+const predictorContentFlateBytes = decodeBase64("eJxjdBLaJqeh9Pk/6y/B38zrNGTZGZh3fTcRW2DNDwCEaAlW");
+const predictorChainAscii85Bytes = decodeBase64("R2FyOGMnJiJcMVUlSi5GbFMkKjNiai4pcmZicDAkSTVfYUJAKksyXktQMVptfj4=");
+const toUnicodeCMapLzwBytes = decodeBase64(
+  "gAvIZJIhJNxpOggF5QORvMZTMsJMxpNxkORlOZvOpyMZlEBiMpnigKGIyEBkNJjhMgkRuBUsihjNphOAKgUEKZ5OZ0MptgxmN4gHg8hRSkJpnZyPIgFBBMhvkAphRPORkMpyihnphVIZTqQvKZ1OBwNk9MpuhIwEA+H0nMpmmxDJs0JxhNseF9OqBlFpJq1ohB5FtcKduuECuZwKh5OEek1WuAxj9HNxjN9WOZwMMdORhNxnMoKHgwGFtHhmMw+BVnMmWzGazme0AKk0wNxiMxjNBhOWiGQx02k3+qHg0HHBGHG1Ws3G63kkyct3Gdz+hHg2GumG2poWk7HLivT2Wh1kymgKuV0u0eMcbi9olEqhXpOGGilXjEajkeOBvmrWNWiqAg==",
+);
 const cidToUnicodeCMapFlateBytes = decodeBase64(
   "SIlU0U1PhDAQBuA7v2KOGg+lwK6SEBLtQsLBj7joHdoBSaQ0BQ7776UdXOMByNNh+vGWiepU6WEB9mYnecYFukEri/O0WonQYj9o4BGoQS67/FuOjQG2NZ8v84JjpbsJsixg71txXuwFbuqa34W3wF6tQjvofhtJoo/PbeS8GvONI+oFQshzUNgFTDw35qUZEZhv/BusLwYh8ub72pPC2TQSbaN7hCwMwyR3HxnngFr9rwc8pra2k1+NDX5/L4uU50489jqVpINXce8VPTgJ8eQVR74mEhLNIgRJeZVUS2iWlHSgvsfC60gqSC13Wz9GtJ4kxbtiUpoH27H2/bsDuvCvgcnV2i1Lf0M+MZfVoPF6iWYyLhb3BD8CDAAT945ACg==",
 );
 const malformedToUnicodeBytes = encodeText("not-deflate");
-const unsupportedToUnicodeBytes = encodeText("BT /F1 12 Tf <48656C6C6F21> Tj ET");
+const unsupportedToUnicodeBytes = encodeText("JPXDecode is still unsupported.");
+const ccittGroup4Bytes = decodeBase64("JqiOiOglABAB");
 const toUnicodeFlateStreamObject = joinBytes([
   encodeText(`<< /Length ${String(toUnicodeCMapFlateBytes.byteLength)} /Filter /FlateDecode >>\nstream\n`),
   toUnicodeCMapFlateBytes,
   encodeText("\nendstream\nendobj\n"),
 ]);
+const toUnicodeLzwStreamObject = joinBytes([
+  encodeText(`<< /Length ${String(toUnicodeCMapLzwBytes.byteLength)} /Filter /LZWDecode >>\nstream\n`),
+  toUnicodeCMapLzwBytes,
+  encodeText("\nendstream\nendobj\n"),
+]);
 const toUnicodeUnsupportedStreamObject = joinBytes([
-  encodeText(`<< /Length ${String(unsupportedToUnicodeBytes.byteLength)} /Filter /LZWDecode >>\nstream\n`),
+  encodeText(`<< /Length ${String(unsupportedToUnicodeBytes.byteLength)} /Filter /JPXDecode >>\nstream\n`),
   unsupportedToUnicodeBytes,
   encodeText("\nendstream\nendobj\n"),
 ]);
@@ -1732,6 +1754,11 @@ const chainedFilterPdfBytes = buildFilteredContentStreamPdfBytes({
   streamBytes: chainedFilterStreamBytes,
   filterValue: "[/ASCII85Decode /FlateDecode]",
 });
+const predictorPdfBytes = buildFilteredContentStreamPdfBytes({
+  streamBytes: predictorContentFlateBytes,
+  filterValue: "/FlateDecode",
+  decodeParamsValue: "<< /Predictor 12 /Colors 1 /BitsPerComponent 8 /Columns 26 >>",
+});
 const indirectLengthFlateXrefOffset =
   encodeText(indirectLengthFlatePdfPrefix).byteLength +
   flateStreamBytes.byteLength +
@@ -1805,6 +1832,13 @@ const toUnicodeFlatePdfBytes = buildPdfWithFontResourceStream({
     "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
   ],
   resourceStreamObject: toUnicodeFlateStreamObject,
+});
+const toUnicodeLzwPdfBytes = buildPdfWithFontResourceStream({
+  contentStreamText: "BT\n/F1 12 Tf\n<48656C6C6F21> Tj\nET",
+  fontDictionaryLines: [
+    "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /ToUnicode 6 0 R >>",
+  ],
+  resourceStreamObject: toUnicodeLzwStreamObject,
 });
 const toUnicodeUnsupportedPdfBytes = buildPdfWithFontResourceStream({
   contentStreamText: "BT\n/F1 12 Tf\n<48656C6C6F21> Tj\nET",
@@ -1978,6 +2012,20 @@ const malformedPdf = [
 
 const engine = moduleNamespace.createPdfEngine();
 assert(typeof engine.dispose === "function", "Engine does not expose dispose().");
+const chainedPredictorDecodeResult = await streamDecodeModuleNamespace.decodePdfStreamBytes(
+  predictorChainAscii85Bytes,
+  "[/ASCII85Decode /FlateDecode]",
+  "[null << /Predictor 12 /Colors 1 /BitsPerComponent 8 /Columns 26 >>]",
+);
+const ccittDecodeResult = await streamDecodeModuleNamespace.decodePdfStreamBytes(
+  ccittGroup4Bytes,
+  "/CCITTFaxDecode",
+  "<< /K -1 /Columns 8 /Rows 1 /EndOfBlock false /BlackIs1 true >>",
+);
+const lzwDecodeResult = await streamDecodeModuleNamespace.decodePdfStreamBytes(
+  toUnicodeCMapLzwBytes,
+  "/LZWDecode",
+);
 const result = await engine.run({
   source: {
     bytes: encodeText(syntheticPdf),
@@ -2017,6 +2065,13 @@ const chainedFilterResult = await engine.run({
   source: {
     bytes: chainedFilterPdfBytes,
     fileName: "ascii85-flate.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const predictorResult = await engine.run({
+  source: {
+    bytes: predictorPdfBytes,
+    fileName: "flate-predictor.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2122,6 +2177,13 @@ const toUnicodeFlateResult = await engine.run({
   source: {
     bytes: toUnicodeFlatePdfBytes,
     fileName: "tounicode-flate.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const toUnicodeLzwResult = await engine.run({
+  source: {
+    bytes: toUnicodeLzwPdfBytes,
+    fileName: "tounicode-lzw.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -3134,6 +3196,38 @@ assert(
   `Unexpected chained-filter extracted text: ${JSON.stringify(chainedFilterResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(
+  predictorResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamDecodeState === "decoded",
+  "Predictor stream was not marked as decoded.",
+);
+assert(
+  predictorResult.observation.value?.extractedText === "Predictor Hello",
+  `Unexpected predictor extracted text: ${JSON.stringify(predictorResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  chainedPredictorDecodeResult.state === "decoded",
+  `Chained predictor decoder state was ${chainedPredictorDecodeResult.state}.`,
+);
+assert(
+  new TextDecoder().decode(chainedPredictorDecodeResult.decodedBytes ?? new Uint8Array()) === "BT\n(Predictor Hello) Tj\nET",
+  "Chained predictor decoder did not reconstruct the original content stream bytes.",
+);
+assert(
+  ccittDecodeResult.state === "decoded",
+  `CCITT decoder state was ${ccittDecodeResult.state}.`,
+);
+assert(
+  Array.from(ccittDecodeResult.decodedBytes ?? []).map((byte) => byte.toString(16).padStart(2, "0")).join("") === "aa",
+  "CCITT decoder did not recover the expected packed bitmap byte.",
+);
+assert(
+  lzwDecodeResult.state === "decoded",
+  `LZW decoder state was ${lzwDecodeResult.state}.`,
+);
+assert(
+  new TextDecoder().decode(lzwDecodeResult.decodedBytes ?? new Uint8Array()).includes("beginbfchar"),
+  "LZW decoder did not recover the expected ToUnicode CMap text.",
+);
+assert(
   indirectLengthFlateResult.ir.value?.indirectObjects[3]?.streamDecodeState === "decoded",
   "Indirect-length flate stream was not marked as decoded.",
 );
@@ -3196,6 +3290,22 @@ assert(
 assert(
   toUnicodeFlateResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind === "hex",
   `ToUnicode flate observation text encoding kind was ${toUnicodeFlateResult.observation.value?.pages[0]?.runs[0]?.textEncodingKind ?? "missing"}.`,
+);
+assert(
+  toUnicodeLzwResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
+  "LZW ToUnicode stream role was not classified as tounicode.",
+);
+assert(
+  toUnicodeLzwResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState === "decoded",
+  `LZW ToUnicode stream decode state was ${toUnicodeLzwResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamDecodeState ?? "missing"}.`,
+);
+assert(
+  toUnicodeLzwResult.observation.value?.extractedText === "Hello!",
+  `Unexpected LZW ToUnicode extracted text: ${JSON.stringify(toUnicodeLzwResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  !toUnicodeLzwResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+  "LZW ToUnicode observation still reported font-unicode-mapping-not-implemented.",
 );
 assert(
   toUnicodeUnsupportedResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 6)?.streamRole === "tounicode",
