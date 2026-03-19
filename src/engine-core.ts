@@ -283,7 +283,7 @@ async function inspectSource(
     );
   }
 
-  const emptyPasswordAttempt = preparePdfStandardPasswordSecurity({
+  const emptyPasswordAttempt = await preparePdfStandardPasswordSecurity({
     documentId: analysis.documentId,
     encryptDictionaryEntries: encryptObject.dictionaryEntries,
     encryptObjectRef: encryptObject.ref,
@@ -313,7 +313,7 @@ async function inspectSource(
     return buildInspection(analysis, policy, "password-required");
   }
 
-  const suppliedPasswordAttempt = preparePdfStandardPasswordSecurity({
+  const suppliedPasswordAttempt = await preparePdfStandardPasswordSecurity({
     documentId: analysis.documentId,
     encryptDictionaryEntries: encryptObject.dictionaryEntries,
     encryptObjectRef: encryptObject.ref,
