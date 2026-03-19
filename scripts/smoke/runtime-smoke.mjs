@@ -312,6 +312,74 @@ function buildStreamBoundaryPdf() {
   return encodeText(template.replace("__STREAM_BOUNDARY_STARTXREF__", String(startXrefOffset)));
 }
 
+function buildIncrementalUpdatePdf() {
+  const contentStreamText = [
+    "BT",
+    "(First Revision) Tj",
+    "ET",
+  ].join("\n");
+  const baseRevisionTemplate = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+    "endobj",
+    "4 0 obj",
+    `<< /Length ${String(encodeText(contentStreamText).byteLength)} >>`,
+    "stream",
+    contentStreamText,
+    "endstream",
+    "endobj",
+    "xref",
+    "0 5",
+    "0000000000 65535 f",
+    "0000000000 00000 n",
+    "0000000000 00000 n",
+    "0000000000 00000 n",
+    "0000000000 00000 n",
+    "trailer",
+    "<< /Root 1 0 R /Size 5 >>",
+    "startxref",
+    "__BASE_STARTXREF__",
+    "%%EOF",
+    "",
+  ].join("\n");
+  const baseXrefOffset = baseRevisionTemplate.indexOf("\nxref\n0 5") + 1;
+  assert(baseXrefOffset > 0, "Incremental-update base revision did not contain an xref section.");
+  const baseRevision = baseRevisionTemplate.replace("__BASE_STARTXREF__", String(baseXrefOffset));
+  const incrementalRevisionTemplate = [
+    "5 0 obj",
+    "<< /Producer (Incremental Chain) >>",
+    "endobj",
+    "xref",
+    "5 1",
+    "0000000000 00000 n",
+    "trailer",
+    `<< /Root 1 0 R /Size 6 /Info 5 0 R /Prev ${String(baseXrefOffset)} >>`,
+    "startxref",
+    "__UPDATED_STARTXREF__",
+    "%%EOF",
+    "",
+  ].join("\n");
+  const incrementalXrefOffset = encodeText(baseRevision).byteLength + incrementalRevisionTemplate.indexOf("\nxref\n5 1") + 1;
+  assert(incrementalXrefOffset > 0, "Incremental-update revision did not contain a second xref section.");
+  const incrementalRevision = incrementalRevisionTemplate.replace(
+    "__UPDATED_STARTXREF__",
+    String(incrementalXrefOffset),
+  );
+
+  return {
+    bytes: encodeText(`${baseRevision}${incrementalRevision}`),
+    baseXrefOffset,
+    incrementalXrefOffset,
+  };
+}
+
 function buildObjectStreamMembers(memberTexts) {
   const headerParts = [];
   let bodyOffset = 0;
@@ -424,6 +492,7 @@ const encryptedPdfTemplate = [
 const verticalWordColumnsPdf = buildVerticalWordColumnsPdf();
 const delayedContentPdfBytes = buildDelayedContentPdf();
 const streamBoundaryPdfBytes = buildStreamBoundaryPdf();
+const incrementalUpdatePdf = buildIncrementalUpdatePdf();
 
 const flateStreamBytes = decodeBase64("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
 const asciiHexStreamBytes = encodeText("42540A2841534349494845582048656C6C6F2920546A0A4554>");
@@ -1979,6 +2048,13 @@ const streamBoundaryResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const incrementalUpdateResult = await engine.run({
+  source: {
+    bytes: incrementalUpdatePdf.bytes,
+    fileName: "incremental-update.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const encodedTextResult = await engine.run({
   source: {
     bytes: encodeText(encodedTextPdf),
@@ -3417,6 +3493,19 @@ assert(
   streamBoundaryResult.observation.value?.extractedText === "endobj inside stream",
   `Unexpected stream-boundary extraction: ${JSON.stringify(streamBoundaryResult.observation.value?.extractedText ?? null)}.`,
 );
+assert(
+  incrementalUpdateResult.ir.value?.crossReferenceSections.map((section) => section.offset).join(",") ===
+    `${String(incrementalUpdatePdf.incrementalXrefOffset)},${String(incrementalUpdatePdf.baseXrefOffset)}`,
+  `Unexpected incremental-update xref order: ${incrementalUpdateResult.ir.value?.crossReferenceSections.map((section) => section.offset).join(",") ?? "missing"}.`,
+);
+assert(
+  incrementalUpdateResult.ir.value?.trailer?.prevOffset === incrementalUpdatePdf.baseXrefOffset,
+  `Unexpected incremental-update trailer Prev offset: ${incrementalUpdateResult.ir.value?.trailer?.prevOffset ?? "missing"}.`,
+);
+assert(
+  incrementalUpdateResult.ir.value?.trailer?.infoRef?.objectNumber === 5,
+  `Unexpected incremental-update trailer Info ref: ${incrementalUpdateResult.ir.value?.trailer?.infoRef?.objectNumber ?? "missing"}.`,
+);
 assert(recoveredResult.admission.status === "partial", `Recovered admission status was ${recoveredResult.admission.status}.`);
 assert(recoveredResult.admission.value?.decision === "accepted", `Recovered decision was ${recoveredResult.admission.value?.decision ?? "missing"}.`);
 assert(recoveredResult.admission.value?.repairState === "recovered", `Recovered repair state was ${recoveredResult.admission.value?.repairState ?? "missing"}.`);
@@ -3468,6 +3557,7 @@ console.log(
       recoveredAdmission: recoveredResult.admission.status,
       recoveredRepairState: recoveredResult.admission.value?.repairState ?? null,
       streamBoundaryText: streamBoundaryResult.observation.value?.extractedText ?? null,
+      incrementalXrefOrder: incrementalUpdateResult.ir.value?.crossReferenceSections.map((section) => section.offset) ?? null,
       ir: result.ir.status,
       observation: result.observation.status,
       observationStrategy: result.observation.value?.strategy ?? null,

@@ -54,6 +54,10 @@ interface ParsedMarkedContentContext {
   readonly actualText?: string;
 }
 
+interface ParsedCrossReferenceSection extends PdfCrossReferenceSection {
+  readonly trailer?: PdfTrailerShell;
+}
+
 export interface ParsedTextOperatorRun {
   readonly operator: "Tj" | "TJ" | "'" | "\"";
   readonly fontResourceName?: string;
@@ -122,7 +126,7 @@ export async function analyzePdfShell(
   const expandedObjectStreamResult = expandObjectStreams(finalizedIndirectObjects);
   const indirectObjects = expandedObjectStreamResult.indirectObjects;
   let objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
-  const crossReferenceSections = shouldUseFullStructureScan
+  const discoveredCrossReferenceSections = shouldUseFullStructureScan
     ? collectCrossReferenceSections(structureText, indirectObjects)
     : dedupeCrossReferenceSections([
       ...collectCrossReferenceSections(scanText, indirectObjects),
@@ -131,11 +135,20 @@ export async function analyzePdfShell(
   const startXrefOffset = shouldUseFullStructureScan
     ? readStartXrefOffsetFromBytes(source.bytes)
     : readStartXrefOffsetFromBytes(tailBytes) ?? (isTruncated ? readStartXrefOffsetFromBytes(scanBytes) : undefined);
-  const startXrefResolved = resolveStartXref(startXrefOffset, crossReferenceSections);
-  const trailer = shouldUseFullStructureScan
-    ? parseTrailerShell(structureText, indirectObjects)
-    : parseTrailerShell(tailText, indirectObjects) ??
-      (isTruncated ? parseTrailerShell(scanText, indirectObjects) : undefined);
+  const resolvedCrossReferenceSections = resolveCrossReferenceSections(discoveredCrossReferenceSections, startXrefOffset);
+  const startXrefResolved = resolveStartXref(startXrefOffset, resolvedCrossReferenceSections);
+  const crossReferenceSections = resolvedCrossReferenceSections.map((section) => ({
+    kind: section.kind,
+    offset: section.offset,
+    ...(section.entryCount !== undefined ? { entryCount: section.entryCount } : {}),
+    ...(section.decodedEntryCount !== undefined ? { decodedEntryCount: section.decodedEntryCount } : {}),
+    ...(section.objectRef !== undefined ? { objectRef: section.objectRef } : {}),
+  }));
+  const trailer = resolveCrossReferenceTrailer(resolvedCrossReferenceSections) ??
+    (shouldUseFullStructureScan
+      ? parseTrailerShell(structureText, indirectObjects)
+      : parseTrailerShell(tailText, indirectObjects) ??
+        (isTruncated ? parseTrailerShell(scanText, indirectObjects) : undefined));
   const pageTree = buildPageEntries(trailer, objectIndex, indirectObjects);
   const pageEntries = pageTree.pages;
   const classifiedIndirectObjects = classifyIndirectObjectStreamRoles(indirectObjects, pageEntries, objectIndex);
@@ -618,8 +631,8 @@ function collectCrossReferenceSections(
   indirectObjects: readonly ParsedIndirectObject[],
   offsetBase = 0,
   includeStreamSections = true,
-): PdfCrossReferenceSection[] {
-  const sections: PdfCrossReferenceSection[] = [];
+): ParsedCrossReferenceSection[] {
+  const sections: ParsedCrossReferenceSection[] = [];
 
   for (let searchStart = 0; searchStart < text.length; searchStart += 1) {
     const keywordIndex = findPdfKeyword(text, "xref", searchStart);
@@ -650,6 +663,9 @@ function collectCrossReferenceSections(
         : {}),
       ...(decodedEntryCount !== undefined ? { decodedEntryCount } : {}),
       objectRef: objectShell.ref,
+      ...(toTrailerShell(objectShell.dictionaryEntries) !== undefined
+        ? { trailer: toTrailerShell(objectShell.dictionaryEntries) as PdfTrailerShell }
+        : {}),
     });
   }
 
@@ -657,9 +673,9 @@ function collectCrossReferenceSections(
 }
 
 function dedupeCrossReferenceSections(
-  sections: readonly PdfCrossReferenceSection[],
-): PdfCrossReferenceSection[] {
-  const dedupedSections: PdfCrossReferenceSection[] = [];
+  sections: readonly ParsedCrossReferenceSection[],
+): ParsedCrossReferenceSection[] {
+  const dedupedSections: ParsedCrossReferenceSection[] = [];
   const seenSectionKeys = new Set<string>();
 
   for (const section of sections) {
@@ -672,6 +688,49 @@ function dedupeCrossReferenceSections(
   }
 
   return dedupedSections.sort((leftSection, rightSection) => leftSection.offset - rightSection.offset);
+}
+
+function resolveCrossReferenceSections(
+  sections: readonly ParsedCrossReferenceSection[],
+  startXrefOffset: number | undefined,
+): ParsedCrossReferenceSection[] {
+  const sortedSections = [...sections].sort((leftSection, rightSection) => leftSection.offset - rightSection.offset);
+  if (startXrefOffset === undefined) {
+    return sortedSections;
+  }
+
+  const sectionByOffset = new Map(sortedSections.map((section) => [section.offset, section] as const));
+  const chain: ParsedCrossReferenceSection[] = [];
+  const seenOffsets = new Set<number>();
+  let currentSection = sectionByOffset.get(startXrefOffset);
+
+  while (currentSection && !seenOffsets.has(currentSection.offset)) {
+    chain.push(currentSection);
+    seenOffsets.add(currentSection.offset);
+    const prevOffset = currentSection.trailer?.prevOffset;
+    currentSection = prevOffset === undefined ? undefined : sectionByOffset.get(prevOffset);
+  }
+
+  if (chain.length === 0) {
+    return sortedSections;
+  }
+
+  return [
+    ...chain,
+    ...sortedSections.filter((section) => !seenOffsets.has(section.offset)),
+  ];
+}
+
+function resolveCrossReferenceTrailer(
+  sections: readonly ParsedCrossReferenceSection[],
+): PdfTrailerShell | undefined {
+  for (const section of sections) {
+    if (section.trailer !== undefined) {
+      return section.trailer;
+    }
+  }
+
+  return undefined;
 }
 
 function classifyIndirectObjectStreamRoles(
@@ -804,7 +863,7 @@ function readClassicCrossReferenceSection(
   text: string,
   keywordIndex: number,
   offsetBase = 0,
-): PdfCrossReferenceSection {
+): ParsedCrossReferenceSection {
   let offset = skipPdfWhitespaceAndComments(text, keywordIndex + "xref".length);
   let entryCount = 0;
 
@@ -829,10 +888,20 @@ function readClassicCrossReferenceSection(
     }
   }
 
+  const trailerKeywordIndex = skipPdfWhitespaceAndComments(text, offset);
+  const trailer = matchesPdfKeyword(text, trailerKeywordIndex, "trailer")
+    ? (() => {
+      const dictionaryStart = skipPdfWhitespaceAndComments(text, trailerKeywordIndex + "trailer".length);
+      const dictionaryText = readPdfDictionaryToken(text, dictionaryStart);
+      return dictionaryText ? toTrailerShell(parseDictionaryEntries(dictionaryText.token)) : undefined;
+    })()
+    : undefined;
+
   return {
     kind: "classic",
     offset: offsetBase + keywordIndex,
     ...(entryCount > 0 ? { entryCount } : {}),
+    ...(trailer !== undefined ? { trailer } : {}),
   };
 }
 
