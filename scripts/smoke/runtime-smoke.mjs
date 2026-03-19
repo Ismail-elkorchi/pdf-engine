@@ -421,6 +421,10 @@ const fieldValueFormFixtureBytes = decodeBase64(
 );
 const encryptedStandardTextFixture = publicSmokeFixtures.encryptedStandardText;
 const encryptedStandardTextFixtureBytes = decodeFixturePdfBytes(encryptedStandardTextFixture.bytesBase64);
+const encryptedStandardTextAes256Fixture = publicSmokeFixtures.encryptedStandardTextAes256;
+const encryptedStandardTextAes256FixtureBytes = decodeFixturePdfBytes(
+  encryptedStandardTextAes256Fixture.bytesBase64,
+);
 
 function resolveViewerModuleSpecifier(specifier) {
   return resolveSiblingModuleSpecifier(specifier, "viewer");
@@ -2530,6 +2534,37 @@ const admissionWithPassword = await engine.admit({
   },
   passwordProvider: () => encryptedStandardTextFixture.userPassword,
 });
+const observationAes256WithoutPassword = await engine.observe({
+  source: {
+    bytes: encryptedStandardTextAes256FixtureBytes,
+    fileName: encryptedStandardTextAes256Fixture.fileName,
+    mediaType: "application/pdf",
+  },
+});
+const observationAes256WithWrongPassword = await engine.observe({
+  source: {
+    bytes: encryptedStandardTextAes256FixtureBytes,
+    fileName: encryptedStandardTextAes256Fixture.fileName,
+    mediaType: "application/pdf",
+  },
+  passwordProvider: () => "wrong-password",
+});
+const observationAes256WithPassword = await engine.observe({
+  source: {
+    bytes: encryptedStandardTextAes256FixtureBytes,
+    fileName: encryptedStandardTextAes256Fixture.fileName,
+    mediaType: "application/pdf",
+  },
+  passwordProvider: () => encryptedStandardTextAes256Fixture.userPassword,
+});
+const admissionAes256WithPassword = await engine.admit({
+  source: {
+    bytes: encryptedStandardTextAes256FixtureBytes,
+    fileName: encryptedStandardTextAes256Fixture.fileName,
+    mediaType: "application/pdf",
+  },
+  passwordProvider: () => encryptedStandardTextAes256Fixture.userPassword,
+});
 
 assert(result.runtime.kind === expectedRuntime, `Expected runtime ${expectedRuntime} but received ${result.runtime.kind}.`);
 assert(engine.identity.supportedRuntimes.includes(expectedRuntime), `Engine identity does not claim support for runtime ${expectedRuntime}.`);
@@ -3680,6 +3715,68 @@ assert(
 assert(
   xrefStreamSignal?.objectRef?.objectNumber === 13,
   `Encrypted admission xref-stream ref was ${xrefStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
+);
+assert(
+  observationAes256WithoutPassword.status === "blocked",
+  `AES-256 encrypted observe status without password was ${observationAes256WithoutPassword.status}.`,
+);
+assert(
+  observationAes256WithoutPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-required"),
+  "AES-256 encrypted observe without password did not surface password-required.",
+);
+assert(
+  observationAes256WithWrongPassword.status === "blocked",
+  `AES-256 encrypted observe status with wrong password was ${observationAes256WithWrongPassword.status}.`,
+);
+assert(
+  observationAes256WithWrongPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-invalid"),
+  "AES-256 encrypted observe with wrong password did not surface password-invalid.",
+);
+assert(
+  observationAes256WithPassword.status === "partial" || observationAes256WithPassword.status === "completed",
+  `AES-256 encrypted observe status with password was ${observationAes256WithPassword.status}.`,
+);
+assert(
+  encryptedStandardTextAes256Fixture.expectedMarkers.every((marker) =>
+    observationAes256WithPassword.value?.extractedText.includes(marker),
+  ),
+  `AES-256 encrypted observe text with password was ${JSON.stringify(observationAes256WithPassword.value?.extractedText ?? null)}.`,
+);
+assert(
+  !observationAes256WithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
+  "AES-256 encrypted observe with password still surfaced decryption-not-implemented.",
+);
+const encryptedAes256FeatureSignals = admissionAes256WithPassword.value?.featureSignals ?? [];
+const aes256EncryptionSignal = encryptedAes256FeatureSignals.find((signal) => signal.kind === "encryption");
+const aes256ObjectStreamSignal = encryptedAes256FeatureSignals.find((signal) => signal.kind === "object-streams");
+const aes256XrefStreamSignal = encryptedAes256FeatureSignals.find((signal) => signal.kind === "xref-streams");
+assert(
+  admissionAes256WithPassword.status === "completed",
+  `AES-256 encrypted admission status with password was ${admissionAes256WithPassword.status}.`,
+);
+assert(
+  aes256EncryptionSignal?.detected === true && aes256EncryptionSignal.evidenceSource === "object",
+  "AES-256 encrypted admission did not use parsed object evidence for encryption.",
+);
+assert(
+  aes256EncryptionSignal?.objectRef?.objectNumber === 22,
+  `AES-256 encrypted admission encryption object ref was ${aes256EncryptionSignal?.objectRef?.objectNumber ?? "missing"}.`,
+);
+assert(
+  aes256ObjectStreamSignal?.detected === true && aes256ObjectStreamSignal.evidenceSource === "object",
+  "AES-256 encrypted admission did not use parsed object evidence for object streams.",
+);
+assert(
+  aes256ObjectStreamSignal?.objectRef?.objectNumber === 2,
+  `AES-256 encrypted admission object-stream ref was ${aes256ObjectStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
+);
+assert(
+  aes256XrefStreamSignal?.detected === true && aes256XrefStreamSignal.evidenceSource === "object",
+  "AES-256 encrypted admission did not use parsed object evidence for xref streams.",
+);
+assert(
+  aes256XrefStreamSignal?.objectRef?.objectNumber === 23,
+  `AES-256 encrypted admission xref-stream ref was ${aes256XrefStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
 );
 await engine.dispose();
 

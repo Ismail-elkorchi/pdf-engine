@@ -94,6 +94,10 @@ async function runBrowserSmoke(baseUrl, browserName) {
       const { publicSmokeFixtures, decodeFixturePdfBytes } = await import("/scripts/smoke/fixture-data.mjs");
       const encryptedStandardTextFixture = publicSmokeFixtures.encryptedStandardText;
       const encryptedStandardTextFixtureBytes = decodeFixturePdfBytes(encryptedStandardTextFixture.bytesBase64);
+      const encryptedStandardTextAes256Fixture = publicSmokeFixtures.encryptedStandardTextAes256;
+      const encryptedStandardTextAes256FixtureBytes = decodeFixturePdfBytes(
+        encryptedStandardTextAes256Fixture.bytesBase64
+      );
 
       const encodeText = (value) => new TextEncoder().encode(value);
       const decodeHex = (value) => {
@@ -646,6 +650,41 @@ async function runBrowserSmoke(baseUrl, browserName) {
           },
           passwordProvider: () => encryptedStandardTextFixture.userPassword
         });
+        const browserEncryptedAes256WithoutPassword = await engine.observe({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextAes256FixtureBytes,
+            fileName: encryptedStandardTextAes256Fixture.fileName,
+            mediaType: "application/pdf"
+          }
+        });
+        const browserEncryptedAes256WrongPassword = await engine.observe({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextAes256FixtureBytes,
+            fileName: encryptedStandardTextAes256Fixture.fileName,
+            mediaType: "application/pdf"
+          },
+          passwordProvider: () => "wrong-password"
+        });
+        const browserEncryptedAes256WithPassword = await engine.observe({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextAes256FixtureBytes,
+            fileName: encryptedStandardTextAes256Fixture.fileName,
+            mediaType: "application/pdf"
+          },
+          passwordProvider: () => encryptedStandardTextAes256Fixture.userPassword
+        });
+        const browserEncryptedAes256Admission = await engine.admit({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextAes256FixtureBytes,
+            fileName: encryptedStandardTextAes256Fixture.fileName,
+            mediaType: "application/pdf"
+          },
+          passwordProvider: () => encryptedStandardTextAes256Fixture.userPassword
+        });
         const viewerContainer = globalThis.document.createElement("div");
         globalThis.document.body.append(viewerContainer);
 
@@ -738,6 +777,10 @@ async function runBrowserSmoke(baseUrl, browserName) {
         const browserEncryptionSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "encryption");
         const browserObjectStreamSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "object-streams");
         const browserXrefStreamSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "xref-streams");
+        const browserEncryptedAes256FeatureSignals = browserEncryptedAes256Admission.value?.featureSignals ?? [];
+        const browserAes256EncryptionSignal = browserEncryptedAes256FeatureSignals.find((signal) => signal.kind === "encryption");
+        const browserAes256ObjectStreamSignal = browserEncryptedAes256FeatureSignals.find((signal) => signal.kind === "object-streams");
+        const browserAes256XrefStreamSignal = browserEncryptedAes256FeatureSignals.find((signal) => signal.kind === "xref-streams");
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
@@ -855,6 +898,33 @@ async function runBrowserSmoke(baseUrl, browserName) {
             browserXrefStreamSignal?.detected === true &&
             browserXrefStreamSignal.evidenceSource === "object" &&
             browserXrefStreamSignal.objectRef?.objectNumber === 13,
+          encryptedAes256WithoutPassword: browserEncryptedAes256WithoutPassword.status === "blocked",
+          encryptedAes256PasswordRequired:
+            browserEncryptedAes256WithoutPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-required"),
+          encryptedAes256WrongPassword: browserEncryptedAes256WrongPassword.status === "blocked",
+          encryptedAes256PasswordInvalid:
+            browserEncryptedAes256WrongPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-invalid"),
+          encryptedAes256WithPassword:
+            browserEncryptedAes256WithPassword.status === "partial" || browserEncryptedAes256WithPassword.status === "completed",
+          encryptedAes256Text:
+            encryptedStandardTextAes256Fixture.expectedMarkers.every((marker) =>
+              browserEncryptedAes256WithPassword.value?.extractedText.includes(marker)
+            ),
+          encryptedAes256LimitCleared:
+            !browserEncryptedAes256WithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
+          encryptedAes256Admission: browserEncryptedAes256Admission.status === "completed",
+          encryptedAes256ObjectEvidence:
+            browserAes256EncryptionSignal?.detected === true &&
+            browserAes256EncryptionSignal.evidenceSource === "object" &&
+            browserAes256EncryptionSignal.objectRef?.objectNumber === 22,
+          objectStreamAes256Evidence:
+            browserAes256ObjectStreamSignal?.detected === true &&
+            browserAes256ObjectStreamSignal.evidenceSource === "object" &&
+            browserAes256ObjectStreamSignal.objectRef?.objectNumber === 2,
+          xrefStreamAes256Evidence:
+            browserAes256XrefStreamSignal?.detected === true &&
+            browserAes256XrefStreamSignal.evidenceSource === "object" &&
+            browserAes256XrefStreamSignal.objectRef?.objectNumber === 23,
           viewerInitialPage: initialViewerLabel === "Page 2 of 2",
           viewerInitialBlocks: initialViewerBlocks.some((text) => text.includes("Second Page Overview")),
           viewerInitialButtons: initialPreviousDisabled === false && initialNextDisabled === true,
