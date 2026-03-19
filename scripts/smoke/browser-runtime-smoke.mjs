@@ -93,6 +93,17 @@ async function runBrowserSmoke(baseUrl, browserName) {
       const { publicSmokeFixtures, decodeFixturePdfBytes } = await import("/scripts/smoke/fixture-data.mjs");
 
       const encodeText = (value) => new TextEncoder().encode(value);
+      const decodeHex = (value) => {
+        if (value.length % 2 !== 0) {
+          throw new Error("Hex fixture text must contain an even number of digits.");
+        }
+
+        const decoded = new Uint8Array(value.length / 2);
+        for (let index = 0; index < value.length; index += 2) {
+          decoded[index / 2] = Number.parseInt(value.slice(index, index + 2), 16);
+        }
+        return decoded;
+      };
       const joinBytes = (parts) => {
         const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
         const joined = new Uint8Array(totalLength);
@@ -151,6 +162,38 @@ async function runBrowserSmoke(baseUrl, browserName) {
         const template = lines.join("\n");
         const xrefOffset = template.indexOf("\nxref\n") + 1;
         return encodeText(template.replace("__STARTXREF__", String(xrefOffset)));
+      };
+      const buildFilteredContentStreamPdfBytes = ({ streamBytes, filterValue }) => {
+        const prefix = [
+          "%PDF-1.4",
+          "1 0 obj",
+          "<< /Type /Catalog /Pages 2 0 R >>",
+          "endobj",
+          "2 0 obj",
+          "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+          "endobj",
+          "3 0 obj",
+          "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+          "endobj",
+          "4 0 obj",
+          `<< /Length ${String(streamBytes.byteLength)} /Filter ${filterValue} >>`,
+          "stream"
+        ].join("\n") + "\n";
+        const middle = "\nendstream\nendobj\n";
+        const xrefOffset = encodeText(prefix).byteLength + streamBytes.byteLength + encodeText(middle).byteLength;
+        const suffix = [
+          "xref",
+          "0 5",
+          "0000000000 65535 f",
+          "trailer",
+          "<< /Root 1 0 R /Size 5 >>",
+          "startxref",
+          String(xrefOffset),
+          "%%EOF",
+          ""
+        ].join("\n");
+
+        return joinBytes([encodeText(prefix), streamBytes, encodeText(middle), encodeText(suffix)]);
       };
       const verticalWordColumnsPdf = buildPdfWithPageContents([
         [
@@ -421,6 +464,18 @@ async function runBrowserSmoke(baseUrl, browserName) {
         encodeText(flatePdfMiddle),
         encodeText(flatePdfSuffix)
       ]);
+      const asciiHexPdf = buildFilteredContentStreamPdfBytes({
+        streamBytes: encodeText("42540A2842726F777365722041534349494845582920546A0A4554>"),
+        filterValue: "/ASCIIHexDecode"
+      });
+      const chainedFilterPdf = buildFilteredContentStreamPdfBytes({
+        streamBytes: encodeText("Garg^iR2ZpatGDC/Q-Q58Bf:N:!loGal7=M!<@$9#U9~>"),
+        filterValue: "[/ASCII85Decode /FlateDecode]"
+      });
+      const runLengthPdf = buildFilteredContentStreamPdfBytes({
+        streamBytes: decodeHex("1B42540A2842726F777365722052756E4C656E6774682920546A0A455480"),
+        filterValue: "/RunLengthDecode"
+      });
 
       const engine = createPdfEngine();
       try {
@@ -434,6 +489,24 @@ async function runBrowserSmoke(baseUrl, browserName) {
           source: {
             kind: "bytes",
             bytes: flatePdf
+          }
+        });
+        const asciiHexResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: asciiHexPdf
+          }
+        });
+        const chainedFilterResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: chainedFilterPdf
+          }
+        });
+        const runLengthResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: runLengthPdf
           }
         });
         const identityHCidFontResult = await engine.run({
@@ -608,6 +681,15 @@ async function runBrowserSmoke(baseUrl, browserName) {
           supportedRuntimeClaim: engine.identity.supportedRuntimes.includes("web"),
           plainText: plainResult.observation.value?.extractedText === "Browser Hello",
           flateText: flateResult.observation.value?.extractedText === "Hello Flate",
+          asciiHexText: asciiHexResult.observation.value?.extractedText === "Browser ASCIIHEX",
+          asciiHexDecoded:
+            asciiHexResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamDecodeState ===
+            "decoded",
+          chainedText: chainedFilterResult.observation.value?.extractedText === "Browser Chained",
+          chainedFilters:
+            chainedFilterResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ===
+            "ASCII85Decode,FlateDecode",
+          runLengthText: runLengthResult.observation.value?.extractedText === "Browser RunLength",
           observationStrategy: plainResult.observation.value?.strategy === "decoded-text-operators",
           flateDecoded: flateResult.ir.value?.decodedStreams === true,
           identityHMarkers: publicSmokeFixtures.identityHCidFont.expectedMarkers.every((marker) =>
@@ -705,6 +787,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
           runtime: plainResult.runtime.kind,
           plainText: plainResult.observation.value?.extractedText ?? null,
           flateText: flateResult.observation.value?.extractedText ?? null,
+          asciiHexText: asciiHexResult.observation.value?.extractedText ?? null,
+          chainedText: chainedFilterResult.observation.value?.extractedText ?? null,
+          runLengthText: runLengthResult.observation.value?.extractedText ?? null,
           strategy: plainResult.observation.value?.strategy ?? null,
           identityHText: identityHCidFontResult.observation.value?.extractedText ?? null,
           identityVText: identityVCidFontResult.observation.value?.extractedText ?? null,
