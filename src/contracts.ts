@@ -89,7 +89,7 @@ export type PdfUnicodeMappingSource =
   | "embedded-font-cmap";
 
 /**
- * Writing mode recovered for observed or grouped text when the shell can identify it.
+ * Writing mode recovered for observed or grouped text when the current implementation can identify it.
  */
 export type PdfWritingMode = "horizontal" | "vertical";
 
@@ -99,12 +99,12 @@ export type PdfWritingMode = "horizontal" | "vertical";
 export type PdfCrossReferenceKind = "classic" | "xref-stream" | "hybrid" | "unknown";
 
 /**
- * Structural recovery state for the current shell parse.
+ * Structural recovery state for the current parser pass.
  */
 export type PdfRepairState = "clean" | "recovered" | "recovery-required";
 
 /**
- * Stable implementation-limit codes that the current shell engine can expose without hiding known gaps.
+ * Stable implementation-limit codes that the current engine can expose without hiding known gaps.
  */
 export type PdfKnownLimitCode =
   | "decryption-not-implemented"
@@ -142,7 +142,7 @@ export type PdfObservationStrategy = "decoded-text-operators" | "heuristic-liter
 export type PdfStreamRole = "content" | "tounicode" | "cmap" | "xref" | "object-stream" | "unknown";
 
 /**
- * How page ordering for the current page shell or observation page was resolved.
+ * How page ordering for the current page summary or observation page was resolved.
  */
 export type PdfPageResolutionMethod = "page-tree" | "recovered-page-order" | "stream-fallback";
 
@@ -165,7 +165,7 @@ export interface PdfResourceBudget {
   readonly maxMilliseconds?: number;
   /** Maximum recursion depth allowed for recursive parsing work. */
   readonly maxRecursionDepth?: number;
-  /** Maximum byte count scanned for shell-stage heuristics. */
+  /** Maximum byte count scanned for parser fallback heuristics. */
   readonly maxScanBytes?: number;
 }
 
@@ -183,7 +183,7 @@ export interface PdfNormalizedResourceBudget {
   readonly maxMilliseconds: number;
   /** Maximum recursion depth allowed for recursive parsing work. */
   readonly maxRecursionDepth: number;
-  /** Maximum byte count scanned for shell-stage heuristics. */
+  /** Maximum byte count scanned for parser fallback heuristics. */
   readonly maxScanBytes: number;
 }
 
@@ -276,7 +276,7 @@ export interface PdfObjectRef {
 }
 
 /**
- * Structural coverage reached by the current shell parse.
+ * Structural coverage reached by the current parser pass.
  */
 export interface PdfParseCoverage {
   /** Whether a `%PDF-` header was found. */
@@ -294,7 +294,7 @@ export interface PdfParseCoverage {
 }
 
 /**
- * One cross-reference section recovered by the shell parse.
+ * One cross-reference section recovered by the current parser pass.
  */
 export interface PdfCrossReferenceSection {
   /** Cross-reference section kind. */
@@ -310,7 +310,7 @@ export interface PdfCrossReferenceSection {
 }
 
 /**
- * Trailer summary recovered from the shell parse.
+ * Trailer summary recovered from the current parser pass.
  */
 export interface PdfTrailerShell {
   /** Declared `/Size` value when present. */
@@ -328,7 +328,7 @@ export interface PdfTrailerShell {
 }
 
 /**
- * One indirect object boundary recovered by the shell parse.
+ * One indirect object boundary recovered by the current parser pass.
  */
 export interface PdfIndirectObjectShell {
   /** Indirect object reference. */
@@ -339,19 +339,19 @@ export interface PdfIndirectObjectShell {
   readonly endOffset: number;
   /** Whether the object contains a stream. */
   readonly hasStream: boolean;
-  /** `/Type` name when the shell can recover it. */
+  /** `/Type` name when the current implementation can recover it. */
   readonly typeName?: string;
   /** Top-level dictionary keys recovered from the object. */
   readonly dictionaryKeys: readonly string[];
-  /** Stream byte length within the scanned shell input when known. */
+  /** Stream byte length within the scanned input when known. */
   readonly streamByteLength?: number;
   /** Declared stream filters in decode order when present. */
   readonly streamFilterNames?: readonly string[];
-  /** Stream decode state for the current shell implementation. */
+  /** Stream decode state for the current implementation. */
   readonly streamDecodeState?: PdfStreamDecodeState;
   /** Decoded stream byte length when operator-ready bytes are available. */
   readonly decodedStreamByteLength?: number;
-  /** Structural role inferred for the stream when the shell can classify it. */
+  /** Structural role inferred for the stream when the current implementation can classify it. */
   readonly streamRole?: PdfStreamRole;
   /** Containing object stream reference when this object was expanded from an object stream. */
   readonly containerObjectRef?: PdfObjectRef;
@@ -390,7 +390,7 @@ export interface PdfEngineIdentity {
   /** Public engine version string. */
   readonly version: string;
   /** Implementation mode for the current engine. */
-  readonly mode: "shell";
+  readonly mode: "core";
   /** Runtimes that the public package currently claims to support. */
   readonly supportedRuntimes: readonly PdfRuntimeKind[];
   /** Stages that the current implementation actually exposes. */
@@ -468,17 +468,17 @@ export interface PdfAdmissionArtifact {
   readonly byteLength: number;
   /** Parsed or inferred PDF version when known. */
   readonly pdfVersion?: string;
-  /** Estimated page count when the shell can infer it. */
+  /** Estimated page count when the current implementation can infer it. */
   readonly pageCountEstimate?: number;
-  /** Estimated indirect-object count when the shell can infer it. */
+  /** Estimated indirect-object count when the current implementation can infer it. */
   readonly objectCountEstimate?: number;
-  /** `startxref` offset when the shell can recover it. */
+  /** `startxref` offset when the current implementation can recover it. */
   readonly startXrefOffset?: number;
   /** Whether the document appears to be encrypted. */
   readonly isEncrypted: boolean;
-  /** Structural recovery state for the current shell parse. */
+  /** Structural recovery state for the current parser pass. */
   readonly repairState: PdfRepairState;
-  /** Structural coverage reached by the current shell parse. */
+  /** Structural coverage reached by the current parser pass. */
   readonly parseCoverage: PdfParseCoverage;
   /** Feature detection results captured during admission. */
   readonly featureSignals: readonly PdfFeatureSignal[];
@@ -489,37 +489,37 @@ export interface PdfAdmissionArtifact {
 }
 
 /**
- * Per-page shell summary in the current IR implementation.
+ * Per-page summary in the current IR implementation.
  */
 export interface PdfIrPageShell {
   /** One-based page number. */
   readonly pageNumber: number;
-  /** How page ordering for this shell page was resolved. */
+  /** How page ordering for this page summary was resolved. */
   readonly resolutionMethod: PdfPageResolutionMethod;
   /** Page object reference when the page tree could be traversed. */
   readonly pageRef?: PdfObjectRef;
-  /** Number of content streams mapped to this page shell. */
+  /** Number of content streams mapped to this page summary. */
   readonly contentStreamCount: number;
-  /** Content stream references mapped to this page shell. */
+  /** Content stream references mapped to this page summary. */
   readonly contentStreamRefs: readonly PdfObjectRef[];
-  /** Number of `/Resources` hits mapped to this page shell. */
+  /** Number of `/Resources` hits mapped to this page summary. */
   readonly resourceCount: number;
   /** Whether the current resource mapping came from the page or an inherited ancestor. */
   readonly resourceOrigin?: PdfPageValueOrigin;
   /** Resource dictionary reference when present and indirect. */
   readonly resourceRef?: PdfObjectRef;
-  /** Number of annotations mapped to this page shell. */
+  /** Number of annotations mapped to this page summary. */
   readonly annotationCount: number;
-  /** Annotation references mapped to this page shell. */
+  /** Annotation references mapped to this page summary. */
   readonly annotationRefs: readonly PdfObjectRef[];
 }
 
 /**
- * Shell-stage intermediate representation for a document.
+ * Current parser-stage intermediate representation for a document.
  */
 export interface PdfIrDocument {
   /** IR implementation kind. */
-  readonly kind: "shell";
+  readonly kind: "pdf-ir";
   /** Parsed or inferred PDF version when known. */
   readonly pdfVersion?: string;
   /** Source length in bytes. */
@@ -528,27 +528,27 @@ export interface PdfIrDocument {
   readonly pageCountEstimate?: number;
   /** Estimated indirect-object count when known. */
   readonly objectCountEstimate?: number;
-  /** `startxref` offset when the shell can recover it. */
+  /** `startxref` offset when the current implementation can recover it. */
   readonly startXrefOffset?: number;
-  /** Cross-reference organization detected by the shell. */
+  /** Cross-reference organization detected by the current parser. */
   readonly crossReferenceKind: PdfCrossReferenceKind;
   /** Whether the document appears to be encrypted. */
   readonly isEncrypted: boolean;
-  /** Structural recovery state for the current shell parse. */
+  /** Structural recovery state for the current parser pass. */
   readonly repairState: PdfRepairState;
-  /** Structural coverage reached by the current shell parse. */
+  /** Structural coverage reached by the current parser pass. */
   readonly parseCoverage: PdfParseCoverage;
-  /** Cross-reference sections recovered by the shell parse. */
+  /** Cross-reference sections recovered by the current parser pass. */
   readonly crossReferenceSections: readonly PdfCrossReferenceSection[];
-  /** Trailer summary recovered by the shell parse. */
+  /** Trailer summary recovered by the current parser pass. */
   readonly trailer?: PdfTrailerShell;
-  /** Indirect object shells recovered by the shell parse. */
+  /** Indirect object summaries recovered by the current parser pass. */
   readonly indirectObjects: readonly PdfIndirectObjectShell[];
   /** Feature kinds detected during admission. */
   readonly featureKinds: readonly PdfFeatureKind[];
-  /** Per-page shell summaries. */
+  /** Per-page parser summaries. */
   readonly pages: readonly PdfIrPageShell[];
-  /** Whether the shell recovered at least one operator-ready stream body. */
+  /** Whether the parser recovered at least one operator-ready stream body. */
   readonly decodedStreams: boolean;
   /** Whether object streams were expanded into member objects. */
   readonly expandedObjectStreams: boolean;
@@ -588,13 +588,13 @@ export interface PdfObservedGlyph {
   readonly textEncodingKind?: PdfTextEncodingKind;
   /** Unicode mapping path used to recover this glyph when known. */
   readonly unicodeMappingSource?: PdfUnicodeMappingSource;
-  /** Writing mode active for this glyph when the shell can recover it. */
+  /** Writing mode active for this glyph when the current implementation can recover it. */
   readonly writingMode?: PdfWritingMode;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
-  /** Approximate text anchor when the shell can recover one. */
+  /** Approximate text anchor when the current implementation can recover one. */
   readonly anchor?: PdfPoint;
-  /** Active font size when the shell can recover it. */
+  /** Active font size when the current implementation can recover it. */
   readonly fontSize?: number;
   /** Whether the glyph run started on a new text line. */
   readonly startsNewLine?: boolean;
@@ -626,13 +626,13 @@ export interface PdfObservedTextRun {
   readonly textEncodingKind?: PdfTextEncodingKind;
   /** Unicode mapping path used to recover this run when known. */
   readonly unicodeMappingSource?: PdfUnicodeMappingSource;
-  /** Writing mode active for this run when the shell can recover it. */
+  /** Writing mode active for this run when the current implementation can recover it. */
   readonly writingMode?: PdfWritingMode;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
-  /** Approximate text anchor when the shell can recover one. */
+  /** Approximate text anchor when the current implementation can recover one. */
   readonly anchor?: PdfPoint;
-  /** Active font size when the shell can recover it. */
+  /** Active font size when the current implementation can recover it. */
   readonly fontSize?: number;
   /** Whether this run started on a new text line. */
   readonly startsNewLine?: boolean;
@@ -641,7 +641,7 @@ export interface PdfObservedTextRun {
 }
 
 /**
- * One observed page in the shell-stage observation result.
+ * One observed page in the current observation result.
  */
 export interface PdfObservedPage {
   /** One-based page number. */
@@ -657,14 +657,14 @@ export interface PdfObservedPage {
 }
 
 /**
- * Shell-stage observation result for a document.
+ * Current observation result for a document.
  */
 export interface PdfObservedDocument {
   /** Observation implementation kind. */
-  readonly kind: "shell";
+  readonly kind: "pdf-observation";
   /** Observation strategy used to recover the current text evidence. */
   readonly strategy: PdfObservationStrategy;
-  /** Flattened extracted text emitted by the shell. */
+  /** Flattened extracted text emitted by the current observation stage. */
   readonly extractedText: string;
   /** Observed pages in source order. */
   readonly pages: readonly PdfObservedPage[];
@@ -678,7 +678,7 @@ export interface PdfObservedDocument {
 export type PdfLayoutRole = "body" | "heading" | "list" | "header" | "footer" | "unknown";
 
 /**
- * First-layout strategy used by the shell implementation.
+ * First-layout strategy used by the current implementation.
  */
 export type PdfLayoutStrategy = "line-blocks";
 
@@ -698,26 +698,26 @@ export interface PdfLayoutBlock {
   readonly role: PdfLayoutRole;
   /** Confidence attached to the current role assignment. */
   readonly roleConfidence: number;
-  /** Whether the current block starts a new paragraph according to the shell layout heuristics. */
+  /** Whether the current block starts a new paragraph according to the current layout heuristics. */
   readonly startsParagraph: boolean;
   /** Observation run identifiers grouped into this block. */
   readonly runIds: readonly string[];
   /** Observation glyph identifiers grouped into this block. */
   readonly glyphIds: readonly string[];
-  /** Writing mode assigned to the block when the shell can recover it. */
+  /** Writing mode assigned to the block when the current implementation can recover it. */
   readonly writingMode?: PdfWritingMode;
   /** How page ordering for this layout block was resolved. */
   readonly resolutionMethod: PdfPageResolutionMethod;
   /** Page object reference when known. */
   readonly pageRef?: PdfObjectRef;
-  /** Approximate block anchor when the shell can recover one. */
+  /** Approximate block anchor when the current implementation can recover one. */
   readonly anchor?: PdfPoint;
-  /** Dominant font size for the first run in this block when the shell can recover it. */
+  /** Dominant font size for the first run in this block when the current implementation can recover it. */
   readonly fontSize?: number;
 }
 
 /**
- * One layout page in the shell-stage layout result.
+ * One layout page in the current layout result.
  */
 export interface PdfLayoutPage {
   /** One-based page number. */
@@ -731,11 +731,11 @@ export interface PdfLayoutPage {
 }
 
 /**
- * First-layout result for a document.
+ * Current layout result for a document.
  */
 export interface PdfLayoutDocument {
   /** Layout implementation kind. */
-  readonly kind: "shell-layout";
+  readonly kind: "pdf-layout";
   /** Layout strategy used by the current implementation. */
   readonly strategy: PdfLayoutStrategy;
   /** Layout pages in reading order. */
@@ -752,7 +752,7 @@ export interface PdfLayoutDocument {
 export type PdfKnowledgeChunkRole = PdfLayoutRole | "mixed";
 
 /**
- * First knowledge-projection strategy used by the shell implementation.
+ * First knowledge-projection strategy used by the current implementation.
  */
 export type PdfKnowledgeStrategy = "layout-chunks" | "layout-chunks-and-heuristic-tables";
 
@@ -827,7 +827,7 @@ export interface PdfKnowledgeTable {
   readonly id: string;
   /** One-based page number. */
   readonly pageNumber: number;
-  /** Header row recovered for the current table when the shell can isolate one. */
+  /** Header row recovered for the current table when the current implementation can isolate one. */
   readonly headers?: readonly string[];
   /** Heuristic used to project the current table. */
   readonly heuristic?: PdfKnowledgeTableHeuristic;
@@ -840,11 +840,11 @@ export interface PdfKnowledgeTable {
 }
 
 /**
- * First knowledge-stage result for a document.
+ * Current knowledge-stage result for a document.
  */
 export interface PdfKnowledgeDocument {
   /** Knowledge implementation kind. */
-  readonly kind: "shell-knowledge";
+  readonly kind: "pdf-knowledge";
   /** Knowledge strategy used by the current implementation. */
   readonly strategy: PdfKnowledgeStrategy;
   /** Chunk projections for downstream agent use. */
@@ -1010,7 +1010,7 @@ export interface PdfEngine {
   /**
    * Releases engine-owned resources.
    *
-   * The current shell implementation is a no-op, but future backends may own workers,
+   * The current implementation is a no-op, but future backends may own workers,
    * WASM instances, caches, or native bridges that require explicit cleanup.
    */
   dispose(): Promise<void>;
@@ -1022,7 +1022,7 @@ export interface PdfEngine {
    */
   admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>>;
   /**
-   * Produces the shell-stage intermediate representation for one document.
+   * Produces the current parser-stage intermediate representation for one document.
    *
    * @param request IR request.
    * @returns IR stage result.
@@ -1036,21 +1036,21 @@ export interface PdfEngine {
    */
   observe(request: PdfObservationRequest): Promise<PdfStageResult<PdfObservedDocument>>;
   /**
-   * Produces the shell-stage layout result for one document.
+   * Produces the current layout result for one document.
    *
    * @param request Layout request.
    * @returns Layout stage result.
    */
   toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>>;
   /**
-   * Produces the shell-stage knowledge result for one document.
+   * Produces the current knowledge result for one document.
    *
    * @param request Knowledge request.
    * @returns Knowledge stage result.
    */
   toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>>;
   /**
-   * Runs the staged shell pipeline for one document.
+   * Runs the staged pipeline for one document.
    *
    * @param request Pipeline request.
    * @returns Combined staged result.

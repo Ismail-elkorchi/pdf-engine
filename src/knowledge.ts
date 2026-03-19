@@ -65,7 +65,7 @@ export function buildKnowledgeDocument(
     tables.length === 0 ? "layout-chunks" : "layout-chunks-and-heuristic-tables";
 
   return {
-    kind: "shell-knowledge",
+    kind: "pdf-knowledge",
     strategy,
     chunks,
     tables,

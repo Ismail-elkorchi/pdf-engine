@@ -601,7 +601,11 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: decodeFixturePdfBytes(
               await (await fetch("/scripts/smoke/fixtures/field-value-form.base64.txt")).text()
             )
-          }
+          },
+          policy: {
+            javascriptActions: "allow",
+            launchActions: "allow",
+          },
         });
         const delayedContentResult = await engine.run({
           source: {
@@ -786,7 +790,10 @@ async function runBrowserSmoke(baseUrl, browserName) {
           exportsPresent: typeof createPdfEngine === "function",
           viewerExportPresent: typeof renderPdfViewer === "function",
           runtime: plainResult.runtime.kind === "web",
+          identityMode: engine.identity.mode === "core",
           supportedRuntimeClaim: engine.identity.supportedRuntimes.includes("web"),
+          irKind: plainResult.ir.value?.kind === "pdf-ir",
+          observationKind: plainResult.observation.value?.kind === "pdf-observation",
           plainText: plainResult.observation.value?.extractedText === "Browser Hello",
           flateText: flateResult.observation.value?.extractedText === "Hello Flate",
           asciiHexText: asciiHexResult.observation.value?.extractedText === "Browser ASCIIHEX",
@@ -835,7 +842,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
           coverMatterTitleRole: coverMatterResult.layout.value?.pages[0]?.blocks[0]?.role === "heading",
           coverMatterDateRole: coverMatterResult.layout.value?.pages[0]?.blocks[1]?.role === "heading",
           coverMatterBodyRole: coverMatterResult.layout.value?.pages[0]?.blocks[2]?.role === "body",
+          layoutKind: sectionHeadingResult.layout.value?.kind === "pdf-layout",
           gridTableProjected: gridTableResult.knowledge.value?.tables.length === 1,
+          knowledgeKind: gridTableResult.knowledge.value?.kind === "pdf-knowledge",
           gridTableHeuristic: gridTableResult.knowledge.value?.tables[0]?.heuristic === "layout-grid",
           gridTableHeaders: gridTableResult.knowledge.value?.tables[0]?.headers?.join(",") === "Quarter,Revenue,Profit",
           gridTableCell: gridTableResult.knowledge.value?.tables[0]?.cells.some((cell) =>

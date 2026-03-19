@@ -77,8 +77,8 @@ const DEFAULT_POLICY: PdfNormalizedAdmissionPolicy = {
 
 const ENGINE_IDENTITY: PdfEngineIdentity = {
   name: "@ismail-elkorchi/pdf-engine",
-  version: "0.1.0-shell",
-  mode: "shell",
+  version: "0.1.0",
+  mode: "core",
   supportedRuntimes: ["node", "deno", "bun", "web"],
   supportedStages: ["admission", "ir", "observation", "layout", "knowledge"],
 };
@@ -109,6 +109,8 @@ const FEATURE_PATTERNS: ReadonlyArray<{
 interface PdfShellInspection {
   readonly analysis: PdfShellAnalysis;
   readonly featureSignals: readonly PdfFeatureSignal[];
+  readonly authoritativeFeatureKinds: readonly PdfFeatureKind[];
+  readonly scanFallbackPolicyKinds: readonly PdfFeatureKind[];
   readonly isEncrypted: boolean;
   readonly policy: PdfNormalizedAdmissionPolicy;
   readonly decryptionStatus: "not-needed" | "decrypted" | "password-required" | "invalid-password" | "unsupported";
@@ -132,7 +134,7 @@ interface PdfTextDecodeResult {
 /**
  * Creates a `pdf-engine` instance with a normalized default admission policy and runtime detection.
  *
- * The current implementation is a shell engine for admission, IR, and observation stages.
+ * The current implementation is a staged parser core for admission, IR, and observation stages.
  * It is suitable for smoke checks, contract shaping, and early integration work, but it is not
  * yet a full PDF parser, layout engine, or renderer.
  *
@@ -269,7 +271,7 @@ async function inspectSource(
       analysis,
       policy,
       "unsupported",
-      "The shell detected encryption markers but could not resolve the encryption dictionary and document identifier.",
+      "The parser detected encryption markers but could not resolve the encryption dictionary and document identifier.",
     );
   }
 
@@ -279,7 +281,7 @@ async function inspectSource(
       analysis,
       policy,
       "unsupported",
-      "The trailer referenced an encryption dictionary that the shell could not recover.",
+      "The trailer referenced an encryption dictionary that the parser could not recover.",
     );
   }
 
@@ -336,11 +338,14 @@ function buildInspection(
   decryptionStatus: PdfShellInspection["decryptionStatus"],
   decryptionDetail?: string,
 ): PdfShellInspection {
-  const featureSignals = detectFeatureSignals(analysis, policy);
+  const featureEvaluation = evaluateFeatureSignals(analysis, policy);
+  const featureSignals = featureEvaluation.signals;
   const isEncrypted = featureSignals.some((signal) => signal.kind === "encryption" && signal.detected);
   return {
     analysis,
     featureSignals,
+    authoritativeFeatureKinds: featureEvaluation.authoritativeFeatureKinds,
+    scanFallbackPolicyKinds: featureEvaluation.scanFallbackPolicyKinds,
     isEncrypted,
     policy,
     decryptionStatus,
@@ -448,7 +453,7 @@ function buildAdmissionStage(
       code: "repair-required",
       stage: "admission",
       level: "high",
-      message: "The object-aware shell could not recover enough structure to continue safely.",
+      message: "The current parser could not recover enough structure to continue safely.",
     });
     return stageResult("admission", "blocked", diagnostics, {
       ...artifactBase,
@@ -466,6 +471,28 @@ function buildAdmissionStage(
     return stageResult("admission", "blocked", diagnostics, {
       ...artifactBase,
       decision: "unsupported",
+    });
+  }
+
+  if (inspection.scanFallbackPolicyKinds.length > 0) {
+    diagnostics.push({
+      code: "feature-authority-required",
+      stage: "admission",
+      level: "high",
+      message: `The parser only found ${formatFeatureLabels(inspection.scanFallbackPolicyKinds)} through scan fallback; parsed object authority is required before the document can advance safely.`,
+      detail: `Scan fallback remained necessary for: ${inspection.scanFallbackPolicyKinds.join(", ")}.`,
+    });
+    return stageResult("admission", "blocked", diagnostics, {
+      ...artifactBase,
+      decision: "unsupported",
+    });
+  }
+
+  const featureDecision = resolveFeaturePolicyDecision(inspection, diagnostics);
+  if (featureDecision) {
+    return stageResult("admission", "blocked", diagnostics, {
+      ...artifactBase,
+      decision: featureDecision,
     });
   }
 
@@ -529,10 +556,34 @@ function resolveEncryptionDecision(
     stage: "admission",
     level: "medium",
     message: inspection.decryptionDetail ??
-      "The object-aware shell recognizes encrypted PDFs but does not support this encryption variant yet.",
+      "The current parser recognizes encrypted PDFs but does not support this encryption variant yet.",
     feature: "encryption",
   });
   return "unsupported";
+}
+
+function resolveFeaturePolicyDecision(
+  inspection: PdfShellInspection,
+  diagnostics: PdfDiagnostic[],
+): PdfAdmissionDecision | undefined {
+  const deniedSignals = inspection.featureSignals.filter(
+    (signal) => signal.detected && signal.action === "deny" && signal.evidenceSource === "object",
+  );
+  if (deniedSignals.length === 0) {
+    return undefined;
+  }
+
+  const deniedFeatureKinds = Array.from(new Set(deniedSignals.map((signal) => signal.kind)));
+
+  diagnostics.push({
+    code: "feature-denied-by-policy",
+    stage: "admission",
+    level: "high",
+    message: `The active policy rejects ${formatFeatureLabels(deniedFeatureKinds)}.`,
+    detail: `Rejected feature kinds: ${deniedFeatureKinds.join(", ")}.`,
+    ...(deniedSignals[0]?.objectRef !== undefined ? { objectRef: deniedSignals[0].objectRef } : {}),
+  });
+  return "rejected";
 }
 
 function buildIrStage(
@@ -559,7 +610,7 @@ function buildIrStage(
   }));
 
   const ir: PdfIrDocument = {
-    kind: "shell",
+    kind: "pdf-ir",
     byteLength: inspection.analysis.byteLength,
     ...(inspection.analysis.pdfVersion !== undefined ? { pdfVersion: inspection.analysis.pdfVersion } : {}),
     ...(inspection.analysis.pageCountEstimate !== undefined ? { pageCountEstimate: inspection.analysis.pageCountEstimate } : {}),
@@ -572,7 +623,7 @@ function buildIrStage(
     crossReferenceSections: inspection.analysis.crossReferenceSections,
     ...(inspection.analysis.trailer !== undefined ? { trailer: inspection.analysis.trailer } : {}),
     indirectObjects: inspection.analysis.indirectObjects,
-    featureKinds: inspection.featureSignals.filter((signal) => signal.detected).map((signal) => signal.kind),
+    featureKinds: inspection.authoritativeFeatureKinds,
     pages,
     decodedStreams: hasDecodedStreams(inspection),
     expandedObjectStreams: inspection.analysis.expandedObjectStreams,
@@ -596,7 +647,7 @@ function buildObservationStage(
   const observedPageResult = buildObservedPages(inspection, diagnostics);
   const pages = observedPageResult.pages;
   const extractedText = buildObservationParagraphText({
-    kind: "shell",
+    kind: "pdf-observation",
     strategy: "decoded-text-operators",
     extractedText: "",
     pages,
@@ -609,7 +660,7 @@ function buildObservationStage(
         code: "font-unicode-mapping-not-implemented",
         stage: "observation",
         level: "medium",
-        message: "The shell found encoded text operators that still need font or Unicode mapping support before text can be recovered honestly.",
+        message: "The current observation path found encoded text operators that still need font or Unicode mapping support before text can be recovered honestly.",
       });
     }
 
@@ -619,20 +670,20 @@ function buildObservationStage(
         stage: "observation",
         level: "medium",
         message:
-          "The shell suppressed unreadable literal-text runs that still need font-encoding support or marked-content recovery before they can be emitted honestly.",
+          "The current observation path suppressed unreadable literal-text runs that still need font-encoding support or marked-content recovery before they can be emitted honestly.",
       });
     }
 
     diagnostics.push({
-      code: "shell-observation-empty",
+      code: "observation-empty",
       stage: "observation",
       level: "medium",
-      message: "No text runs were recovered from the current object-aware shell observation strategy.",
+      message: "No text runs were recovered from the current object-aware observation strategy.",
     });
   }
 
   const observation: PdfObservedDocument = {
-    kind: "shell",
+    kind: "pdf-observation",
     strategy: "decoded-text-operators",
     extractedText,
     pages,
@@ -708,10 +759,10 @@ function buildObservedPages(
   }
 
   diagnostics.push({
-    code: "shell-observation-page-fallback",
+    code: "observation-page-fallback",
     stage: "observation",
     level: "medium",
-    message: "The shell could not resolve the page tree, so observation fell back to all stream objects in source order.",
+    message: "The parser could not resolve the page tree, so observation fell back to all stream objects in source order.",
   });
 
   const fallbackStreamRefs = inspection.analysis.indirectObjects
@@ -1949,7 +2000,7 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
     }
   }
   if (
-    inspection.featureSignals.some((signal) => signal.kind === "object-streams" && signal.detected) &&
+    inspection.authoritativeFeatureKinds.includes("object-streams") &&
     !inspection.analysis.expandedObjectStreams
   ) {
     knownLimits.push("object-streams-not-expanded");
@@ -2062,7 +2113,7 @@ function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnost
       code: "scan-budget-truncated",
       stage: "admission",
       level: "medium",
-      message: "The shell parse hit the current scan budget and may only reflect a partial document view.",
+      message: "The parser hit the current scan budget and may only reflect a partial document view.",
     });
   }
 
@@ -2071,7 +2122,7 @@ function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnost
       code: "object-boundaries-missing",
       stage: "admission",
       level: "high",
-      message: "The shell could not recover any indirect-object boundaries from the scanned source.",
+      message: "The parser could not recover any indirect-object boundaries from the scanned source.",
     });
   }
 
@@ -2080,7 +2131,7 @@ function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnost
       code: "xref-start-missing",
       stage: "admission",
       level: "medium",
-      message: "The shell did not find a startxref marker.",
+      message: "The parser did not find a startxref marker.",
     });
   } else if (inspection.analysis.fileType === "pdf" && !inspection.analysis.startXrefResolved) {
     diagnostics.push({
@@ -2096,7 +2147,7 @@ function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnost
       code: "xref-missing",
       stage: "admission",
       level: "medium",
-      message: "The shell did not recover a classic xref table or xref stream.",
+      message: "The parser did not recover a classic xref table or xref stream.",
     });
   }
 
@@ -2105,7 +2156,7 @@ function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnost
       code: "trailer-missing",
       stage: "admission",
       level: "medium",
-      message: "The shell did not recover a trailer dictionary or trailer-like xref-stream dictionary.",
+      message: "The parser did not recover a trailer dictionary or trailer-like xref-stream dictionary.",
     });
   }
 
@@ -2114,7 +2165,7 @@ function createAdmissionDiagnostics(inspection: PdfShellInspection): PdfDiagnost
       code: "repair-recovered",
       stage: "admission",
       level: "medium",
-      message: "The shell recovered structural facts heuristically instead of trusting a clean xref/trailer path.",
+      message: "The parser recovered structural facts heuristically instead of trusting a clean xref/trailer path.",
     });
   }
 
@@ -2129,7 +2180,7 @@ function createIrDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
       code: "page-tree-recovered",
       stage: "ir",
       level: "medium",
-      message: "The shell recovered page objects heuristically because the page tree could not be traversed from the catalog.",
+      message: "The parser recovered page objects heuristically because the page tree could not be traversed from the catalog.",
     });
   }
 
@@ -2138,7 +2189,7 @@ function createIrDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
       code: "page-tree-unresolved",
       stage: "ir",
       level: "medium",
-      message: "The shell could not recover any page objects from the current source.",
+      message: "The parser could not recover any page objects from the current source.",
     });
   }
 
@@ -2148,7 +2199,7 @@ function createIrDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
         code: "stream-filter-unsupported",
         stage: "ir",
         level: "medium",
-        message: "The shell found a stream filter that it does not decode yet.",
+        message: "The parser found a stream filter that it does not decode yet.",
         objectRef: objectShell.ref,
       });
     }
@@ -2158,7 +2209,7 @@ function createIrDiagnostics(inspection: PdfShellInspection): PdfDiagnostic[] {
         code: "stream-decoding-failed",
         stage: "ir",
         level: "medium",
-        message: "The shell could not decode one recovered stream body.",
+        message: "The parser could not decode one recovered stream body.",
         objectRef: objectShell.ref,
       });
     }
@@ -2172,7 +2223,7 @@ function createObservationDiagnostics(inspection: PdfShellInspection): PdfDiagno
 
   if (!inspection.analysis.pageTreeResolved && inspection.analysis.pageEntries.length > 0) {
     diagnostics.push({
-      code: "shell-observation-page-order-heuristic",
+      code: "observation-page-order-heuristic",
       stage: "observation",
       level: "medium",
       message: "Observation uses recovered page order because the page tree was not resolved from the catalog.",
@@ -2349,14 +2400,17 @@ function detectRuntimeCapabilities(runtime: PdfRuntimeDescriptor): PdfRuntimeCap
   };
 }
 
-function detectFeatureSignals(
+function evaluateFeatureSignals(
   analysis: PdfShellAnalysis,
   policy: PdfNormalizedAdmissionPolicy,
-): PdfFeatureSignal[] {
+): {
+  readonly signals: readonly PdfFeatureSignal[];
+  readonly authoritativeFeatureKinds: readonly PdfFeatureKind[];
+  readonly scanFallbackPolicyKinds: readonly PdfFeatureKind[];
+} {
   const parsedFeatureRefs = detectParsedFeatureRefs(analysis);
   const useScanFallback = shouldUseFeatureScanFallback(analysis);
-
-  return FEATURE_PATTERNS.map((entry) => {
+  const signals = FEATURE_PATTERNS.map((entry) => {
     const objectRef = parsedFeatureRefs.get(entry.kind);
     const usesScanEvidence = objectRef === undefined && (usesScanFeatureDetection(entry.kind) || useScanFallback);
     const detected = objectRef !== undefined || (usesScanEvidence && entry.pattern.test(analysis.scanText));
@@ -2371,13 +2425,23 @@ function detectFeatureSignals(
       message: buildFeatureSignalMessage(entry.kind, action, detected, evidenceSource, objectRef, usesScanEvidence && useScanFallback),
     };
   });
+
+  return {
+    signals,
+    authoritativeFeatureKinds: signals
+      .filter((signal) => signal.detected && signal.evidenceSource === "object")
+      .map((signal) => signal.kind),
+    scanFallbackPolicyKinds: signals
+      .filter((signal) => signal.detected && signal.evidenceSource === "scan" && requiresParsedPolicyAuthority(signal.kind))
+      .map((signal) => signal.kind),
+  };
 }
 
 function isEncryptedAnalysis(
   analysis: PdfShellAnalysis,
   policy: PdfNormalizedAdmissionPolicy,
 ): boolean {
-  return detectFeatureSignals(analysis, policy).some(
+  return evaluateFeatureSignals(analysis, policy).signals.some(
     (signal) => signal.kind === "encryption" && signal.detected,
   );
 }
@@ -2453,7 +2517,7 @@ function detectParsedFeatureRefs(
 }
 
 function shouldUseFeatureScanFallback(analysis: PdfShellAnalysis): boolean {
-  return analysis.isTruncated ||
+  return (analysis.isTruncated && !analysis.usedFullStructureScan) ||
     !analysis.parseCoverage.indirectObjects ||
     !analysis.parseCoverage.trailer ||
     analysis.repairState !== "clean";
@@ -2461,6 +2525,12 @@ function shouldUseFeatureScanFallback(analysis: PdfShellAnalysis): boolean {
 
 function usesScanFeatureDetection(kind: PdfFeatureKind): boolean {
   return kind === "hidden-text" || kind === "duplicate-text-layer";
+}
+
+function requiresParsedPolicyAuthority(kind: PdfFeatureKind): boolean {
+  return kind === "javascript-actions" ||
+    kind === "launch-actions" ||
+    kind === "encryption";
 }
 
 function buildFeatureSignalMessage(
@@ -2487,6 +2557,15 @@ function buildFeatureSignalMessage(
 
   const fallbackDetail = isFallbackScan ? " while parsed object coverage was incomplete" : "";
   return `No ${featureLabel} detected in scan fallback${fallbackDetail}.`;
+}
+
+function formatFeatureLabels(featureKinds: readonly PdfFeatureKind[]): string {
+  const labels = featureKinds.map((kind) => kind.replaceAll("-", " "));
+  if (labels.length <= 1) {
+    return labels[0] ?? "unknown features";
+  }
+
+  return `${labels.slice(0, -1).join(", ")}, and ${labels[labels.length - 1]}`;
 }
 
 function readNameValue(value: string | undefined): string | undefined {

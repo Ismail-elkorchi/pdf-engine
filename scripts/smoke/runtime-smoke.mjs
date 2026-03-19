@@ -274,6 +274,86 @@ function buildDelayedContentPdf() {
   return encodeText(template.replace("__DELAYED_STARTXREF__", String(startXrefOffset)));
 }
 
+function buildJavascriptActionPdf() {
+  const contentStreamText = [
+    "BT",
+    "(Policy Check) Tj",
+    "ET",
+  ].join("\n");
+  const template = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R /OpenAction 5 0 R >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+    "endobj",
+    "4 0 obj",
+    `<< /Length ${String(encodeText(contentStreamText).byteLength)} >>`,
+    "stream",
+    contentStreamText,
+    "endstream",
+    "endobj",
+    "5 0 obj",
+    "<< /S /JavaScript /JS (app.alert('blocked')) >>",
+    "endobj",
+    "xref",
+    "0 6",
+    "0000000000 65535 f",
+    "trailer",
+    "<< /Root 1 0 R /Size 6 >>",
+    "startxref",
+    "__JAVASCRIPT_STARTXREF__",
+    "%%EOF",
+    "",
+  ].join("\n");
+  const startXrefOffset = template.indexOf("\nxref\n0 6") + 1;
+  assert(startXrefOffset > 0, "JavaScript-policy synthetic PDF did not contain an xref section.");
+  return encodeText(template.replace("__JAVASCRIPT_STARTXREF__", String(startXrefOffset)));
+}
+
+function buildLargeBenignJavascriptCommentPdf() {
+  const delayedContentStreamText = [
+    "BT",
+    "(Large comment safe) Tj",
+    "ET",
+  ].join("\n");
+  const fillerText = "% filler /JS comment to test parser authority without an action object\n".repeat(36_000);
+  const header = "%PDF-1.4\n";
+  const objectTexts = [
+    "1 0 obj\n<< /Type /Catalog /Pages 2 0 R >>\nendobj\n",
+    "2 0 obj\n<< /Type /Pages /Kids [3 0 R] /Count 1 >>\nendobj\n",
+    "3 0 obj\n<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>\nendobj\n",
+    `4 0 obj\n<< /Length ${String(encodeText(delayedContentStreamText).byteLength)} >>\nstream\n${delayedContentStreamText}\nendstream\nendobj\n`,
+  ];
+  let offset = encodeText(header).byteLength;
+  const xrefEntries = ["0000000000 65535 f "];
+  for (const [objectIndex, objectText] of objectTexts.entries()) {
+    if (objectIndex === objectTexts.length - 1) {
+      offset += encodeText(fillerText).byteLength;
+    }
+    xrefEntries.push(`${String(offset).padStart(10, "0")} 00000 n `);
+    offset += encodeText(objectText).byteLength;
+  }
+
+  const xref = [
+    "xref",
+    "0 5",
+    ...xrefEntries,
+    "trailer",
+    "<< /Root 1 0 R /Size 5 >>",
+    "startxref",
+    String(offset),
+    "%%EOF",
+    "",
+  ].join("\n");
+
+  return encodeText(`${header}${objectTexts.slice(0, -1).join("")}${fillerText}${objectTexts[objectTexts.length - 1]}${xref}`);
+}
+
 function buildStreamBoundaryPdf() {
   const contentStreamText = [
     "BT",
@@ -475,6 +555,8 @@ const syntheticPdfTemplate = [
 
 const verticalWordColumnsPdf = buildVerticalWordColumnsPdf();
 const delayedContentPdfBytes = buildDelayedContentPdf();
+const javascriptActionPdfBytes = buildJavascriptActionPdf();
+const largeBenignJavascriptCommentPdfBytes = buildLargeBenignJavascriptCommentPdf();
 const streamBoundaryPdfBytes = buildStreamBoundaryPdf();
 const incrementalUpdatePdf = buildIncrementalUpdatePdf();
 
@@ -2237,6 +2319,30 @@ const blockedRecoveryResult = await engine.run({
     repairMode: "never",
   },
 });
+const javascriptActionAdmission = await engine.admit({
+  source: {
+    bytes: javascriptActionPdfBytes,
+    fileName: "javascript-action.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const javascriptActionAllowedAdmission = await engine.admit({
+  source: {
+    bytes: javascriptActionPdfBytes,
+    fileName: "javascript-action.pdf",
+    mediaType: "application/pdf",
+  },
+  policy: {
+    javascriptActions: "allow",
+  },
+});
+const largeBenignJavascriptCommentAdmission = await engine.admit({
+  source: {
+    bytes: largeBenignJavascriptCommentPdfBytes,
+    fileName: "large-benign-comment.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const nestedPageTreeResult = await engine.run({
   source: {
     bytes: encodeText(nestedPageTreePdf),
@@ -2488,6 +2594,10 @@ const fieldValueFormResult = await engine.run({
     fileName: "field-value-form.pdf",
     mediaType: "application/pdf",
   },
+  policy: {
+    javascriptActions: "allow",
+    launchActions: "allow",
+  },
 });
 const repeatedBoundaryResult = await engine.toLayout({
   source: {
@@ -2567,6 +2677,7 @@ const admissionAes256WithPassword = await engine.admit({
 });
 
 assert(result.runtime.kind === expectedRuntime, `Expected runtime ${expectedRuntime} but received ${result.runtime.kind}.`);
+assert(engine.identity.mode === "core", `Engine identity mode was ${engine.identity.mode}.`);
 assert(engine.identity.supportedRuntimes.includes(expectedRuntime), `Engine identity does not claim support for runtime ${expectedRuntime}.`);
 assert(engine.identity.supportedStages.includes("admission"), "Engine identity does not claim admission support.");
 assert(engine.identity.supportedStages.includes("ir"), "Engine identity does not claim IR support.");
@@ -2576,10 +2687,12 @@ assert(engine.identity.supportedStages.includes("knowledge"), "Engine identity d
 assert(result.admission.status === "completed", `Admission status was ${result.admission.status}.`);
 assert(result.ir.status === "completed", `IR status was ${result.ir.status}.`);
 assert(result.observation.status === "completed", `Observation status was ${result.observation.status}.`);
+assert(result.ir.value?.kind === "pdf-ir", `IR kind was ${result.ir.value?.kind ?? "missing"}.`);
+assert(result.observation.value?.kind === "pdf-observation", `Observation kind was ${result.observation.value?.kind ?? "missing"}.`);
 assert(result.admission.value?.repairState === "clean", `Repair state was ${result.admission.value?.repairState ?? "missing"}.`);
 assert((result.admission.value?.knownLimits.length ?? 0) === 0, "Admission known limits should be empty for the clean synthetic document.");
-assert(result.admission.value?.parseCoverage.startXref === true, "The shell did not recover startxref coverage.");
-assert(result.admission.value?.parseCoverage.trailer === true, "The shell did not recover trailer coverage.");
+assert(result.admission.value?.parseCoverage.startXref === true, "The parser did not recover startxref coverage.");
+assert(result.admission.value?.parseCoverage.trailer === true, "The parser did not recover trailer coverage.");
 assert(result.ir.value?.indirectObjects.length === 4, `Unexpected indirect-object count: ${result.ir.value?.indirectObjects.length ?? 0}.`);
 assert(result.ir.value?.decodedStreams === true, "IR did not mark operator-ready streams as available.");
 assert(result.ir.value?.resolvedInheritedPageState === true, "IR did not preserve inherited page resolution.");
@@ -2605,6 +2718,7 @@ assert(
   `Unexpected extracted text: ${JSON.stringify(result.observation.value?.extractedText ?? null)}.`,
 );
 assert(layoutResult.layout.status === "partial", `Layout status was ${layoutResult.layout.status}.`);
+assert(layoutResult.layout.value?.kind === "pdf-layout", `Layout kind was ${layoutResult.layout.value?.kind ?? "missing"}.`);
 assert(layoutResult.layout.value?.strategy === "line-blocks", "Layout strategy was not preserved.");
 assert(
   layoutResult.observation.value?.pages[0]?.runs[0]?.anchor?.x === 72 && layoutResult.observation.value?.pages[0]?.runs[0]?.anchor?.y === 720,
@@ -2647,6 +2761,7 @@ assert(
   `Paragraph-aware layout text was ${JSON.stringify(paragraphResult.layout.value?.extractedText ?? null)}.`,
 );
 assert(layoutResult.knowledge.status === "partial", `Knowledge status was ${layoutResult.knowledge.status}.`);
+assert(layoutResult.knowledge.value?.kind === "pdf-knowledge", `Knowledge kind was ${layoutResult.knowledge.value?.kind ?? "missing"}.`);
 assert(layoutResult.knowledge.value?.strategy === "layout-chunks", "Knowledge strategy was not preserved.");
 assert(
   layoutResult.knowledge.value?.chunks[0]?.citations[0]?.blockId === layoutResult.layout.value?.pages[0]?.blocks[0]?.id,
@@ -3658,6 +3773,36 @@ assert(
 assert(
   blockedRecoveryResult.admission.value?.decision === "unsupported",
   `Repair-blocked decision was ${blockedRecoveryResult.admission.value?.decision ?? "missing"}.`,
+);
+assert(
+  javascriptActionAdmission.status === "blocked",
+  `JavaScript-action admission status was ${javascriptActionAdmission.status}.`,
+);
+assert(
+  javascriptActionAdmission.value?.decision === "rejected",
+  `JavaScript-action decision was ${javascriptActionAdmission.value?.decision ?? "missing"}.`,
+);
+assert(
+  javascriptActionAdmission.diagnostics.some((diagnostic) => diagnostic.code === "feature-denied-by-policy"),
+  "JavaScript-action admission did not reject through the active policy.",
+);
+assert(
+  javascriptActionAllowedAdmission.status === "completed",
+  `Allowed JavaScript-action admission status was ${javascriptActionAllowedAdmission.status}.`,
+);
+assert(
+  javascriptActionAllowedAdmission.value?.decision === "accepted",
+  `Allowed JavaScript-action decision was ${javascriptActionAllowedAdmission.value?.decision ?? "missing"}.`,
+);
+assert(
+  largeBenignJavascriptCommentAdmission.status === "completed",
+  `Large benign-comment admission status was ${largeBenignJavascriptCommentAdmission.status}.`,
+);
+assert(
+  !largeBenignJavascriptCommentAdmission.value?.featureSignals.some(
+    (signal) => signal.kind === "javascript-actions" && signal.detected,
+  ),
+  "Large benign comment still produced a JavaScript feature detection after full-structure parsing.",
 );
 assert(observationWithoutPassword.status === "blocked", `Encrypted observe status without password was ${observationWithoutPassword.status}.`);
 assert(
