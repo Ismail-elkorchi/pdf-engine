@@ -475,7 +475,11 @@ async function finalizeIndirectObject(
   }
 
   const rawStreamBytes = readStreamBytes(objectShell, sourceBytes, objectIndex);
-  const decodedStream = await decodePdfStreamBytes(rawStreamBytes, objectShell.dictionaryEntries.get("Filter"));
+  const decodedStream = await decodePdfStreamBytes(
+    rawStreamBytes,
+    objectShell.dictionaryEntries.get("Filter"),
+    objectShell.dictionaryEntries.get("DecodeParms") ?? objectShell.dictionaryEntries.get("DP"),
+  );
 
   const finalizedBase = {
     ...objectShell,

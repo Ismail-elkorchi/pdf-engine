@@ -90,6 +90,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
     const smoke = await page.evaluate(async () => {
       const { createPdfEngine } = await import("/dist/index.js");
       const { renderPdfViewer } = await import("/dist/viewer.js");
+      const { decodePdfStreamBytes } = await import("/dist/stream-decode.js");
       const { publicSmokeFixtures, decodeFixturePdfBytes } = await import("/scripts/smoke/fixture-data.mjs");
 
       const encodeText = (value) => new TextEncoder().encode(value);
@@ -468,6 +469,18 @@ async function runBrowserSmoke(baseUrl, browserName) {
         streamBytes: encodeText("42540A2842726F777365722041534349494845582920546A0A4554>"),
         filterValue: "/ASCIIHexDecode"
       });
+      const predictorChainAscii85Bytes = Uint8Array.from(
+        globalThis.atob("R2FyOGMnJiJcMVUlSi5GbFMkKjNiai4pcmZicDAkSTVfYUJAKksyXktQMVptfj4="),
+        (character) => character.charCodeAt(0),
+      );
+      const toUnicodeLzwBytes = Uint8Array.from(
+        globalThis.atob("gAvIZJIhJNxpOggF5QORvMZTMsJMxpNxkORlOZvOpyMZlEBiMpnigKGIyEBkNJjhMgkRuBUsihjNphOAKgUEKZ5OZ0MptgxmN4gHg8hRSkJpnZyPIgFBBMhvkAphRPORkMpyihnphVIZTqQvKZ1OBwNk9MpuhIwEA+H0nMpmmxDJs0JxhNseF9OqBlFpJq1ohB5FtcKduuECuZwKh5OEek1WuAxj9HNxjN9WOZwMMdORhNxnMoKHgwGFtHhmMw+BVnMmWzGazme0AKk0wNxiMxjNBhOWiGQx02k3+qHg0HHBGHG1Ws3G63kkyct3Gdz+hHg2GumG2poWk7HLivT2Wh1kymgKuV0u0eMcbi9olEqhXpOGGilXjEajkeOBvmrWNWiqAg=="),
+        (character) => character.charCodeAt(0),
+      );
+      const ccittGroup4Bytes = Uint8Array.from(
+        globalThis.atob("JqiOiOglABAB"),
+        (character) => character.charCodeAt(0),
+      );
       const chainedFilterPdf = buildFilteredContentStreamPdfBytes({
         streamBytes: encodeText("Garg^iR2ZpatGDC/Q-Q58Bf:N:!loGal7=M!<@$9#U9~>"),
         filterValue: "[/ASCII85Decode /FlateDecode]"
@@ -509,6 +522,17 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: runLengthPdf
           }
         });
+        const chainedPredictorDecodeResult = await decodePdfStreamBytes(
+          predictorChainAscii85Bytes,
+          "[/ASCII85Decode /FlateDecode]",
+          "[null << /Predictor 12 /Colors 1 /BitsPerComponent 8 /Columns 26 >>]",
+        );
+        const lzwDecodeResult = await decodePdfStreamBytes(toUnicodeLzwBytes, "/LZWDecode");
+        const ccittDecodeResult = await decodePdfStreamBytes(
+          ccittGroup4Bytes,
+          "/CCITTFaxDecode",
+          "<< /K -1 /Columns 8 /Rows 1 /EndOfBlock false /BlackIs1 true >>",
+        );
         const identityHCidFontResult = await engine.run({
           source: {
             kind: "bytes",
@@ -689,6 +713,15 @@ async function runBrowserSmoke(baseUrl, browserName) {
           chainedFilters:
             chainedFilterResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ===
             "ASCII85Decode,FlateDecode",
+          predictorChainedDecode:
+            chainedPredictorDecodeResult.state === "decoded" &&
+            new TextDecoder().decode(chainedPredictorDecodeResult.decodedBytes ?? new Uint8Array()) === "BT\n(Predictor Hello) Tj\nET",
+          lzwDecode:
+            lzwDecodeResult.state === "decoded" &&
+            new TextDecoder().decode(lzwDecodeResult.decodedBytes ?? new Uint8Array()).includes("beginbfchar"),
+          ccittDecode:
+            ccittDecodeResult.state === "decoded" &&
+            Array.from(ccittDecodeResult.decodedBytes ?? [], (byte) => byte.toString(16).padStart(2, "0")).join("") === "aa",
           runLengthText: runLengthResult.observation.value?.extractedText === "Browser RunLength",
           observationStrategy: plainResult.observation.value?.strategy === "decoded-text-operators",
           flateDecoded: flateResult.ir.value?.decodedStreams === true,
