@@ -49,6 +49,20 @@ function decodeBase64(value) {
   return Uint8Array.from(globalThis.atob(value), (character) => character.charCodeAt(0));
 }
 
+function decodeHex(value) {
+  assert(value.length % 2 === 0, "Hex fixture text must contain an even number of digits.");
+  const decoded = new Uint8Array(value.length / 2);
+
+  for (let index = 0; index < value.length; index += 2) {
+    const byteText = value.slice(index, index + 2);
+    const byteValue = Number.parseInt(byteText, 16);
+    assert(Number.isInteger(byteValue), `Invalid hex fixture byte: ${byteText}.`);
+    decoded[index / 2] = byteValue;
+  }
+
+  return decoded;
+}
+
 async function readSmokeAssetText(assetUrl) {
   if (typeof Deno !== "undefined") {
     return await Deno.readTextFile(assetUrl);
@@ -170,6 +184,39 @@ function buildPdfWithPageContents(pageContents) {
   const xrefOffset = template.indexOf("\nxref\n") + 1;
   assert(xrefOffset > 0, "Multi-page synthetic PDF did not contain an xref section.");
   return template.replace("__STARTXREF__", String(xrefOffset));
+}
+
+function buildFilteredContentStreamPdfBytes({ streamBytes, filterValue }) {
+  const prefix = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
+    "endobj",
+    "4 0 obj",
+    `<< /Length ${String(streamBytes.byteLength)} /Filter ${filterValue} >>`,
+    "stream",
+  ].join("\n") + "\n";
+  const middle = "\nendstream\nendobj\n";
+  const xrefOffset = encodeText(prefix).byteLength + streamBytes.byteLength + encodeText(middle).byteLength;
+  const suffix = [
+    "xref",
+    "0 5",
+    "0000000000 65535 f",
+    "trailer",
+    "<< /Root 1 0 R /Size 5 >>",
+    "startxref",
+    String(xrefOffset),
+    "%%EOF",
+    "",
+  ].join("\n");
+
+  return joinBytes([encodeText(prefix), streamBytes, encodeText(middle), encodeText(suffix)]);
 }
 
 function buildVerticalWordColumnsPdf() {
@@ -340,6 +387,10 @@ const verticalWordColumnsPdf = buildVerticalWordColumnsPdf();
 const delayedContentPdfBytes = buildDelayedContentPdf();
 
 const flateStreamBytes = decodeBase64("eJxzCuHS8EjNyclXcMtJLEnVVAjJ4nIN4QIAUIcGfQ==");
+const asciiHexStreamBytes = encodeText("42540A2841534349494845582048656C6C6F2920546A0A4554>");
+const ascii85StreamBytes = encodeText("6<\":?5uU-B8N8RM87cURD^cf.C'mC/~>");
+const runLengthStreamBytes = decodeHex("1942540A2852756E4C656E6774682048656C6C6F2920546A0A455480");
+const chainedFilterStreamBytes = encodeText("Garg^iR2\\j8Bf:N9i:CNc,n)Z<!^V*EX`$L=nDqT~>");
 const flatePdfPrefix = [
   "%PDF-1.4",
   "1 0 obj",
@@ -1451,7 +1502,7 @@ const toUnicodeFlateStreamObject = joinBytes([
   encodeText("\nendstream\nendobj\n"),
 ]);
 const toUnicodeUnsupportedStreamObject = joinBytes([
-  encodeText(`<< /Length ${String(unsupportedToUnicodeBytes.byteLength)} /Filter /ASCII85Decode >>\nstream\n`),
+  encodeText(`<< /Length ${String(unsupportedToUnicodeBytes.byteLength)} /Filter /LZWDecode >>\nstream\n`),
   unsupportedToUnicodeBytes,
   encodeText("\nendstream\nendobj\n"),
 ]);
@@ -1557,6 +1608,22 @@ const flatePdfBytes = joinBytes([
   encodeText(flatePdfMiddle),
   encodeText(flatePdfSuffix),
 ]);
+const asciiHexPdfBytes = buildFilteredContentStreamPdfBytes({
+  streamBytes: asciiHexStreamBytes,
+  filterValue: "/ASCIIHexDecode",
+});
+const ascii85PdfBytes = buildFilteredContentStreamPdfBytes({
+  streamBytes: ascii85StreamBytes,
+  filterValue: "/ASCII85Decode",
+});
+const runLengthPdfBytes = buildFilteredContentStreamPdfBytes({
+  streamBytes: runLengthStreamBytes,
+  filterValue: "/RunLengthDecode",
+});
+const chainedFilterPdfBytes = buildFilteredContentStreamPdfBytes({
+  streamBytes: chainedFilterStreamBytes,
+  filterValue: "[/ASCII85Decode /FlateDecode]",
+});
 const indirectLengthFlateXrefOffset =
   encodeText(indirectLengthFlatePdfPrefix).byteLength +
   flateStreamBytes.byteLength +
@@ -1814,6 +1881,34 @@ const flateResult = await engine.run({
   source: {
     bytes: flatePdfBytes,
     fileName: "flate.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const asciiHexResult = await engine.run({
+  source: {
+    bytes: asciiHexPdfBytes,
+    fileName: "asciihex.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const ascii85Result = await engine.run({
+  source: {
+    bytes: ascii85PdfBytes,
+    fileName: "ascii85.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const runLengthResult = await engine.run({
+  source: {
+    bytes: runLengthPdfBytes,
+    fileName: "runlength.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const chainedFilterResult = await engine.run({
+  source: {
+    bytes: chainedFilterPdfBytes,
+    fileName: "ascii85-flate.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2865,6 +2960,58 @@ assert(
   `Unexpected flate extracted text: ${JSON.stringify(flateResult.observation.value?.extractedText ?? null)}.`,
 );
 assert(
+  asciiHexResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamDecodeState === "decoded",
+  "ASCIIHex stream was not marked as decoded.",
+);
+assert(
+  asciiHexResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ===
+    "ASCIIHexDecode",
+  `Unexpected ASCIIHex stream filters: ${asciiHexResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ?? "missing"}.`,
+);
+assert(
+  asciiHexResult.observation.value?.extractedText === "ASCIIHEX Hello",
+  `Unexpected ASCIIHex extracted text: ${JSON.stringify(asciiHexResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  ascii85Result.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamDecodeState === "decoded",
+  "ASCII85 stream was not marked as decoded.",
+);
+assert(
+  ascii85Result.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ===
+    "ASCII85Decode",
+  `Unexpected ASCII85 stream filters: ${ascii85Result.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ?? "missing"}.`,
+);
+assert(
+  ascii85Result.observation.value?.extractedText === "ASCII85 Hello",
+  `Unexpected ASCII85 extracted text: ${JSON.stringify(ascii85Result.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  runLengthResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamDecodeState === "decoded",
+  "RunLength stream was not marked as decoded.",
+);
+assert(
+  runLengthResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ===
+    "RunLengthDecode",
+  `Unexpected RunLength stream filters: ${runLengthResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ?? "missing"}.`,
+);
+assert(
+  runLengthResult.observation.value?.extractedText === "RunLength Hello",
+  `Unexpected RunLength extracted text: ${JSON.stringify(runLengthResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
+  chainedFilterResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamDecodeState === "decoded",
+  "Chained-filter stream was not marked as decoded.",
+);
+assert(
+  chainedFilterResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ===
+    "ASCII85Decode,FlateDecode",
+  `Unexpected chained stream filters: ${chainedFilterResult.ir.value?.indirectObjects.find((objectShell) => objectShell.ref.objectNumber === 4)?.streamFilterNames?.join(",") ?? "missing"}.`,
+);
+assert(
+  chainedFilterResult.observation.value?.extractedText === "Chained Hello",
+  `Unexpected chained-filter extracted text: ${JSON.stringify(chainedFilterResult.observation.value?.extractedText ?? null)}.`,
+);
+assert(
   indirectLengthFlateResult.ir.value?.indirectObjects[3]?.streamDecodeState === "decoded",
   "Indirect-length flate stream was not marked as decoded.",
 );
@@ -3262,6 +3409,8 @@ console.log(
       supportedRuntimes: engine.identity.supportedRuntimes,
       repairState: result.admission.value?.repairState ?? null,
       flateDecodedStreams: flateResult.ir.value?.decodedStreams ?? null,
+      ascii85Text: ascii85Result.observation.value?.extractedText ?? null,
+      chainedText: chainedFilterResult.observation.value?.extractedText ?? null,
       recoveredAdmission: recoveredResult.admission.status,
       recoveredRepairState: recoveredResult.admission.value?.repairState ?? null,
       ir: result.ir.status,
