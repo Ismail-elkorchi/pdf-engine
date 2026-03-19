@@ -15,6 +15,7 @@ import type {
   PdfStreamRole,
   PdfTrailerShell,
 } from "./contracts.ts";
+import type { PdfStandardPasswordSecurityHandler } from "./pdf-standard-security.ts";
 
 export interface ParsedIndirectObject extends PdfIndirectObjectShell {
   readonly dictionaryEntries: ReadonlyMap<string, string>;
@@ -56,6 +57,7 @@ interface ParsedMarkedContentContext {
 
 interface ParsedCrossReferenceSection extends PdfCrossReferenceSection {
   readonly trailer?: PdfTrailerShell;
+  readonly trailerEntries?: ReadonlyMap<string, string>;
 }
 
 export interface ParsedTextOperatorRun {
@@ -80,6 +82,7 @@ export interface PdfShellAnalysis {
   readonly crossReferenceKind: PdfCrossReferenceKind;
   readonly crossReferenceSections: readonly PdfCrossReferenceSection[];
   readonly trailer?: PdfTrailerShell;
+  readonly documentId?: Uint8Array;
   readonly indirectObjects: readonly ParsedIndirectObject[];
   readonly objectIndex: ReadonlyMap<string, ParsedIndirectObject>;
   readonly pageEntries: readonly ParsedPageEntry[];
@@ -98,6 +101,9 @@ const FULL_STRUCTURE_SCAN_LIMIT = 8_000_000;
 export async function analyzePdfShell(
   source: PdfDocumentSource,
   policy: PdfNormalizedAdmissionPolicy,
+  options: {
+    readonly securityHandler?: PdfStandardPasswordSecurityHandler;
+  } = {},
 ): Promise<PdfShellAnalysis> {
   const byteLength = source.bytes.byteLength;
   const scanBytes = source.bytes.subarray(0, Math.min(policy.resourceBudget.maxScanBytes, byteLength));
@@ -122,10 +128,24 @@ export async function analyzePdfShell(
   const provisionalObjectIndex = new Map(
     parsedIndirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const),
   );
-  const finalizedIndirectObjects = await finalizeIndirectObjects(parsedIndirectObjects, source.bytes, provisionalObjectIndex);
+  const finalizedIndirectObjects = await finalizeIndirectObjects(
+    parsedIndirectObjects,
+    source.bytes,
+    provisionalObjectIndex,
+    options.securityHandler,
+  );
   const expandedObjectStreamResult = expandObjectStreams(finalizedIndirectObjects);
-  const indirectObjects = expandedObjectStreamResult.indirectObjects;
+  let indirectObjects = expandedObjectStreamResult.indirectObjects;
   let objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
+  if (expandedObjectStreamResult.expanded) {
+    indirectObjects = await finalizeIndirectObjects(
+      indirectObjects,
+      source.bytes,
+      objectIndex,
+      options.securityHandler,
+    );
+    objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
+  }
   const discoveredCrossReferenceSections = shouldUseFullStructureScan
     ? collectCrossReferenceSections(structureText, indirectObjects)
     : dedupeCrossReferenceSections([
@@ -149,6 +169,11 @@ export async function analyzePdfShell(
       ? parseTrailerShell(structureText, indirectObjects)
       : parseTrailerShell(tailText, indirectObjects) ??
         (isTruncated ? parseTrailerShell(scanText, indirectObjects) : undefined));
+  const documentId = resolveCrossReferenceDocumentId(resolvedCrossReferenceSections) ??
+    (shouldUseFullStructureScan
+      ? parseTrailerDocumentId(structureText, indirectObjects)
+      : parseTrailerDocumentId(tailText, indirectObjects) ??
+        (isTruncated ? parseTrailerDocumentId(scanText, indirectObjects) : undefined));
   const pageTree = buildPageEntries(trailer, objectIndex, indirectObjects);
   const pageEntries = pageTree.pages;
   const classifiedIndirectObjects = classifyIndirectObjectStreamRoles(indirectObjects, pageEntries, objectIndex);
@@ -175,6 +200,7 @@ export async function analyzePdfShell(
     crossReferenceKind: summarizeCrossReferenceKind(crossReferenceSections),
     crossReferenceSections,
     ...(trailer !== undefined ? { trailer } : {}),
+    ...(documentId !== undefined ? { documentId } : {}),
     indirectObjects: classifiedIndirectObjects,
     objectIndex,
     pageEntries,
@@ -455,11 +481,12 @@ async function finalizeIndirectObjects(
   indirectObjects: readonly ParsedIndirectObject[],
   sourceBytes: Uint8Array,
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+  securityHandler?: PdfStandardPasswordSecurityHandler,
 ): Promise<ParsedIndirectObject[]> {
   const finalized: ParsedIndirectObject[] = [];
 
   for (const objectShell of indirectObjects) {
-    finalized.push(await finalizeIndirectObject(objectShell, sourceBytes, objectIndex));
+    finalized.push(await finalizeIndirectObject(objectShell, sourceBytes, objectIndex, securityHandler));
   }
 
   return finalized;
@@ -469,21 +496,58 @@ async function finalizeIndirectObject(
   objectShell: ParsedIndirectObject,
   sourceBytes: Uint8Array,
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+  securityHandler?: PdfStandardPasswordSecurityHandler,
 ): Promise<ParsedIndirectObject> {
-  if (!objectShell.hasStream || objectShell.streamStartOffset === undefined) {
-    return objectShell;
+  let finalizedObject = objectShell;
+  if (
+    securityHandler &&
+    objectShell.containerObjectRef === undefined &&
+    !objectShell.hasStream &&
+    objectShell.objectValueText !== undefined
+  ) {
+    const decryptedObjectValueText = await securityHandler.decryptObjectValueText(
+      objectShell.ref,
+      objectShell.objectValueText,
+      ...(objectShell.typeName !== undefined ? [{ typeName: objectShell.typeName }] : []),
+    );
+    if (decryptedObjectValueText !== objectShell.objectValueText) {
+      const decryptedDictionaryText = findFirstDictionaryToken(decryptedObjectValueText);
+      const decryptedDictionaryEntries = decryptedDictionaryText
+        ? parseDictionaryEntries(decryptedDictionaryText)
+        : objectShell.dictionaryEntries;
+      const decryptedTypeName = readNameValue(decryptedDictionaryEntries.get("Type")) ?? objectShell.typeName;
+
+      finalizedObject = {
+        ...finalizedObject,
+        objectValueText: decryptedObjectValueText,
+        dictionaryEntries: decryptedDictionaryEntries,
+        dictionaryKeys: Array.from(decryptedDictionaryEntries.keys()),
+        ...(decryptedTypeName !== undefined ? { typeName: decryptedTypeName } : {}),
+      };
+    }
   }
 
-  const rawStreamBytes = readStreamBytes(objectShell, sourceBytes, objectIndex);
+  if (!finalizedObject.hasStream || finalizedObject.streamStartOffset === undefined) {
+    return finalizedObject;
+  }
+
+  const rawStreamBytes = readStreamBytes(finalizedObject, sourceBytes, objectIndex);
+  const decryptedStreamBytes = securityHandler && rawStreamBytes !== undefined
+    ? await securityHandler.decryptStreamBytes(
+      finalizedObject.ref,
+      rawStreamBytes,
+      ...(finalizedObject.typeName !== undefined ? [{ typeName: finalizedObject.typeName }] : []),
+    )
+    : rawStreamBytes;
   const decodedStream = await decodePdfStreamBytes(
-    rawStreamBytes,
-    objectShell.dictionaryEntries.get("Filter"),
-    objectShell.dictionaryEntries.get("DecodeParms") ?? objectShell.dictionaryEntries.get("DP"),
+    decryptedStreamBytes,
+    finalizedObject.dictionaryEntries.get("Filter"),
+    finalizedObject.dictionaryEntries.get("DecodeParms") ?? finalizedObject.dictionaryEntries.get("DP"),
   );
 
   const finalizedBase = {
-    ...objectShell,
-    ...(rawStreamBytes !== undefined ? { streamByteLength: rawStreamBytes.byteLength } : {}),
+    ...finalizedObject,
+    ...(decryptedStreamBytes !== undefined ? { streamByteLength: decryptedStreamBytes.byteLength } : {}),
     ...(decodedStream.filterNames.length > 0 ? { streamFilterNames: decodedStream.filterNames } : {}),
   } satisfies ParsedIndirectObject;
 
@@ -670,6 +734,7 @@ function collectCrossReferenceSections(
       ...(toTrailerShell(objectShell.dictionaryEntries) !== undefined
         ? { trailer: toTrailerShell(objectShell.dictionaryEntries) as PdfTrailerShell }
         : {}),
+      trailerEntries: objectShell.dictionaryEntries,
     });
   }
 
@@ -731,6 +796,19 @@ function resolveCrossReferenceTrailer(
   for (const section of sections) {
     if (section.trailer !== undefined) {
       return section.trailer;
+    }
+  }
+
+  return undefined;
+}
+
+function resolveCrossReferenceDocumentId(
+  sections: readonly ParsedCrossReferenceSection[],
+): Uint8Array | undefined {
+  for (const section of sections) {
+    const documentId = readTrailerDocumentIdBytes(section.trailerEntries);
+    if (documentId !== undefined) {
+      return documentId;
     }
   }
 
@@ -901,11 +979,23 @@ function readClassicCrossReferenceSection(
     })()
     : undefined;
 
+  const trailerEntries = (() => {
+    const trailerIndex = findPdfKeyword(text, "trailer", offset);
+    if (trailerIndex < 0) {
+      return undefined;
+    }
+
+    const dictionaryStart = skipPdfWhitespaceAndComments(text, trailerIndex + "trailer".length);
+    const dictionaryText = readPdfDictionaryToken(text, dictionaryStart);
+    return dictionaryText ? parseDictionaryEntries(dictionaryText.token) : undefined;
+  })();
+
   return {
     kind: "classic",
     offset: offsetBase + keywordIndex,
     ...(entryCount > 0 ? { entryCount } : {}),
     ...(trailer !== undefined ? { trailer } : {}),
+    ...(trailerEntries !== undefined ? { trailerEntries } : {}),
   };
 }
 
@@ -948,6 +1038,35 @@ function parseTrailerShell(
   }
 
   return toTrailerShell(xrefStreamObject.dictionaryEntries);
+}
+
+function parseTrailerDocumentId(
+  text: string,
+  indirectObjects: readonly ParsedIndirectObject[],
+): Uint8Array | undefined {
+  const trailerIndex = findLastPdfKeyword(text, "trailer");
+  if (trailerIndex >= 0) {
+    const dictionaryStart = skipPdfWhitespaceAndComments(text, trailerIndex + "trailer".length);
+    const dictionaryText = readPdfDictionaryToken(text, dictionaryStart);
+    if (dictionaryText) {
+      return readTrailerDocumentIdBytes(parseDictionaryEntries(dictionaryText.token));
+    }
+  }
+
+  const xrefStreamObject = [...indirectObjects].reverse().find((objectShell) => objectShell.typeName === "XRef");
+  return readTrailerDocumentIdBytes(xrefStreamObject?.dictionaryEntries);
+}
+
+function readTrailerDocumentIdBytes(
+  dictionaryEntries: ReadonlyMap<string, string> | undefined,
+): Uint8Array | undefined {
+  const idValue = dictionaryEntries?.get("ID");
+  if (!idValue || !idValue.trim().startsWith("[")) {
+    return undefined;
+  }
+
+  const stringToken = readFirstPdfStringToken(idValue);
+  return stringToken ? decodePdfTokenBytes(stringToken) : undefined;
 }
 
 function toTrailerShell(dictionaryEntries: ReadonlyMap<string, string>): PdfTrailerShell | undefined {
@@ -1428,6 +1547,22 @@ function readPdfHexStringToken(
         token: text.slice(startIndex, index + 1),
         nextIndex: index + 1,
       };
+    }
+  }
+
+  return undefined;
+}
+
+function readFirstPdfStringToken(text: string): string | undefined {
+  for (let index = 0; index < text.length; index += 1) {
+    const literalToken = readPdfLiteralToken(text, index);
+    if (literalToken) {
+      return literalToken.token;
+    }
+
+    const hexToken = readPdfHexStringToken(text, index);
+    if (hexToken) {
+      return hexToken.token;
     }
   }
 
@@ -2241,6 +2376,21 @@ export function decodePdfLiteral(token: string): string {
   }
 
   return result;
+}
+
+function decodePdfTokenBytes(token: string): Uint8Array {
+  if (token.startsWith("(")) {
+    const decodedText = decodePdfLiteral(token);
+    return Uint8Array.from(decodedText, (character) => character.charCodeAt(0) & 0xff);
+  }
+
+  const normalizedHex = token.slice(1, -1).replace(/\s+/g, "");
+  const paddedHex = normalizedHex.length % 2 === 0 ? normalizedHex : `${normalizedHex}0`;
+  const decodedBytes = new Uint8Array(paddedHex.length / 2);
+  for (let index = 0; index < paddedHex.length; index += 2) {
+    decodedBytes[index / 2] = Number.parseInt(paddedHex.slice(index, index + 2), 16);
+  }
+  return decodedBytes;
 }
 
 function findFirstDictionaryToken(text: string): string | undefined {

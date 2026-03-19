@@ -1,0 +1,1341 @@
+import type { PdfObjectRef } from "./contracts.ts";
+
+type PdfStandardSecurityMethod = "none" | "rc4" | "aes-128";
+
+interface PdfCryptFilter {
+  readonly method: PdfStandardSecurityMethod;
+}
+
+interface PdfEncryptionDictionary {
+  readonly algorithm: number;
+  readonly revision: number;
+  readonly permissions: number;
+  readonly keyLengthBytes: number;
+  readonly encryptMetadata: boolean;
+  readonly ownerBytes: Uint8Array;
+  readonly userBytes: Uint8Array;
+  readonly stringMethod: PdfStandardSecurityMethod;
+  readonly streamMethod: PdfStandardSecurityMethod;
+}
+
+export interface PdfStandardPasswordSecurityHandler {
+  decryptObjectValueText(
+    objectRef: PdfObjectRef,
+    objectValueText: string,
+    options?: {
+      readonly typeName?: string;
+    },
+  ): Promise<string>;
+  decryptStreamBytes(
+    objectRef: PdfObjectRef,
+    rawStreamBytes: Uint8Array,
+    options?: {
+      readonly typeName?: string;
+    },
+  ): Promise<Uint8Array>;
+}
+
+export type PdfStandardPasswordSecurityPreparation =
+  | {
+    readonly status: "decrypted";
+    readonly handler: PdfStandardPasswordSecurityHandler;
+  }
+  | {
+    readonly status: "invalid-password";
+    readonly detail: string;
+  }
+  | {
+    readonly status: "unsupported";
+    readonly detail: string;
+  };
+
+export interface PdfStandardPasswordSecurityRequest {
+  readonly documentId: Uint8Array;
+  readonly encryptDictionaryEntries: ReadonlyMap<string, string>;
+  readonly encryptObjectRef: PdfObjectRef;
+  readonly password: string;
+}
+
+const STANDARD_PASSWORD_PADDING = Uint8Array.from([
+  0x28,
+  0xbf,
+  0x4e,
+  0x5e,
+  0x4e,
+  0x75,
+  0x8a,
+  0x41,
+  0x64,
+  0x00,
+  0x4e,
+  0x56,
+  0xff,
+  0xfa,
+  0x01,
+  0x08,
+  0x2e,
+  0x2e,
+  0x00,
+  0xb6,
+  0xd0,
+  0x68,
+  0x3e,
+  0x80,
+  0x2f,
+  0x0c,
+  0xa9,
+  0xfe,
+  0x64,
+  0x53,
+  0x69,
+  0x7a,
+]);
+
+const AES_OBJECT_KEY_SALT = Uint8Array.from([0x73, 0x41, 0x6c, 0x54]);
+
+export function preparePdfStandardPasswordSecurity(
+  request: PdfStandardPasswordSecurityRequest,
+): PdfStandardPasswordSecurityPreparation {
+  const encryptionDictionary = parseEncryptionDictionary(request.encryptDictionaryEntries);
+  if (!encryptionDictionary) {
+    return {
+      status: "unsupported",
+      detail: "The encryption dictionary is missing required standard-handler fields.",
+    };
+  }
+
+  if (
+    encryptionDictionary.algorithm !== 1 &&
+    encryptionDictionary.algorithm !== 2 &&
+    encryptionDictionary.algorithm !== 4
+  ) {
+    return {
+      status: "unsupported",
+      detail: `Unsupported standard security algorithm V=${String(encryptionDictionary.algorithm)}.`,
+    };
+  }
+
+  if (
+    encryptionDictionary.revision !== 2 &&
+    encryptionDictionary.revision !== 3 &&
+    encryptionDictionary.revision !== 4
+  ) {
+    return {
+      status: "unsupported",
+      detail: `Unsupported standard security revision R=${String(encryptionDictionary.revision)}.`,
+    };
+  }
+
+  const encryptionKey = deriveStandardEncryptionKey({
+    encryptionDictionary,
+    documentId: request.documentId,
+    password: request.password,
+  });
+  if (!encryptionKey) {
+    return {
+      status: "invalid-password",
+      detail: "The supplied password did not unlock the standard security handler.",
+    };
+  }
+
+  return {
+    status: "decrypted",
+    handler: new StandardPasswordSecurityHandler(
+      encryptionDictionary,
+      request.encryptObjectRef,
+      encryptionKey,
+    ),
+  };
+}
+
+class StandardPasswordSecurityHandler implements PdfStandardPasswordSecurityHandler {
+  readonly #encryptionDictionary: PdfEncryptionDictionary;
+  readonly #encryptObjectRef: PdfObjectRef;
+  readonly #encryptionKey: Uint8Array;
+
+  constructor(
+    encryptionDictionary: PdfEncryptionDictionary,
+    encryptObjectRef: PdfObjectRef,
+    encryptionKey: Uint8Array,
+  ) {
+    this.#encryptionDictionary = encryptionDictionary;
+    this.#encryptObjectRef = encryptObjectRef;
+    this.#encryptionKey = encryptionKey;
+  }
+
+  async decryptObjectValueText(
+    objectRef: PdfObjectRef,
+    objectValueText: string,
+    options?: {
+      readonly typeName?: string;
+    },
+  ): Promise<string> {
+    if (this.#shouldBypassObject(objectRef, options?.typeName)) {
+      return objectValueText;
+    }
+
+    if (this.#encryptionDictionary.stringMethod === "none") {
+      return objectValueText;
+    }
+
+    let index = 0;
+    let decryptedText = "";
+
+    while (index < objectValueText.length) {
+      const current = objectValueText[index] ?? "";
+
+      if (current === "(") {
+        const literalToken = readPdfLiteralToken(objectValueText, index);
+        if (!literalToken) {
+          decryptedText += current;
+          index += 1;
+          continue;
+        }
+
+        const decryptedBytes = await this.#decryptBytes(
+          objectRef,
+          decodePdfLiteralTokenBytes(literalToken.token),
+          this.#encryptionDictionary.stringMethod,
+        );
+        decryptedText += encodePdfHexStringToken(decryptedBytes);
+        index = literalToken.nextIndex;
+        continue;
+      }
+
+      if (current === "<" && objectValueText[index + 1] !== "<") {
+        const hexToken = readPdfHexStringToken(objectValueText, index);
+        if (!hexToken) {
+          decryptedText += current;
+          index += 1;
+          continue;
+        }
+
+        const decryptedBytes = await this.#decryptBytes(
+          objectRef,
+          decodePdfHexStringTokenBytes(hexToken.token),
+          this.#encryptionDictionary.stringMethod,
+        );
+        decryptedText += encodePdfHexStringToken(decryptedBytes);
+        index = hexToken.nextIndex;
+        continue;
+      }
+
+      decryptedText += current;
+      index += 1;
+    }
+
+    return decryptedText;
+  }
+
+  async decryptStreamBytes(
+    objectRef: PdfObjectRef,
+    rawStreamBytes: Uint8Array,
+    options?: {
+      readonly typeName?: string;
+    },
+  ): Promise<Uint8Array> {
+    if (this.#shouldBypassObject(objectRef, options?.typeName)) {
+      return Uint8Array.from(rawStreamBytes);
+    }
+
+    if (this.#encryptionDictionary.streamMethod === "none") {
+      return Uint8Array.from(rawStreamBytes);
+    }
+
+    return this.#decryptBytes(objectRef, rawStreamBytes, this.#encryptionDictionary.streamMethod);
+  }
+
+  #shouldBypassObject(
+    objectRef: PdfObjectRef,
+    typeName: string | undefined,
+  ): boolean {
+    if (
+      objectRef.objectNumber === this.#encryptObjectRef.objectNumber &&
+      objectRef.generationNumber === this.#encryptObjectRef.generationNumber
+    ) {
+      return true;
+    }
+
+    if (!this.#encryptionDictionary.encryptMetadata && typeName === "Metadata") {
+      return true;
+    }
+
+    return typeName === "XRef";
+  }
+
+  async #decryptBytes(
+    objectRef: PdfObjectRef,
+    encryptedBytes: Uint8Array,
+    method: PdfStandardSecurityMethod,
+  ): Promise<Uint8Array> {
+    switch (method) {
+      case "none":
+        return Uint8Array.from(encryptedBytes);
+      case "rc4":
+        return new PdfArcFourCipher(this.#buildObjectKey(objectRef, false)).crypt(encryptedBytes);
+      case "aes-128":
+        return decryptAes128Bytes(this.#buildObjectKey(objectRef, true), encryptedBytes);
+    }
+  }
+
+  #buildObjectKey(objectRef: PdfObjectRef, includeAesSalt: boolean): Uint8Array {
+    const objectKeyBytes = new Uint8Array(this.#encryptionKey.length + 9);
+    objectKeyBytes.set(this.#encryptionKey, 0);
+    let offset = this.#encryptionKey.length;
+    objectKeyBytes[offset] = objectRef.objectNumber & 0xff;
+    offset += 1;
+    objectKeyBytes[offset] = (objectRef.objectNumber >> 8) & 0xff;
+    offset += 1;
+    objectKeyBytes[offset] = (objectRef.objectNumber >> 16) & 0xff;
+    offset += 1;
+    objectKeyBytes[offset] = objectRef.generationNumber & 0xff;
+    offset += 1;
+    objectKeyBytes[offset] = (objectRef.generationNumber >> 8) & 0xff;
+    offset += 1;
+    if (includeAesSalt) {
+      objectKeyBytes.set(AES_OBJECT_KEY_SALT, offset);
+      offset += AES_OBJECT_KEY_SALT.length;
+    }
+
+    const hash = calculateMd5(objectKeyBytes.subarray(0, offset));
+    return hash.subarray(0, Math.min(this.#encryptionKey.length + 5, 16));
+  }
+}
+
+function deriveStandardEncryptionKey(
+  input: {
+    readonly encryptionDictionary: PdfEncryptionDictionary;
+    readonly documentId: Uint8Array;
+    readonly password: string;
+  },
+): Uint8Array | undefined {
+  const passwordBytes = encodePdfPassword(input.password);
+  const userKeyCandidate = prepareLegacyEncryptionKey({
+    passwordBytes,
+    ownerBytes: input.encryptionDictionary.ownerBytes,
+    userBytes: input.encryptionDictionary.userBytes,
+    permissions: input.encryptionDictionary.permissions,
+    revision: input.encryptionDictionary.revision,
+    keyLengthBytes: input.encryptionDictionary.keyLengthBytes,
+    documentId: input.documentId,
+    encryptMetadata: input.encryptionDictionary.encryptMetadata,
+  });
+  if (userKeyCandidate) {
+    return normalizeAlgorithmFourKey(input.encryptionDictionary.algorithm, userKeyCandidate);
+  }
+
+  const ownerPasswordBytes = decodeOwnerPassword({
+    ownerPasswordBytes: passwordBytes,
+    ownerBytes: input.encryptionDictionary.ownerBytes,
+    revision: input.encryptionDictionary.revision,
+    keyLengthBytes: input.encryptionDictionary.keyLengthBytes,
+  });
+  const ownerKeyCandidate = prepareLegacyEncryptionKey({
+    passwordBytes: ownerPasswordBytes,
+    ownerBytes: input.encryptionDictionary.ownerBytes,
+    userBytes: input.encryptionDictionary.userBytes,
+    permissions: input.encryptionDictionary.permissions,
+    revision: input.encryptionDictionary.revision,
+    keyLengthBytes: input.encryptionDictionary.keyLengthBytes,
+    documentId: input.documentId,
+    encryptMetadata: input.encryptionDictionary.encryptMetadata,
+  });
+  return ownerKeyCandidate
+    ? normalizeAlgorithmFourKey(input.encryptionDictionary.algorithm, ownerKeyCandidate)
+    : undefined;
+}
+
+function normalizeAlgorithmFourKey(
+  algorithm: number,
+  encryptionKey: Uint8Array,
+): Uint8Array {
+  if (algorithm === 4 && encryptionKey.byteLength < 16) {
+    const normalizedKey = new Uint8Array(16);
+    normalizedKey.set(encryptionKey);
+    return normalizedKey;
+  }
+
+  return encryptionKey;
+}
+
+function prepareLegacyEncryptionKey(
+  input: {
+    readonly passwordBytes: Uint8Array;
+    readonly ownerBytes: Uint8Array;
+    readonly userBytes: Uint8Array;
+    readonly permissions: number;
+    readonly revision: number;
+    readonly keyLengthBytes: number;
+    readonly documentId: Uint8Array;
+    readonly encryptMetadata: boolean;
+  },
+): Uint8Array | undefined {
+  const paddedPassword = padPdfPassword(input.passwordBytes);
+  const hashInput = new Uint8Array(
+    paddedPassword.byteLength +
+      input.ownerBytes.byteLength +
+      4 +
+      input.documentId.byteLength +
+      (input.revision >= 4 && !input.encryptMetadata ? 4 : 0),
+  );
+  let offset = 0;
+  hashInput.set(paddedPassword, offset);
+  offset += paddedPassword.byteLength;
+  hashInput.set(input.ownerBytes, offset);
+  offset += input.ownerBytes.byteLength;
+  writeInt32LittleEndian(hashInput, offset, input.permissions);
+  offset += 4;
+  hashInput.set(input.documentId, offset);
+  offset += input.documentId.byteLength;
+  if (input.revision >= 4 && !input.encryptMetadata) {
+    hashInput.fill(0xff, offset, offset + 4);
+    offset += 4;
+  }
+
+  let hash = calculateMd5(hashInput.subarray(0, offset));
+  if (input.revision >= 3) {
+    for (let iteration = 0; iteration < 50; iteration += 1) {
+      hash = calculateMd5(hash.subarray(0, input.keyLengthBytes));
+    }
+  }
+
+  const encryptionKey = hash.subarray(0, input.keyLengthBytes);
+  const expectedUserBytes = buildExpectedUserValidationBytes({
+    encryptionKey,
+    revision: input.revision,
+    documentId: input.documentId,
+  });
+
+  if (input.revision >= 3) {
+    const expectedPrefix = expectedUserBytes.subarray(0, 16);
+    const actualPrefix = input.userBytes.subarray(0, 16);
+    return areBytesEqual(expectedPrefix, actualPrefix) ? encryptionKey : undefined;
+  }
+
+  return areBytesEqual(expectedUserBytes, input.userBytes) ? encryptionKey : undefined;
+}
+
+function decodeOwnerPassword(
+  input: {
+    readonly ownerPasswordBytes: Uint8Array;
+    readonly ownerBytes: Uint8Array;
+    readonly revision: number;
+    readonly keyLengthBytes: number;
+  },
+): Uint8Array {
+  const paddedPassword = padPdfPassword(input.ownerPasswordBytes);
+  let hash = calculateMd5(paddedPassword);
+  if (input.revision >= 3) {
+    for (let iteration = 0; iteration < 50; iteration += 1) {
+      hash = calculateMd5(hash);
+    }
+  }
+
+  let decodedBytes = Uint8Array.from(input.ownerBytes);
+  if (input.revision >= 3) {
+    for (let iteration = 19; iteration >= 0; iteration -= 1) {
+      const derivedKey = xorBytes(hash.subarray(0, input.keyLengthBytes), iteration);
+      decodedBytes = Uint8Array.from(new PdfArcFourCipher(derivedKey).crypt(decodedBytes));
+    }
+    return decodedBytes;
+  }
+
+  return Uint8Array.from(new PdfArcFourCipher(hash.subarray(0, input.keyLengthBytes)).crypt(decodedBytes));
+}
+
+function buildExpectedUserValidationBytes(
+  input: {
+    readonly encryptionKey: Uint8Array;
+    readonly revision: number;
+    readonly documentId: Uint8Array;
+  },
+): Uint8Array {
+  if (input.revision >= 3) {
+    const validationSeed = new Uint8Array(
+      STANDARD_PASSWORD_PADDING.byteLength + input.documentId.byteLength,
+    );
+    validationSeed.set(STANDARD_PASSWORD_PADDING, 0);
+    validationSeed.set(input.documentId, STANDARD_PASSWORD_PADDING.byteLength);
+    let validationBytes = new PdfArcFourCipher(input.encryptionKey).crypt(calculateMd5(validationSeed));
+    for (let iteration = 1; iteration <= 19; iteration += 1) {
+      validationBytes = new PdfArcFourCipher(xorBytes(input.encryptionKey, iteration)).crypt(validationBytes);
+    }
+
+    const output = new Uint8Array(32);
+    output.set(validationBytes, 0);
+    return output;
+  }
+
+  return new PdfArcFourCipher(input.encryptionKey).crypt(STANDARD_PASSWORD_PADDING);
+}
+
+function parseEncryptionDictionary(
+  dictionaryEntries: ReadonlyMap<string, string>,
+): PdfEncryptionDictionary | undefined {
+  const filterName = readNameValue(dictionaryEntries.get("Filter"));
+  if (filterName !== "Standard") {
+    return undefined;
+  }
+
+  const algorithm = readSignedIntegerValue(dictionaryEntries.get("V"));
+  const revision = readSignedIntegerValue(dictionaryEntries.get("R"));
+  const permissions = readSignedIntegerValue(dictionaryEntries.get("P"));
+  const ownerBytes = decodePdfStringTokenBytes(dictionaryEntries.get("O"));
+  const userBytes = decodePdfStringTokenBytes(dictionaryEntries.get("U"));
+  if (
+    algorithm === undefined ||
+    revision === undefined ||
+    permissions === undefined ||
+    ownerBytes === undefined ||
+    userBytes === undefined
+  ) {
+    return undefined;
+  }
+
+  const cryptFilters = parseCryptFilters(dictionaryEntries.get("CF"));
+  const defaultKeyLengthBits = cryptFilters.get("StdCF")?.keyLengthBits ??
+    readSignedIntegerValue(dictionaryEntries.get("Length")) ??
+    40;
+  const keyLengthBits = defaultKeyLengthBits < 40 ? defaultKeyLengthBits * 8 : defaultKeyLengthBits;
+  const stringMethod = resolveCryptFilterMethod(
+    algorithm,
+    cryptFilters,
+    readNameValue(dictionaryEntries.get("StrF")) ?? "Identity",
+  );
+  const streamMethod = resolveCryptFilterMethod(
+    algorithm,
+    cryptFilters,
+    readNameValue(dictionaryEntries.get("StmF")) ?? "Identity",
+  );
+
+  return {
+    algorithm,
+    revision,
+    permissions,
+    keyLengthBytes: Math.max(5, Math.floor(keyLengthBits / 8)),
+    encryptMetadata: readBooleanValue(dictionaryEntries.get("EncryptMetadata")) ?? true,
+    ownerBytes,
+    userBytes,
+    stringMethod,
+    streamMethod,
+  };
+}
+
+function parseCryptFilters(
+  value: string | undefined,
+): ReadonlyMap<string, PdfCryptFilter & { readonly keyLengthBits?: number }> {
+  const filters = new Map<string, PdfCryptFilter & { readonly keyLengthBits?: number }>();
+  if (!value) {
+    return filters;
+  }
+
+  const topLevelEntries = parseDictionaryEntries(value);
+  for (const [filterName, filterValue] of topLevelEntries) {
+    const filterEntries = parseDictionaryEntries(filterValue);
+    if (filterEntries.size === 0) {
+      continue;
+    }
+
+    const keyLengthBits = readCryptFilterKeyLengthBits(filterEntries);
+    filters.set(
+      filterName,
+      keyLengthBits !== undefined
+        ? {
+          method: resolveCryptFilterMethodByName(readNameValue(filterEntries.get("CFM"))),
+          keyLengthBits,
+        }
+        : {
+          method: resolveCryptFilterMethodByName(readNameValue(filterEntries.get("CFM"))),
+        },
+    );
+  }
+
+  return filters;
+}
+
+function readCryptFilterKeyLengthBits(
+  dictionaryEntries: {
+    get(key: string): string | undefined;
+  } | undefined,
+): number | undefined {
+  if (!dictionaryEntries) {
+    return undefined;
+  }
+
+  const directLength = readSignedIntegerValue(dictionaryEntries.get("Length"));
+  if (directLength === undefined) {
+    return undefined;
+  }
+
+  return directLength < 40 ? directLength * 8 : directLength;
+}
+
+function resolveCryptFilterMethod(
+  algorithm: number,
+  cryptFilters: ReadonlyMap<string, PdfCryptFilter>,
+  filterName: string,
+): PdfStandardSecurityMethod {
+  if (algorithm < 4) {
+    return "rc4";
+  }
+
+  if (filterName === "Identity") {
+    return "none";
+  }
+
+  return cryptFilters.get(filterName)?.method ?? "none";
+}
+
+function resolveCryptFilterMethodByName(
+  filterMethodName: string | undefined,
+): PdfStandardSecurityMethod {
+  switch (filterMethodName) {
+    case undefined:
+    case "None":
+      return "none";
+    case "V2":
+      return "rc4";
+    case "AESV2":
+      return "aes-128";
+    default:
+      return "none";
+  }
+}
+
+function decodePdfStringTokenBytes(
+  token: string | undefined,
+): Uint8Array | undefined {
+  if (!token) {
+    return undefined;
+  }
+
+  const trimmed = token.trim();
+  if (trimmed.startsWith("(")) {
+    return decodePdfLiteralTokenBytes(trimmed);
+  }
+  if (trimmed.startsWith("<") && !trimmed.startsWith("<<")) {
+    return decodePdfHexStringTokenBytes(trimmed);
+  }
+  return undefined;
+}
+
+function decodePdfLiteralTokenBytes(token: string): Uint8Array {
+  const source = token.startsWith("(") && token.endsWith(")") ? token.slice(1, -1) : token;
+  const decodedBytes: number[] = [];
+
+  for (let index = 0; index < source.length; index += 1) {
+    const current = source[index] ?? "";
+    if (current !== "\\") {
+      decodedBytes.push(source.charCodeAt(index) & 0xff);
+      continue;
+    }
+
+    const next = source[index + 1];
+    if (next === undefined) {
+      break;
+    }
+
+    if (/[0-7]/.test(next)) {
+      let octal = next;
+      if (/[0-7]/.test(source[index + 2] ?? "")) {
+        octal += source[index + 2];
+      }
+      if (/[0-7]/.test(source[index + 3] ?? "")) {
+        octal += source[index + 3];
+      }
+      decodedBytes.push(Number.parseInt(octal, 8));
+      index += octal.length;
+      continue;
+    }
+
+    switch (next) {
+      case "n":
+        decodedBytes.push(0x0a);
+        break;
+      case "r":
+        decodedBytes.push(0x0d);
+        break;
+      case "t":
+        decodedBytes.push(0x09);
+        break;
+      case "b":
+        decodedBytes.push(0x08);
+        break;
+      case "f":
+        decodedBytes.push(0x0c);
+        break;
+      case "\r":
+        if (source[index + 2] === "\n") {
+          index += 1;
+        }
+        break;
+      case "\n":
+        break;
+      default:
+        decodedBytes.push(next.charCodeAt(0) & 0xff);
+        break;
+    }
+    index += 1;
+  }
+
+  return Uint8Array.from(decodedBytes);
+}
+
+function decodePdfHexStringTokenBytes(token: string): Uint8Array {
+  const hexSource = token.slice(1, -1).replace(/\s+/g, "");
+  const normalizedHexSource = hexSource.length % 2 === 0 ? hexSource : `${hexSource}0`;
+  const decodedBytes = new Uint8Array(normalizedHexSource.length / 2);
+
+  for (let index = 0; index < normalizedHexSource.length; index += 2) {
+    decodedBytes[index / 2] = Number.parseInt(normalizedHexSource.slice(index, index + 2), 16);
+  }
+
+  return decodedBytes;
+}
+
+function encodePdfHexStringToken(bytes: Uint8Array): string {
+  return `<${Array.from(bytes, (value) => value.toString(16).padStart(2, "0")).join("")}>`;
+}
+
+function encodePdfPassword(password: string): Uint8Array {
+  return Uint8Array.from(password, (character) => character.charCodeAt(0) & 0xff);
+}
+
+function padPdfPassword(passwordBytes: Uint8Array): Uint8Array {
+  const paddedBytes = new Uint8Array(32);
+  const copyLength = Math.min(32, passwordBytes.byteLength);
+  paddedBytes.set(passwordBytes.subarray(0, copyLength), 0);
+  paddedBytes.set(STANDARD_PASSWORD_PADDING.subarray(0, 32 - copyLength), copyLength);
+  return paddedBytes;
+}
+
+function areBytesEqual(leftBytes: Uint8Array, rightBytes: Uint8Array): boolean {
+  if (leftBytes.byteLength !== rightBytes.byteLength) {
+    return false;
+  }
+
+  for (let index = 0; index < leftBytes.byteLength; index += 1) {
+    if (leftBytes[index] !== rightBytes[index]) {
+      return false;
+    }
+  }
+
+  return true;
+}
+
+function xorBytes(bytes: Uint8Array, xorValue: number): Uint8Array {
+  return Uint8Array.from(bytes, (value) => value ^ xorValue);
+}
+
+function writeInt32LittleEndian(
+  targetBytes: Uint8Array,
+  offset: number,
+  value: number,
+): void {
+  targetBytes[offset] = value & 0xff;
+  targetBytes[offset + 1] = (value >> 8) & 0xff;
+  targetBytes[offset + 2] = (value >> 16) & 0xff;
+  targetBytes[offset + 3] = (value >> 24) & 0xff;
+}
+
+async function decryptAes128Bytes(
+  objectKey: Uint8Array,
+  encryptedBytes: Uint8Array,
+): Promise<Uint8Array> {
+  if (encryptedBytes.byteLength < 16) {
+    return new Uint8Array();
+  }
+
+  const initializationVector = encryptedBytes.subarray(0, 16);
+  const cipherBytes = encryptedBytes.subarray(16);
+  const cryptoApi = globalThis.crypto?.subtle;
+  if (!cryptoApi) {
+    throw new Error("SubtleCrypto is required for AES decryption.");
+  }
+
+  const cryptoKey = await cryptoApi.importKey("raw", toPlainUint8Array(objectKey), { name: "AES-CBC" }, false, ["decrypt"]);
+  const decryptedBuffer = await cryptoApi.decrypt(
+    { name: "AES-CBC", iv: toPlainUint8Array(initializationVector) },
+    cryptoKey,
+    toPlainUint8Array(cipherBytes),
+  );
+  return removePkcs7Padding(new Uint8Array(decryptedBuffer));
+}
+
+function toPlainUint8Array(bytes: Uint8Array): Uint8Array<ArrayBuffer> {
+  const plainBytes = new Uint8Array(new ArrayBuffer(bytes.byteLength));
+  plainBytes.set(bytes, 0);
+  return plainBytes;
+}
+
+function removePkcs7Padding(bytes: Uint8Array): Uint8Array {
+  if (bytes.byteLength === 0) {
+    return bytes;
+  }
+
+  const paddingLength = bytes[bytes.byteLength - 1] ?? 0;
+  if (paddingLength <= 0 || paddingLength > 16 || paddingLength > bytes.byteLength) {
+    return bytes;
+  }
+
+  for (let index = bytes.byteLength - paddingLength; index < bytes.byteLength; index += 1) {
+    if (bytes[index] !== paddingLength) {
+      return bytes;
+    }
+  }
+
+  return bytes.subarray(0, bytes.byteLength - paddingLength);
+}
+
+class PdfArcFourCipher {
+  readonly #state: Uint8Array;
+  #indexA = 0;
+  #indexB = 0;
+
+  constructor(keyBytes: Uint8Array) {
+    const state = new Uint8Array(256);
+    for (let index = 0; index < 256; index += 1) {
+      state[index] = index;
+    }
+
+    let stateIndex = 0;
+    for (let index = 0; index < 256; index += 1) {
+      stateIndex = (stateIndex + state[index]! + keyBytes[index % keyBytes.byteLength]!) & 0xff;
+      const temporaryValue = state[index];
+      state[index] = state[stateIndex]!;
+      state[stateIndex] = temporaryValue!;
+    }
+
+    this.#state = state;
+  }
+
+  crypt(inputBytes: Uint8Array): Uint8Array {
+    const outputBytes = new Uint8Array(inputBytes.byteLength);
+
+    for (let index = 0; index < inputBytes.byteLength; index += 1) {
+      this.#indexA = (this.#indexA + 1) & 0xff;
+      const temporaryValue = this.#state[this.#indexA]!;
+      this.#indexB = (this.#indexB + temporaryValue) & 0xff;
+      const swapValue = this.#state[this.#indexB]!;
+      this.#state[this.#indexA] = swapValue;
+      this.#state[this.#indexB] = temporaryValue;
+      outputBytes[index] = inputBytes[index]! ^ this.#state[(temporaryValue + swapValue) & 0xff]!;
+    }
+
+    return outputBytes;
+  }
+}
+
+function calculateMd5(inputBytes: Uint8Array): Uint8Array {
+  const paddedBytes = padMd5Bytes(inputBytes);
+  let hashA = 0x67452301;
+  let hashB = 0xefcdab89;
+  let hashC = 0x98badcfe;
+  let hashD = 0x10325476;
+
+  const words = new Uint32Array(16);
+  for (let offset = 0; offset < paddedBytes.byteLength; offset += 64) {
+    for (let wordIndex = 0; wordIndex < 16; wordIndex += 1) {
+      const wordOffset = offset + wordIndex * 4;
+      words[wordIndex] =
+        (paddedBytes[wordOffset] ?? 0) |
+        ((paddedBytes[wordOffset + 1] ?? 0) << 8) |
+        ((paddedBytes[wordOffset + 2] ?? 0) << 16) |
+        ((paddedBytes[wordOffset + 3] ?? 0) << 24);
+    }
+
+    let roundA = hashA;
+    let roundB = hashB;
+    let roundC = hashC;
+    let roundD = hashD;
+
+    for (let iteration = 0; iteration < 64; iteration += 1) {
+      let roundFunction: number;
+      let wordIndex: number;
+
+      if (iteration < 16) {
+        roundFunction = (roundB & roundC) | (~roundB & roundD);
+        wordIndex = iteration;
+      } else if (iteration < 32) {
+        roundFunction = (roundD & roundB) | (~roundD & roundC);
+        wordIndex = (5 * iteration + 1) % 16;
+      } else if (iteration < 48) {
+        roundFunction = roundB ^ roundC ^ roundD;
+        wordIndex = (3 * iteration + 5) % 16;
+      } else {
+        roundFunction = roundC ^ (roundB | ~roundD);
+        wordIndex = (7 * iteration) % 16;
+      }
+
+      const nextValue = roundD;
+      roundD = roundC;
+      roundC = roundB;
+      roundB = addUint32(
+        roundB,
+        rotateLeftUint32(
+          addUint32(
+            roundA,
+            roundFunction,
+            MD5_ROUND_CONSTANTS[iteration]!,
+            words[wordIndex]!,
+          ),
+          MD5_SHIFT_AMOUNTS[iteration]!,
+        ),
+      );
+      roundA = nextValue;
+    }
+
+    hashA = addUint32(hashA, roundA);
+    hashB = addUint32(hashB, roundB);
+    hashC = addUint32(hashC, roundC);
+    hashD = addUint32(hashD, roundD);
+  }
+
+  const outputBytes = new Uint8Array(16);
+  writeUint32LittleEndian(outputBytes, 0, hashA);
+  writeUint32LittleEndian(outputBytes, 4, hashB);
+  writeUint32LittleEndian(outputBytes, 8, hashC);
+  writeUint32LittleEndian(outputBytes, 12, hashD);
+  return outputBytes;
+}
+
+function padMd5Bytes(inputBytes: Uint8Array): Uint8Array {
+  const paddedLength = ((((inputBytes.byteLength + 8) >> 6) + 1) << 6);
+  const paddedBytes = new Uint8Array(paddedLength);
+  paddedBytes.set(inputBytes, 0);
+  paddedBytes[inputBytes.byteLength] = 0x80;
+
+  const bitLength = BigInt(inputBytes.byteLength) * 8n;
+  for (let index = 0; index < 8; index += 1) {
+    paddedBytes[paddedBytes.byteLength - 8 + index] = Number((bitLength >> BigInt(index * 8)) & 0xffn);
+  }
+
+  return paddedBytes;
+}
+
+function writeUint32LittleEndian(
+  targetBytes: Uint8Array,
+  offset: number,
+  value: number,
+): void {
+  targetBytes[offset] = value & 0xff;
+  targetBytes[offset + 1] = (value >>> 8) & 0xff;
+  targetBytes[offset + 2] = (value >>> 16) & 0xff;
+  targetBytes[offset + 3] = (value >>> 24) & 0xff;
+}
+
+function addUint32(...values: readonly number[]): number {
+  let sum = 0;
+  for (const value of values) {
+    sum = (sum + value) >>> 0;
+  }
+  return sum;
+}
+
+function rotateLeftUint32(value: number, amount: number): number {
+  return ((value << amount) | (value >>> (32 - amount))) >>> 0;
+}
+
+function parseDictionaryEntries(value: string | undefined): Map<string, string> {
+  const entries = new Map<string, string>();
+  if (!value) {
+    return entries;
+  }
+
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("<<") || !trimmed.endsWith(">>")) {
+    return entries;
+  }
+
+  const innerText = trimmed.slice(2, -2);
+  let index = 0;
+
+  while (index < innerText.length) {
+    index = skipPdfWhitespaceAndComments(innerText, index);
+    const keyToken = readPdfNameToken(innerText, index);
+    if (!keyToken) {
+      index += 1;
+      continue;
+    }
+
+    const valueStart = skipPdfWhitespaceAndComments(innerText, keyToken.nextIndex);
+    const valueToken = readPdfValueToken(innerText, valueStart);
+    if (!valueToken) {
+      entries.set(keyToken.name, "");
+      index = keyToken.nextIndex;
+      continue;
+    }
+
+    entries.set(keyToken.name, valueToken.token.trim());
+    index = valueToken.nextIndex;
+  }
+
+  return entries;
+}
+
+function readPdfValueToken(
+  text: string,
+  startIndex: number,
+): { readonly token: string; readonly nextIndex: number } | undefined {
+  const current = text[startIndex];
+  if (current === undefined) {
+    return undefined;
+  }
+
+  if (current === "<" && text[startIndex + 1] === "<") {
+    return readPdfDictionaryToken(text, startIndex);
+  }
+  if (current === "[") {
+    return readPdfArrayToken(text, startIndex);
+  }
+  if (current === "(") {
+    return readPdfLiteralToken(text, startIndex);
+  }
+  if (current === "<") {
+    return readPdfHexStringToken(text, startIndex);
+  }
+  if (current === "/") {
+    return readPdfNameToken(text, startIndex);
+  }
+
+  const endIndex = readUntilDelimiter(text, startIndex);
+  if (endIndex <= startIndex) {
+    return undefined;
+  }
+
+  return {
+    token: text.slice(startIndex, endIndex),
+    nextIndex: endIndex,
+  };
+}
+
+function readPdfDictionaryToken(
+  text: string,
+  startIndex: number,
+): { readonly token: string; readonly nextIndex: number } | undefined {
+  if (text[startIndex] !== "<" || text[startIndex + 1] !== "<") {
+    return undefined;
+  }
+
+  let depth = 1;
+  for (let index = startIndex + 2; index < text.length; index += 1) {
+    const current = text[index] ?? "";
+    const next = text[index + 1] ?? "";
+
+    if (current === "%") {
+      index = skipPdfComment(text, index);
+      continue;
+    }
+    if (current === "(") {
+      const literalToken = readPdfLiteralToken(text, index);
+      if (!literalToken) {
+        return undefined;
+      }
+      index = literalToken.nextIndex - 1;
+      continue;
+    }
+    if (current === "<" && next === "<") {
+      depth += 1;
+      index += 1;
+      continue;
+    }
+    if (current === ">" && next === ">") {
+      depth -= 1;
+      index += 1;
+      if (depth === 0) {
+        return {
+          token: text.slice(startIndex, index + 1),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfArrayToken(
+  text: string,
+  startIndex: number,
+): { readonly token: string; readonly nextIndex: number } | undefined {
+  if (text[startIndex] !== "[") {
+    return undefined;
+  }
+
+  let depth = 1;
+  for (let index = startIndex + 1; index < text.length; index += 1) {
+    const current = text[index] ?? "";
+
+    if (current === "%") {
+      index = skipPdfComment(text, index);
+      continue;
+    }
+    if (current === "(") {
+      const literalToken = readPdfLiteralToken(text, index);
+      if (!literalToken) {
+        return undefined;
+      }
+      index = literalToken.nextIndex - 1;
+      continue;
+    }
+    if (current === "<" && text[index + 1] === "<") {
+      const dictionaryToken = readPdfDictionaryToken(text, index);
+      if (!dictionaryToken) {
+        return undefined;
+      }
+      index = dictionaryToken.nextIndex - 1;
+      continue;
+    }
+    if (current === "[") {
+      depth += 1;
+      continue;
+    }
+    if (current === "]") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          token: text.slice(startIndex, index + 1),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfHexStringToken(
+  text: string,
+  startIndex: number,
+): { readonly token: string; readonly nextIndex: number } | undefined {
+  if (text[startIndex] !== "<" || text[startIndex + 1] === "<") {
+    return undefined;
+  }
+
+  for (let index = startIndex + 1; index < text.length; index += 1) {
+    if (text[index] === ">") {
+      return {
+        token: text.slice(startIndex, index + 1),
+        nextIndex: index + 1,
+      };
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfLiteralToken(
+  text: string,
+  startIndex: number,
+): { readonly token: string; readonly nextIndex: number } | undefined {
+  if (text[startIndex] !== "(") {
+    return undefined;
+  }
+
+  let depth = 0;
+  for (let index = startIndex; index < text.length; index += 1) {
+    const current = text[index] ?? "";
+
+    if (current === "\\") {
+      index += 1;
+      continue;
+    }
+    if (current === "(") {
+      depth += 1;
+      continue;
+    }
+    if (current === ")") {
+      depth -= 1;
+      if (depth === 0) {
+        return {
+          token: text.slice(startIndex, index + 1),
+          nextIndex: index + 1,
+        };
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readPdfNameToken(
+  text: string,
+  startIndex: number,
+): { readonly token: string; readonly name: string; readonly nextIndex: number } | undefined {
+  if (text[startIndex] !== "/") {
+    return undefined;
+  }
+
+  let endIndex = startIndex + 1;
+  while (endIndex < text.length && !isPdfDelimiter(text[endIndex] ?? "")) {
+    endIndex += 1;
+  }
+
+  if (endIndex <= startIndex + 1) {
+    return undefined;
+  }
+
+  const token = text.slice(startIndex, endIndex);
+  return {
+    token,
+    name: token.slice(1),
+    nextIndex: endIndex,
+  };
+}
+
+function readNameValue(value: string | undefined): string | undefined {
+  return value ? readPdfNameToken(value.trim(), 0)?.name : undefined;
+}
+
+function readSignedIntegerValue(value: string | undefined): number | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (!/^-?\d+$/.test(trimmed)) {
+    return undefined;
+  }
+
+  return Number.parseInt(trimmed, 10);
+}
+
+function readBooleanValue(value: string | undefined): boolean | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  return undefined;
+}
+
+function skipPdfWhitespaceAndComments(text: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < text.length) {
+    const current = text[index] ?? "";
+    if (current === "%") {
+      index = skipPdfComment(text, index);
+      continue;
+    }
+    if (!isPdfWhitespace(current)) {
+      break;
+    }
+    index += 1;
+  }
+  return index;
+}
+
+function skipPdfComment(text: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < text.length) {
+    const current = text[index] ?? "";
+    index += 1;
+    if (current === "\n") {
+      break;
+    }
+    if (current === "\r") {
+      if (text[index] === "\n") {
+        index += 1;
+      }
+      break;
+    }
+  }
+  return index;
+}
+
+function readUntilDelimiter(text: string, startIndex: number): number {
+  let index = startIndex;
+  while (index < text.length && !isPdfDelimiter(text[index] ?? "")) {
+    index += 1;
+  }
+  return index;
+}
+
+function isPdfDelimiter(character: string): boolean {
+  return isPdfWhitespace(character) || character === "(" || character === ")" || character === "<" || character === ">" ||
+    character === "[" || character === "]" || character === "{" || character === "}" || character === "/" || character === "%";
+}
+
+function isPdfWhitespace(character: string): boolean {
+  return character === "\x00" || character === "\t" || character === "\n" || character === "\f" || character === "\r" || character === " ";
+}
+
+const MD5_SHIFT_AMOUNTS = Uint8Array.from([
+  7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22,
+  5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20,
+  4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23,
+  6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+]);
+
+const MD5_ROUND_CONSTANTS = Uint32Array.from([
+  0xd76aa478,
+  0xe8c7b756,
+  0x242070db,
+  0xc1bdceee,
+  0xf57c0faf,
+  0x4787c62a,
+  0xa8304613,
+  0xfd469501,
+  0x698098d8,
+  0x8b44f7af,
+  0xffff5bb1,
+  0x895cd7be,
+  0x6b901122,
+  0xfd987193,
+  0xa679438e,
+  0x49b40821,
+  0xf61e2562,
+  0xc040b340,
+  0x265e5a51,
+  0xe9b6c7aa,
+  0xd62f105d,
+  0x02441453,
+  0xd8a1e681,
+  0xe7d3fbc8,
+  0x21e1cde6,
+  0xc33707d6,
+  0xf4d50d87,
+  0x455a14ed,
+  0xa9e3e905,
+  0xfcefa3f8,
+  0x676f02d9,
+  0x8d2a4c8a,
+  0xfffa3942,
+  0x8771f681,
+  0x6d9d6122,
+  0xfde5380c,
+  0xa4beea44,
+  0x4bdecfa9,
+  0xf6bb4b60,
+  0xbebfbc70,
+  0x289b7ec6,
+  0xeaa127fa,
+  0xd4ef3085,
+  0x04881d05,
+  0xd9d4d039,
+  0xe6db99e5,
+  0x1fa27cf8,
+  0xc4ac5665,
+  0xf4292244,
+  0x432aff97,
+  0xab9423a7,
+  0xfc93a039,
+  0x655b59c3,
+  0x8f0ccc92,
+  0xffeff47d,
+  0x85845dd1,
+  0x6fa87e4f,
+  0xfe2ce6e0,
+  0xa3014314,
+  0x4e0811a1,
+  0xf7537e82,
+  0xbd3af235,
+  0x2ad7d2bb,
+  0xeb86d391,
+]);

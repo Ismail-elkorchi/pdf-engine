@@ -11,6 +11,7 @@ import {
 } from "./font-encoding.ts";
 import { buildKnowledgeDocument } from "./knowledge.ts";
 import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts";
+import { preparePdfStandardPasswordSecurity } from "./pdf-standard-security.ts";
 import {
   analyzePdfShell,
   decodePdfLiteral,
@@ -107,6 +108,8 @@ interface PdfShellInspection {
   readonly featureSignals: readonly PdfFeatureSignal[];
   readonly isEncrypted: boolean;
   readonly policy: PdfNormalizedAdmissionPolicy;
+  readonly decryptionStatus: "not-needed" | "decrypted" | "password-required" | "invalid-password" | "unsupported";
+  readonly decryptionDetail?: string;
 }
 
 interface PdfEmbeddedFontMapping {
@@ -156,14 +159,14 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
     return buildAdmissionStage(request, inspection);
   }
 
   async function toIr(request: PdfIrRequest): Promise<PdfStageResult<PdfIrDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy);
-    const admission = await buildAdmissionStage(
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const admission = buildAdmissionStage(
       {
         source: request.source,
         ...(request.policy !== undefined ? { policy: request.policy } : {}),
@@ -176,8 +179,8 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function observe(request: PdfObservationRequest): Promise<PdfStageResult<PdfObservedDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy);
-    const admission = await buildAdmissionStage(
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const admission = buildAdmissionStage(
       {
         source: request.source,
         ...(request.policy !== undefined ? { policy: request.policy } : {}),
@@ -190,8 +193,8 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy);
-    const admission = await buildAdmissionStage(
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const admission = buildAdmissionStage(
       {
         source: request.source,
         ...(request.policy !== undefined ? { policy: request.policy } : {}),
@@ -205,8 +208,8 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy);
-    const admission = await buildAdmissionStage(
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const admission = buildAdmissionStage(
       {
         source: request.source,
         ...(request.policy !== undefined ? { policy: request.policy } : {}),
@@ -221,8 +224,8 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy);
-    const admission = await buildAdmissionStage(request, inspection);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const admission = buildAdmissionStage(request, inspection);
     const ir = buildIrStage(inspection, admission);
     const observation = buildObservationStage(inspection, admission);
     const layout = buildLayoutStage(observation);
@@ -250,23 +253,127 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 async function inspectSource(
   source: PdfAdmissionRequest["source"],
   policy: PdfNormalizedAdmissionPolicy,
+  passwordProvider?: PdfAdmissionRequest["passwordProvider"],
 ): Promise<PdfShellInspection> {
   const analysis = await analyzePdfShell(source, policy);
   const featureSignals = detectFeatureSignals(analysis.scanText, policy);
-  const isEncrypted = featureSignals.some((signal) => signal.kind === "encryption" && signal.detected);
+  const isEncrypted = analysis.trailer?.encryptRef !== undefined ||
+    featureSignals.some((signal) => signal.kind === "encryption" && signal.detected);
+
+  if (!isEncrypted) {
+    return {
+      analysis,
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "not-needed",
+    };
+  }
+
+  if (analysis.trailer?.encryptRef === undefined || analysis.documentId === undefined) {
+    return {
+      analysis,
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "unsupported",
+      decryptionDetail: "The shell detected encryption markers but could not resolve the encryption dictionary and document identifier.",
+    };
+  }
+
+  const encryptObject = analysis.objectIndex.get(keyOfObjectRef(analysis.trailer.encryptRef));
+  if (!encryptObject) {
+    return {
+      analysis,
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "unsupported",
+      decryptionDetail: "The trailer referenced an encryption dictionary that the shell could not recover.",
+    };
+  }
+
+  const emptyPasswordAttempt = preparePdfStandardPasswordSecurity({
+    documentId: analysis.documentId,
+    encryptDictionaryEntries: encryptObject.dictionaryEntries,
+    encryptObjectRef: encryptObject.ref,
+    password: "",
+  });
+  if (emptyPasswordAttempt.status === "decrypted") {
+    return {
+      analysis: await analyzePdfShell(source, policy, { securityHandler: emptyPasswordAttempt.handler }),
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "decrypted",
+    };
+  }
+  if (emptyPasswordAttempt.status === "unsupported") {
+    return {
+      analysis,
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "unsupported",
+      decryptionDetail: emptyPasswordAttempt.detail,
+    };
+  }
+
+  if (!passwordProvider) {
+    return {
+      analysis,
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "password-required",
+    };
+  }
+
+  const password = await passwordProvider({
+    reason: "document-encrypted",
+    attempts: 0,
+    ...(source.fileName !== undefined ? { fileName: source.fileName } : {}),
+  });
+  if (!password) {
+    return {
+      analysis,
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "password-required",
+    };
+  }
+
+  const suppliedPasswordAttempt = preparePdfStandardPasswordSecurity({
+    documentId: analysis.documentId,
+    encryptDictionaryEntries: encryptObject.dictionaryEntries,
+    encryptObjectRef: encryptObject.ref,
+    password,
+  });
+  if (suppliedPasswordAttempt.status === "decrypted") {
+    return {
+      analysis: await analyzePdfShell(source, policy, { securityHandler: suppliedPasswordAttempt.handler }),
+      featureSignals,
+      isEncrypted,
+      policy,
+      decryptionStatus: "decrypted",
+    };
+  }
 
   return {
     analysis,
     featureSignals,
     isEncrypted,
     policy,
+    decryptionStatus: suppliedPasswordAttempt.status,
+    decryptionDetail: suppliedPasswordAttempt.detail,
   };
 }
 
-async function buildAdmissionStage(
+function buildAdmissionStage(
   request: Pick<PdfAdmissionRequest, "source" | "policy" | "passwordProvider">,
   inspection: PdfShellInspection,
-): Promise<PdfStageResult<PdfAdmissionArtifact>> {
+): PdfStageResult<PdfAdmissionArtifact> {
   const diagnostics = createAdmissionDiagnostics(inspection);
   const knownLimits = collectAdmissionKnownLimits(inspection);
   const artifactBase = {
@@ -383,7 +490,7 @@ async function buildAdmissionStage(
     });
   }
 
-  const encryptionDecision = await resolveEncryptionDecision(request, inspection, diagnostics);
+  const encryptionDecision = resolveEncryptionDecision(inspection, diagnostics);
   const decision = encryptionDecision ?? ("accepted" satisfies PdfAdmissionDecision);
   const status = decision === "accepted" ? (inspection.analysis.repairState === "clean" ? "completed" : "partial") : "blocked";
 
@@ -393,11 +500,10 @@ async function buildAdmissionStage(
   });
 }
 
-async function resolveEncryptionDecision(
-  request: Pick<PdfAdmissionRequest, "source" | "passwordProvider">,
+function resolveEncryptionDecision(
   inspection: PdfShellInspection,
   diagnostics: PdfDiagnostic[],
-): Promise<PdfAdmissionDecision | undefined> {
+): PdfAdmissionDecision | undefined {
   if (!inspection.isEncrypted) {
     return undefined;
   }
@@ -413,29 +519,27 @@ async function resolveEncryptionDecision(
     return "rejected";
   }
 
-  if (!request.passwordProvider) {
+  if (inspection.decryptionStatus === "decrypted" || inspection.decryptionStatus === "not-needed") {
+    return undefined;
+  }
+
+  if (inspection.decryptionStatus === "password-required") {
     diagnostics.push({
       code: "password-required",
       stage: "admission",
       level: "medium",
-      message: "A password provider is required before the document can advance.",
+      message: "A valid password is required before the document can advance.",
       feature: "encryption",
     });
     return "password-required";
   }
 
-  const password = await request.passwordProvider({
-    reason: "document-encrypted",
-    attempts: 0,
-    ...(request.source.fileName !== undefined ? { fileName: request.source.fileName } : {}),
-  });
-
-  if (!password) {
+  if (inspection.decryptionStatus === "invalid-password") {
     diagnostics.push({
-      code: "password-not-provided",
+      code: "password-invalid",
       stage: "admission",
       level: "medium",
-      message: "The password provider declined to provide a password.",
+      message: inspection.decryptionDetail ?? "The supplied password did not unlock the document.",
       feature: "encryption",
     });
     return "password-required";
@@ -445,7 +549,8 @@ async function resolveEncryptionDecision(
     code: "decryption-not-implemented",
     stage: "admission",
     level: "medium",
-    message: "The object-aware shell recognizes encrypted PDFs but does not implement decryption yet.",
+    message: inspection.decryptionDetail ??
+      "The object-aware shell recognizes encrypted PDFs but does not support this encryption variant yet.",
     feature: "encryption",
   });
   return "unsupported";
@@ -1838,7 +1943,7 @@ function canAdvance(admission: PdfStageResult<PdfAdmissionArtifact>): boolean {
 
 function collectAdmissionKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {
   const knownLimits: PdfKnownLimitCode[] = [];
-  if (inspection.isEncrypted) {
+  if (inspection.isEncrypted && inspection.decryptionStatus === "unsupported") {
     knownLimits.push("decryption-not-implemented");
   }
   return knownLimits;
@@ -1876,7 +1981,7 @@ function collectIrKnownLimits(inspection: PdfShellInspection): readonly PdfKnown
   if (!inspection.analysis.pageTreeResolved) {
     knownLimits.push("page-order-heuristic");
   }
-  if (inspection.isEncrypted) {
+  if (inspection.isEncrypted && inspection.decryptionStatus === "unsupported") {
     knownLimits.push("decryption-not-implemented");
   }
 
