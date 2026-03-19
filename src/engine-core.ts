@@ -30,6 +30,7 @@ import type {
   PdfEngine,
   PdfEngineIdentity,
   PdfEngineOptions,
+  PdfFeatureEvidenceSource,
   PdfFeatureKind,
   PdfFeatureSignal,
   PdfIrDocument,
@@ -82,6 +83,8 @@ const ENGINE_IDENTITY: PdfEngineIdentity = {
   supportedStages: ["admission", "ir", "observation", "layout", "knowledge"],
 };
 
+const HIDDEN_TEXT_PATTERN = /\/(?:OC|ActualText)\b/;
+
 const FEATURE_PATTERNS: ReadonlyArray<{
   kind: PdfFeatureKind;
   pattern: RegExp;
@@ -99,7 +102,7 @@ const FEATURE_PATTERNS: ReadonlyArray<{
   { kind: "xref-streams", pattern: /\/Type\s*\/XRef\b/, actionKey: null },
   { kind: "images", pattern: /\/Subtype\s*\/Image\b/, actionKey: null },
   { kind: "fonts", pattern: /\/Font\b/, actionKey: null },
-  { kind: "hidden-text", pattern: /\/(?:OC|ActualText)\b/, actionKey: null },
+  { kind: "hidden-text", pattern: HIDDEN_TEXT_PATTERN, actionKey: null },
   { kind: "duplicate-text-layer", pattern: /\/Subtype\s*\/Image\b[\s\S]{0,500}\/Font\b/, actionKey: null },
 ] as const;
 
@@ -256,41 +259,28 @@ async function inspectSource(
   passwordProvider?: PdfAdmissionRequest["passwordProvider"],
 ): Promise<PdfShellInspection> {
   const analysis = await analyzePdfShell(source, policy);
-  const featureSignals = detectFeatureSignals(analysis.scanText, policy);
-  const isEncrypted = analysis.trailer?.encryptRef !== undefined ||
-    featureSignals.some((signal) => signal.kind === "encryption" && signal.detected);
 
-  if (!isEncrypted) {
-    return {
-      analysis,
-      featureSignals,
-      isEncrypted,
-      policy,
-      decryptionStatus: "not-needed",
-    };
+  if (!isEncryptedAnalysis(analysis, policy)) {
+    return buildInspection(analysis, policy, "not-needed");
   }
 
   if (analysis.trailer?.encryptRef === undefined || analysis.documentId === undefined) {
-    return {
+    return buildInspection(
       analysis,
-      featureSignals,
-      isEncrypted,
       policy,
-      decryptionStatus: "unsupported",
-      decryptionDetail: "The shell detected encryption markers but could not resolve the encryption dictionary and document identifier.",
-    };
+      "unsupported",
+      "The shell detected encryption markers but could not resolve the encryption dictionary and document identifier.",
+    );
   }
 
   const encryptObject = analysis.objectIndex.get(keyOfObjectRef(analysis.trailer.encryptRef));
   if (!encryptObject) {
-    return {
+    return buildInspection(
       analysis,
-      featureSignals,
-      isEncrypted,
       policy,
-      decryptionStatus: "unsupported",
-      decryptionDetail: "The trailer referenced an encryption dictionary that the shell could not recover.",
-    };
+      "unsupported",
+      "The trailer referenced an encryption dictionary that the shell could not recover.",
+    );
   }
 
   const emptyPasswordAttempt = preparePdfStandardPasswordSecurity({
@@ -300,33 +290,18 @@ async function inspectSource(
     password: "",
   });
   if (emptyPasswordAttempt.status === "decrypted") {
-    return {
-      analysis: await analyzePdfShell(source, policy, { securityHandler: emptyPasswordAttempt.handler }),
-      featureSignals,
-      isEncrypted,
+    return buildInspection(
+      await analyzePdfShell(source, policy, { securityHandler: emptyPasswordAttempt.handler }),
       policy,
-      decryptionStatus: "decrypted",
-    };
+      "decrypted",
+    );
   }
   if (emptyPasswordAttempt.status === "unsupported") {
-    return {
-      analysis,
-      featureSignals,
-      isEncrypted,
-      policy,
-      decryptionStatus: "unsupported",
-      decryptionDetail: emptyPasswordAttempt.detail,
-    };
+    return buildInspection(analysis, policy, "unsupported", emptyPasswordAttempt.detail);
   }
 
   if (!passwordProvider) {
-    return {
-      analysis,
-      featureSignals,
-      isEncrypted,
-      policy,
-      decryptionStatus: "password-required",
-    };
+    return buildInspection(analysis, policy, "password-required");
   }
 
   const password = await passwordProvider({
@@ -335,13 +310,7 @@ async function inspectSource(
     ...(source.fileName !== undefined ? { fileName: source.fileName } : {}),
   });
   if (!password) {
-    return {
-      analysis,
-      featureSignals,
-      isEncrypted,
-      policy,
-      decryptionStatus: "password-required",
-    };
+    return buildInspection(analysis, policy, "password-required");
   }
 
   const suppliedPasswordAttempt = preparePdfStandardPasswordSecurity({
@@ -351,22 +320,31 @@ async function inspectSource(
     password,
   });
   if (suppliedPasswordAttempt.status === "decrypted") {
-    return {
-      analysis: await analyzePdfShell(source, policy, { securityHandler: suppliedPasswordAttempt.handler }),
-      featureSignals,
-      isEncrypted,
+    return buildInspection(
+      await analyzePdfShell(source, policy, { securityHandler: suppliedPasswordAttempt.handler }),
       policy,
-      decryptionStatus: "decrypted",
-    };
+      "decrypted",
+    );
   }
 
+  return buildInspection(analysis, policy, suppliedPasswordAttempt.status, suppliedPasswordAttempt.detail);
+}
+
+function buildInspection(
+  analysis: PdfShellAnalysis,
+  policy: PdfNormalizedAdmissionPolicy,
+  decryptionStatus: PdfShellInspection["decryptionStatus"],
+  decryptionDetail?: string,
+): PdfShellInspection {
+  const featureSignals = detectFeatureSignals(analysis, policy);
+  const isEncrypted = featureSignals.some((signal) => signal.kind === "encryption" && signal.detected);
   return {
     analysis,
     featureSignals,
     isEncrypted,
     policy,
-    decryptionStatus: suppliedPasswordAttempt.status,
-    decryptionDetail: suppliedPasswordAttempt.detail,
+    decryptionStatus,
+    ...(decryptionDetail !== undefined ? { decryptionDetail } : {}),
   };
 }
 
@@ -461,6 +439,7 @@ function buildAdmissionStage(
       level: signal.action === "deny" ? "high" : "medium",
       message: signal.message,
       feature: signal.kind,
+      ...(signal.objectRef !== undefined ? { objectRef: signal.objectRef } : {}),
     });
   }
 
@@ -2370,19 +2349,157 @@ function detectRuntimeCapabilities(runtime: PdfRuntimeDescriptor): PdfRuntimeCap
   };
 }
 
-function detectFeatureSignals(text: string, policy: PdfNormalizedAdmissionPolicy): PdfFeatureSignal[] {
+function detectFeatureSignals(
+  analysis: PdfShellAnalysis,
+  policy: PdfNormalizedAdmissionPolicy,
+): PdfFeatureSignal[] {
+  const parsedFeatureRefs = detectParsedFeatureRefs(analysis);
+  const useScanFallback = shouldUseFeatureScanFallback(analysis);
+
   return FEATURE_PATTERNS.map((entry) => {
-    const detected = entry.pattern.test(text);
+    const objectRef = parsedFeatureRefs.get(entry.kind);
+    const usesScanEvidence = objectRef === undefined && (usesScanFeatureDetection(entry.kind) || useScanFallback);
+    const detected = objectRef !== undefined || (usesScanEvidence && entry.pattern.test(analysis.scanText));
+    const evidenceSource: PdfFeatureEvidenceSource = objectRef !== undefined || !usesScanEvidence ? "object" : "scan";
     const action = entry.actionKey ? policy[entry.actionKey] : "report";
     return {
       kind: entry.kind,
       action,
       detected,
-      message: detected
-        ? `Detected ${entry.kind.replaceAll("-", " ")}; policy action is ${action}.`
-        : `No ${entry.kind.replaceAll("-", " ")} detected in the scanned shell input.`,
+      evidenceSource,
+      ...(objectRef !== undefined ? { objectRef } : {}),
+      message: buildFeatureSignalMessage(entry.kind, action, detected, evidenceSource, objectRef, usesScanEvidence && useScanFallback),
     };
   });
+}
+
+function isEncryptedAnalysis(
+  analysis: PdfShellAnalysis,
+  policy: PdfNormalizedAdmissionPolicy,
+): boolean {
+  return detectFeatureSignals(analysis, policy).some(
+    (signal) => signal.kind === "encryption" && signal.detected,
+  );
+}
+
+function detectParsedFeatureRefs(
+  analysis: PdfShellAnalysis,
+): ReadonlyMap<PdfFeatureKind, PdfObjectRef> {
+  const featureRefs = new Map<PdfFeatureKind, PdfObjectRef>();
+  const rootRef = analysis.trailer?.rootRef;
+  const rootObject = rootRef ? analysis.objectIndex.get(keyOfObjectRef(rootRef)) : undefined;
+
+  if (analysis.trailer?.encryptRef !== undefined) {
+    featureRefs.set("encryption", analysis.trailer.encryptRef);
+  }
+  if (rootRef && rootObject?.dictionaryEntries.has("AcroForm")) {
+    featureRefs.set("forms", rootRef);
+  }
+  if (rootRef && rootObject?.dictionaryEntries.has("Outlines")) {
+    featureRefs.set("outlines", rootRef);
+  }
+  if (
+    analysis.crossReferenceKind === "xref-stream" ||
+    analysis.crossReferenceKind === "hybrid"
+  ) {
+    const xrefObjectRef = analysis.crossReferenceSections.find(
+      (section) => section.kind === "xref-stream" && section.objectRef !== undefined,
+    )?.objectRef ?? analysis.indirectObjects.find((objectShell) => objectShell.typeName === "XRef")?.ref;
+    if (xrefObjectRef) {
+      featureRefs.set("xref-streams", xrefObjectRef);
+    }
+  }
+
+  const firstAnnotationRef = analysis.pageEntries.find((pageEntry) => pageEntry.annotationRefs.length > 0)?.annotationRefs[0];
+  if (firstAnnotationRef) {
+    featureRefs.set("annotations", firstAnnotationRef);
+  }
+
+  for (const objectShell of analysis.indirectObjects) {
+    const subtypeName = readNameValue(objectShell.dictionaryEntries.get("Subtype"));
+    const actionName = readNameValue(objectShell.dictionaryEntries.get("S"));
+    const fieldTypeName = readNameValue(objectShell.dictionaryEntries.get("FT"));
+
+    if (!featureRefs.has("object-streams") && objectShell.typeName === "ObjStm") {
+      featureRefs.set("object-streams", objectShell.ref);
+    }
+    if (!featureRefs.has("images") && subtypeName === "Image") {
+      featureRefs.set("images", objectShell.ref);
+    }
+    if (!featureRefs.has("fonts") && objectShell.typeName === "Font") {
+      featureRefs.set("fonts", objectShell.ref);
+    }
+    if (
+      !featureRefs.has("javascript-actions") &&
+      (actionName === "JavaScript" || objectShell.dictionaryEntries.has("JS") || objectShell.dictionaryEntries.has("JavaScript"))
+    ) {
+      featureRefs.set("javascript-actions", objectShell.ref);
+    }
+    if (!featureRefs.has("launch-actions") && actionName === "Launch") {
+      featureRefs.set("launch-actions", objectShell.ref);
+    }
+    if (
+      !featureRefs.has("embedded-files") &&
+      (objectShell.typeName === "EmbeddedFile" || objectShell.dictionaryEntries.has("EmbeddedFile") || objectShell.dictionaryEntries.has("EF"))
+    ) {
+      featureRefs.set("embedded-files", objectShell.ref);
+    }
+    if (!featureRefs.has("signatures") && (objectShell.typeName === "Sig" || fieldTypeName === "Sig")) {
+      featureRefs.set("signatures", objectShell.ref);
+    }
+  }
+
+  return featureRefs;
+}
+
+function shouldUseFeatureScanFallback(analysis: PdfShellAnalysis): boolean {
+  return analysis.isTruncated ||
+    !analysis.parseCoverage.indirectObjects ||
+    !analysis.parseCoverage.trailer ||
+    analysis.repairState !== "clean";
+}
+
+function usesScanFeatureDetection(kind: PdfFeatureKind): boolean {
+  return kind === "hidden-text" || kind === "duplicate-text-layer";
+}
+
+function buildFeatureSignalMessage(
+  kind: PdfFeatureKind,
+  action: PdfFeatureSignal["action"],
+  detected: boolean,
+  evidenceSource: PdfFeatureEvidenceSource,
+  objectRef?: PdfObjectRef,
+  isFallbackScan = false,
+): string {
+  const featureLabel = kind.replaceAll("-", " ");
+  if (detected) {
+    if (evidenceSource === "object") {
+      const objectDetail = objectRef ? ` at ${formatObjectRef(objectRef)}` : "";
+      return `Detected ${featureLabel} from parsed object evidence${objectDetail}; policy action is ${action}.`;
+    }
+    const fallbackDetail = isFallbackScan ? " while parsed object coverage was incomplete" : "";
+    return `Detected ${featureLabel} from scan fallback${fallbackDetail}; policy action is ${action}.`;
+  }
+
+  if (evidenceSource === "object") {
+    return `No ${featureLabel} detected in parsed object evidence.`;
+  }
+
+  const fallbackDetail = isFallbackScan ? " while parsed object coverage was incomplete" : "";
+  return `No ${featureLabel} detected in scan fallback${fallbackDetail}.`;
+}
+
+function readNameValue(value: string | undefined): string | undefined {
+  if (!value) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  return trimmedValue.startsWith("/") ? trimmedValue.slice(1) : undefined;
+}
+
+function formatObjectRef(objectRef: PdfObjectRef): string {
+  return `${String(objectRef.objectNumber)} ${String(objectRef.generationNumber)} R`;
 }
 
 function dedupeDiagnostics(diagnostics: readonly PdfDiagnostic[]): PdfDiagnostic[] {

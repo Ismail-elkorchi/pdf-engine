@@ -63,6 +63,11 @@ export type PdfFeatureKind =
   | "duplicate-text-layer";
 
 /**
+ * Evidence path used to evaluate one feature signal.
+ */
+export type PdfFeatureEvidenceSource = "object" | "scan";
+
+/**
  * Source of an observed text item.
  */
 export type PdfObservationOrigin = "native-text" | "heuristic-text" | "ocr" | "unknown";
@@ -424,6 +429,10 @@ export interface PdfFeatureSignal {
   readonly action: PdfPolicyAction;
   /** Whether the feature was detected in the current source. */
   readonly detected: boolean;
+  /** Evidence path used to evaluate this feature signal. */
+  readonly evidenceSource: PdfFeatureEvidenceSource;
+  /** Related object reference when parsed object evidence identified a concrete source object. */
+  readonly objectRef?: PdfObjectRef;
   /** Human-readable summary of the detection result. */
   readonly message: string;
 }
