@@ -419,6 +419,8 @@ const stackedHeaderTableFixtureBytes = decodeBase64(
 const fieldValueFormFixtureBytes = decodeBase64(
   await readSmokeAssetText(new URL("./fixtures/field-value-form.base64.txt", import.meta.url)),
 );
+const encryptedStandardTextFixture = publicSmokeFixtures.encryptedStandardText;
+const encryptedStandardTextFixtureBytes = decodeFixturePdfBytes(encryptedStandardTextFixture.bytesBase64);
 
 function resolveViewerModuleSpecifier(specifier) {
   return resolveSiblingModuleSpecifier(specifier, "viewer");
@@ -463,39 +465,6 @@ const syntheticPdfTemplate = [
   "<< /Root 1 0 R /Size 5 >>",
   "startxref",
   "__STARTXREF__",
-  "%%EOF",
-  "",
-].join("\n");
-
-const encryptedPdfTemplate = [
-  "%PDF-1.4",
-  "1 0 obj",
-  "<< /Type /Catalog /Pages 2 0 R >>",
-  "endobj",
-  "2 0 obj",
-  "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
-  "endobj",
-  "3 0 obj",
-  "<< /Type /Page /Parent 2 0 R /Contents 4 0 R >>",
-  "endobj",
-  "4 0 obj",
-  "<< /Length 22 >>",
-  "stream",
-  "BT",
-  "(Encrypted Shell) Tj",
-  "ET",
-  "endstream",
-  "endobj",
-  "5 0 obj",
-  "<< /Filter /Standard /V 4 >>",
-  "endobj",
-  "xref",
-  "0 6",
-  "0000000000 65535 f",
-  "trailer",
-  "<< /Root 1 0 R /Size 6 /Encrypt 5 0 R >>",
-  "startxref",
-  "__ENCRYPTED_STARTXREF__",
   "%%EOF",
   "",
 ].join("\n");
@@ -1661,8 +1630,6 @@ const xrefStreamEntries = fromByteValues([
 
 const startXrefOffset = syntheticPdfTemplate.indexOf("xref\n0 5");
 assert(startXrefOffset >= 0, "Synthetic PDF did not contain an xref section.");
-const encryptedStartXrefOffset = encryptedPdfTemplate.indexOf("xref\n0 6");
-assert(encryptedStartXrefOffset >= 0, "Encrypted synthetic PDF did not contain an xref section.");
 const nestedStartXrefOffset = nestedPageTreeTemplate.indexOf("xref\n0 8");
 assert(nestedStartXrefOffset >= 0, "Nested page-tree PDF did not contain an xref section.");
 const encodedTextStartXrefOffset = encodedTextPdfTemplate.indexOf("xref\n0 5");
@@ -1685,7 +1652,6 @@ const compactSpacingEncodedTextStartXrefOffset = compactSpacingEncodedTextPdfTem
 assert(compactSpacingEncodedTextStartXrefOffset >= 0, "Compact-spacing encoded-text PDF did not contain an xref section.");
 
 const syntheticPdf = syntheticPdfTemplate.replace("__STARTXREF__", String(startXrefOffset));
-const encryptedPdf = encryptedPdfTemplate.replace("__ENCRYPTED_STARTXREF__", String(encryptedStartXrefOffset));
 const nestedPageTreePdf = nestedPageTreeTemplate.replace("__NESTED_STARTXREF__", String(nestedStartXrefOffset));
 const encodedTextPdf = encodedTextPdfTemplate.replace("__ENCODED_TEXT_STARTXREF__", String(encodedTextStartXrefOffset));
 const noFontCidLikeHexPdf = noFontCidLikeHexPdfTemplate.replace(
@@ -2535,18 +2501,26 @@ const repeatedBoundaryKnowledgeResult = await engine.toKnowledge({
 });
 const observationWithoutPassword = await engine.observe({
   source: {
-    bytes: encodeText(encryptedPdf),
-    fileName: "encrypted.pdf",
+    bytes: encryptedStandardTextFixtureBytes,
+    fileName: encryptedStandardTextFixture.fileName,
     mediaType: "application/pdf",
   },
 });
-const observationWithPassword = await engine.observe({
+const observationWithWrongPassword = await engine.observe({
   source: {
-    bytes: encodeText(encryptedPdf),
-    fileName: "encrypted.pdf",
+    bytes: encryptedStandardTextFixtureBytes,
+    fileName: encryptedStandardTextFixture.fileName,
     mediaType: "application/pdf",
   },
-  passwordProvider: () => "secret",
+  passwordProvider: () => "wrong-password",
+});
+const observationWithPassword = await engine.observe({
+  source: {
+    bytes: encryptedStandardTextFixtureBytes,
+    fileName: encryptedStandardTextFixture.fileName,
+    mediaType: "application/pdf",
+  },
+  passwordProvider: () => encryptedStandardTextFixture.userPassword,
 });
 
 assert(result.runtime.kind === expectedRuntime, `Expected runtime ${expectedRuntime} but received ${result.runtime.kind}.`);
@@ -3647,10 +3621,25 @@ assert(
   observationWithoutPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-required"),
   "Encrypted observe without password did not surface password-required.",
 );
-assert(observationWithPassword.status === "blocked", `Encrypted observe status with password was ${observationWithPassword.status}.`);
 assert(
-  observationWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
-  "Encrypted observe with password did not surface decryption-not-implemented.",
+  observationWithWrongPassword.status === "blocked",
+  `Encrypted observe status with wrong password was ${observationWithWrongPassword.status}.`,
+);
+assert(
+  observationWithWrongPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-invalid"),
+  "Encrypted observe with wrong password did not surface password-invalid.",
+);
+assert(
+  observationWithPassword.status === "partial" || observationWithPassword.status === "completed",
+  `Encrypted observe status with password was ${observationWithPassword.status}.`,
+);
+assert(
+  observationWithPassword.value?.extractedText === "Encrypted Shell",
+  `Encrypted observe text with password was ${JSON.stringify(observationWithPassword.value?.extractedText ?? null)}.`,
+);
+assert(
+  !observationWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
+  "Encrypted observe with password still surfaced decryption-not-implemented.",
 );
 await engine.dispose();
 

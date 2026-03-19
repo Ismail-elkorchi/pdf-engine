@@ -92,6 +92,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
       const { renderPdfViewer } = await import("/dist/viewer.js");
       const { decodePdfStreamBytes } = await import("/dist/stream-decode.js");
       const { publicSmokeFixtures, decodeFixturePdfBytes } = await import("/scripts/smoke/fixture-data.mjs");
+      const encryptedStandardTextFixture = publicSmokeFixtures.encryptedStandardText;
+      const encryptedStandardTextFixtureBytes = decodeFixturePdfBytes(encryptedStandardTextFixture.bytesBase64);
 
       const encodeText = (value) => new TextEncoder().encode(value);
       const decodeHex = (value) => {
@@ -609,6 +611,32 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: singleByteEncodedPdf
           }
         });
+        const browserEncryptedWithoutPassword = await engine.observe({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextFixtureBytes,
+            fileName: encryptedStandardTextFixture.fileName,
+            mediaType: "application/pdf"
+          }
+        });
+        const browserEncryptedWrongPassword = await engine.observe({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextFixtureBytes,
+            fileName: encryptedStandardTextFixture.fileName,
+            mediaType: "application/pdf"
+          },
+          passwordProvider: () => "wrong-password"
+        });
+        const browserEncryptedWithPassword = await engine.observe({
+          source: {
+            kind: "bytes",
+            bytes: encryptedStandardTextFixtureBytes,
+            fileName: encryptedStandardTextFixture.fileName,
+            mediaType: "application/pdf"
+          },
+          passwordProvider: () => encryptedStandardTextFixture.userPassword
+        });
         const viewerContainer = globalThis.document.createElement("div");
         globalThis.document.body.append(viewerContainer);
 
@@ -790,6 +818,17 @@ async function runBrowserSmoke(baseUrl, browserName) {
           singleByteMapping: singleByteEncodedResult.observation.value?.pages[0]?.runs[0]?.unicodeMappingSource === "font-encoding",
           singleByteLimitCleared:
             !singleByteEncodedResult.observation.value?.knownLimits.includes("font-unicode-mapping-not-implemented"),
+          encryptedWithoutPassword: browserEncryptedWithoutPassword.status === "blocked",
+          encryptedPasswordRequired:
+            browserEncryptedWithoutPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-required"),
+          encryptedWrongPassword: browserEncryptedWrongPassword.status === "blocked",
+          encryptedPasswordInvalid:
+            browserEncryptedWrongPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-invalid"),
+          encryptedWithPassword:
+            browserEncryptedWithPassword.status === "partial" || browserEncryptedWithPassword.status === "completed",
+          encryptedText: browserEncryptedWithPassword.value?.extractedText === encryptedStandardTextFixture.expectedText,
+          encryptedLimitCleared:
+            !browserEncryptedWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
           viewerInitialPage: initialViewerLabel === "Page 2 of 2",
           viewerInitialBlocks: initialViewerBlocks.some((text) => text.includes("Second Page Overview")),
           viewerInitialButtons: initialPreviousDisabled === false && initialNextDisabled === true,
@@ -836,6 +875,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
           fieldValueHeaders: fieldValueFormResult.knowledge.value?.tables[0]?.headers?.join(",") ?? null,
           delayedContentText: delayedContentResult.observation.value?.extractedText ?? null,
           singleByteText: singleByteEncodedResult.observation.value?.extractedText ?? null,
+          encryptedText: browserEncryptedWithPassword.value?.extractedText ?? null,
           viewerInitialPage: initialViewerLabel,
           viewerNavigatedPage: navigatedViewerLabel,
           viewerReaderPage: readerViewerLabel,
