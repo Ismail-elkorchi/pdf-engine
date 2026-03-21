@@ -134,9 +134,9 @@ export type PdfKnownLimitCode =
 export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter" | "failed";
 
 /**
- * Observation strategy used to produce the current text evidence.
+ * Observation strategy used to produce the current text and page-mark evidence.
  */
-export type PdfObservationStrategy = "decoded-text-operators" | "heuristic-literal-scan";
+export type PdfObservationStrategy = "content-stream-interpreter" | "heuristic-literal-scan";
 
 /**
  * Structural role for one recovered stream object.
@@ -255,6 +255,24 @@ export interface PdfBoundingBox {
   readonly width: number;
   /** Rectangle height. */
   readonly height: number;
+}
+
+/**
+ * PDF affine transform matrix in `[a b c d e f]` form.
+ */
+export interface PdfTransformMatrix {
+  /** Horizontal scaling. */
+  readonly a: number;
+  /** Vertical skewing. */
+  readonly b: number;
+  /** Horizontal skewing. */
+  readonly c: number;
+  /** Vertical scaling. */
+  readonly d: number;
+  /** Horizontal translation. */
+  readonly e: number;
+  /** Vertical translation. */
+  readonly f: number;
 }
 
 /**
@@ -780,6 +798,130 @@ export interface PdfObservedTextRun {
 }
 
 /**
+ * Painting operator applied to one observed path.
+ */
+export type PdfObservedPathPaintOperator = "S" | "s" | "f" | "F" | "f*" | "B" | "B*" | "b" | "b*" | "n";
+
+/**
+ * Clip operator applied to one observed clipping path.
+ */
+export type PdfObservedClipOperator = "W" | "W*";
+
+/**
+ * Base fields shared by every observed page mark.
+ */
+export interface PdfObservedMarkBase {
+  /** Stable mark identifier within the observation result. */
+  readonly id: string;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Zero-based content-order position for this mark. */
+  readonly contentOrder: number;
+  /** Content stream reference that produced this mark when known. */
+  readonly contentStreamRef?: PdfObjectRef;
+  /** Optional originating object reference. */
+  readonly objectRef?: PdfObjectRef;
+  /** Bounding box when the current implementation can recover one. */
+  readonly bbox?: PdfBoundingBox;
+  /** Active transform when the current implementation can recover one. */
+  readonly transform?: PdfTransformMatrix;
+}
+
+/**
+ * Observed text mark derived from one decoded text run.
+ */
+export interface PdfObservedTextMark extends PdfObservedMarkBase {
+  /** Discriminator for observed text marks. */
+  readonly kind: "text";
+  /** Source text run identifier. */
+  readonly runId: string;
+  /** Source glyph identifiers. */
+  readonly glyphIds: readonly string[];
+  /** Combined run text. */
+  readonly text: string;
+  /** Origin of the text observation. */
+  readonly origin: PdfObservationOrigin;
+  /** Font object reference active when this mark was decoded when known. */
+  readonly fontRef?: PdfObjectRef;
+  /** Text operand encoding form used to decode this mark when known. */
+  readonly textEncodingKind?: PdfTextEncodingKind;
+  /** Unicode mapping path used to recover this mark when known. */
+  readonly unicodeMappingSource?: PdfUnicodeMappingSource;
+  /** Writing mode active for this mark when the current implementation can recover it. */
+  readonly writingMode?: PdfWritingMode;
+  /** Approximate text anchor when the current implementation can recover one. */
+  readonly anchor?: PdfPoint;
+  /** Active font size when the current implementation can recover it. */
+  readonly fontSize?: number;
+  /** Whether this mark started on a new text line. */
+  readonly startsNewLine?: boolean;
+}
+
+/**
+ * Observed path mark emitted from path-construction and paint operators.
+ */
+export interface PdfObservedPathMark extends PdfObservedMarkBase {
+  /** Discriminator for observed path marks. */
+  readonly kind: "path";
+  /** Painting operator that finalized this path. */
+  readonly paintOperator: PdfObservedPathPaintOperator;
+  /** Number of path points considered when recovering the bounding box. */
+  readonly pointCount: number;
+  /** Whether the recovered path was explicitly closed. */
+  readonly closed: boolean;
+}
+
+/**
+ * Observed XObject mark emitted from a `Do` operator.
+ */
+export interface PdfObservedXObjectMark extends PdfObservedMarkBase {
+  /** Discriminator for observed XObject marks. */
+  readonly kind: "xobject";
+  /** Resource name used by the `Do` operator. */
+  readonly resourceName: string;
+  /** XObject reference when the page resources resolve it. */
+  readonly xObjectRef?: PdfObjectRef;
+  /** XObject subtype name when the current implementation can recover it. */
+  readonly subtypeName?: string;
+}
+
+/**
+ * Observed image mark emitted from an image XObject.
+ */
+export interface PdfObservedImageMark extends PdfObservedMarkBase {
+  /** Discriminator for observed image marks. */
+  readonly kind: "image";
+  /** Resource name used by the `Do` operator. */
+  readonly resourceName: string;
+  /** Image XObject reference when the page resources resolve it. */
+  readonly xObjectRef?: PdfObjectRef;
+  /** XObject width when the current implementation can recover it. */
+  readonly width?: number;
+  /** XObject height when the current implementation can recover it. */
+  readonly height?: number;
+}
+
+/**
+ * Observed clip mark emitted from a clipping-path operator.
+ */
+export interface PdfObservedClipMark extends PdfObservedMarkBase {
+  /** Discriminator for observed clip marks. */
+  readonly kind: "clip";
+  /** Clip operator that established this clipping path. */
+  readonly clipOperator: PdfObservedClipOperator;
+}
+
+/**
+ * Canonical observed page-mark union.
+ */
+export type PdfObservedMark =
+  | PdfObservedTextMark
+  | PdfObservedPathMark
+  | PdfObservedXObjectMark
+  | PdfObservedImageMark
+  | PdfObservedClipMark;
+
+/**
  * One observed page in the current observation result.
  */
 export interface PdfObservedPage {
@@ -793,6 +935,8 @@ export interface PdfObservedPage {
   readonly glyphs: readonly PdfObservedGlyph[];
   /** Observed text runs for the page. */
   readonly runs: readonly PdfObservedTextRun[];
+  /** Canonical observed page marks in content order. */
+  readonly marks: readonly PdfObservedMark[];
 }
 
 /**

@@ -814,7 +814,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
             ccittDecodeResult.state === "decoded" &&
             Array.from(ccittDecodeResult.decodedBytes ?? [], (byte) => byte.toString(16).padStart(2, "0")).join("") === "aa",
           runLengthText: runLengthResult.observation.value?.extractedText === "Browser RunLength",
-          observationStrategy: plainResult.observation.value?.strategy === "decoded-text-operators",
+          observationStrategy: plainResult.observation.value?.strategy === "content-stream-interpreter",
+          observationMarks: plainResult.observation.value?.pages[0]?.marks[0]?.kind === "text",
           flateDecoded: flateResult.ir.value?.decodedStreams === true,
           identityHMarkers: publicSmokeFixtures.identityHCidFont.expectedMarkers.every((marker) =>
             identityHCidFontResult.observation.value?.extractedText.includes(marker)
