@@ -8,6 +8,7 @@
 
 ## Evidence
 - [ ] Paste commands run and summarize outputs.
+- [ ] If coverage is included, describe what missing-test signal it provided. Do not use a percentage by itself as proof.
 - [ ] Include:
   - `npm run check`
   - `npm run build`
