@@ -777,14 +777,14 @@ async function runBrowserSmoke(baseUrl, browserName) {
         viewerHandle.destroy();
         const viewerDestroyed = viewerContainer.childElementCount === 0;
         viewerContainer.remove();
-        const browserEncryptedFeatureSignals = browserEncryptedAdmission.value?.featureSignals ?? [];
-        const browserEncryptionSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "encryption");
-        const browserObjectStreamSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "object-streams");
-        const browserXrefStreamSignal = browserEncryptedFeatureSignals.find((signal) => signal.kind === "xref-streams");
-        const browserEncryptedAes256FeatureSignals = browserEncryptedAes256Admission.value?.featureSignals ?? [];
-        const browserAes256EncryptionSignal = browserEncryptedAes256FeatureSignals.find((signal) => signal.kind === "encryption");
-        const browserAes256ObjectStreamSignal = browserEncryptedAes256FeatureSignals.find((signal) => signal.kind === "object-streams");
-        const browserAes256XrefStreamSignal = browserEncryptedAes256FeatureSignals.find((signal) => signal.kind === "xref-streams");
+        const browserEncryptedFeatureFindings = browserEncryptedAdmission.value?.featureFindings ?? [];
+        const browserEncryptionFinding = browserEncryptedFeatureFindings.find((finding) => finding.kind === "encryption");
+        const browserObjectStreamFinding = browserEncryptedFeatureFindings.find((finding) => finding.kind === "object-streams");
+        const browserXrefStreamFinding = browserEncryptedFeatureFindings.find((finding) => finding.kind === "xref-streams");
+        const browserEncryptedAes256FeatureFindings = browserEncryptedAes256Admission.value?.featureFindings ?? [];
+        const browserAes256EncryptionFinding = browserEncryptedAes256FeatureFindings.find((finding) => finding.kind === "encryption");
+        const browserAes256ObjectStreamFinding = browserEncryptedAes256FeatureFindings.find((finding) => finding.kind === "object-streams");
+        const browserAes256XrefStreamFinding = browserEncryptedAes256FeatureFindings.find((finding) => finding.kind === "xref-streams");
 
         const checks = {
           exportsPresent: typeof createPdfEngine === "function",
@@ -896,17 +896,14 @@ async function runBrowserSmoke(baseUrl, browserName) {
             !browserEncryptedWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
           encryptedAdmission: browserEncryptedAdmission.status === "completed",
           encryptedObjectEvidence:
-            browserEncryptionSignal?.detected === true &&
-            browserEncryptionSignal.evidenceSource === "object" &&
-            browserEncryptionSignal.objectRef?.objectNumber === 12,
+            browserEncryptionFinding?.evidenceSource === "object" &&
+            browserEncryptionFinding.objectRef?.objectNumber === 12,
           objectStreamEvidence:
-            browserObjectStreamSignal?.detected === true &&
-            browserObjectStreamSignal.evidenceSource === "object" &&
-            browserObjectStreamSignal.objectRef?.objectNumber === 8,
+            browserObjectStreamFinding?.evidenceSource === "object" &&
+            browserObjectStreamFinding.objectRef?.objectNumber === 8,
           xrefStreamEvidence:
-            browserXrefStreamSignal?.detected === true &&
-            browserXrefStreamSignal.evidenceSource === "object" &&
-            browserXrefStreamSignal.objectRef?.objectNumber === 13,
+            browserXrefStreamFinding?.evidenceSource === "object" &&
+            browserXrefStreamFinding.objectRef?.objectNumber === 13,
           encryptedAes256WithoutPassword: browserEncryptedAes256WithoutPassword.status === "blocked",
           encryptedAes256PasswordRequired:
             browserEncryptedAes256WithoutPassword.diagnostics.some((diagnostic) => diagnostic.code === "password-required"),
@@ -923,17 +920,14 @@ async function runBrowserSmoke(baseUrl, browserName) {
             !browserEncryptedAes256WithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
           encryptedAes256Admission: browserEncryptedAes256Admission.status === "completed",
           encryptedAes256ObjectEvidence:
-            browserAes256EncryptionSignal?.detected === true &&
-            browserAes256EncryptionSignal.evidenceSource === "object" &&
-            browserAes256EncryptionSignal.objectRef?.objectNumber === 22,
+            browserAes256EncryptionFinding?.evidenceSource === "object" &&
+            browserAes256EncryptionFinding.objectRef?.objectNumber === 22,
           objectStreamAes256Evidence:
-            browserAes256ObjectStreamSignal?.detected === true &&
-            browserAes256ObjectStreamSignal.evidenceSource === "object" &&
-            browserAes256ObjectStreamSignal.objectRef?.objectNumber === 2,
+            browserAes256ObjectStreamFinding?.evidenceSource === "object" &&
+            browserAes256ObjectStreamFinding.objectRef?.objectNumber === 2,
           xrefStreamAes256Evidence:
-            browserAes256XrefStreamSignal?.detected === true &&
-            browserAes256XrefStreamSignal.evidenceSource === "object" &&
-            browserAes256XrefStreamSignal.objectRef?.objectNumber === 23,
+            browserAes256XrefStreamFinding?.evidenceSource === "object" &&
+            browserAes256XrefStreamFinding.objectRef?.objectNumber === 23,
           viewerInitialPage: initialViewerLabel === "Page 2 of 2",
           viewerInitialBlocks: initialViewerBlocks.some((text) => text.includes("Second Page Overview")),
           viewerInitialButtons: initialPreviousDisabled === false && initialNextDisabled === true,

@@ -2336,6 +2336,12 @@ const javascriptActionAllowedAdmission = await engine.admit({
     javascriptActions: "allow",
   },
 });
+const javascriptActionFinding = javascriptActionAdmission.value?.featureFindings.find(
+  (finding) => finding.kind === "javascript-actions",
+);
+const javascriptActionAllowedFinding = javascriptActionAllowedAdmission.value?.featureFindings.find(
+  (finding) => finding.kind === "javascript-actions",
+);
 const largeBenignJavascriptCommentAdmission = await engine.admit({
   source: {
     bytes: largeBenignJavascriptCommentPdfBytes,
@@ -3787,6 +3793,18 @@ assert(
   "JavaScript-action admission did not reject through the active policy.",
 );
 assert(
+  javascriptActionFinding?.actionName === "JavaScript",
+  `JavaScript-action finding action name was ${javascriptActionFinding && "actionName" in javascriptActionFinding ? javascriptActionFinding.actionName : "missing"}.`,
+);
+assert(
+  javascriptActionFinding?.actionRef?.objectNumber === 5,
+  `JavaScript-action finding action ref was ${javascriptActionFinding?.actionRef?.objectNumber ?? "missing"}.`,
+);
+assert(
+  javascriptActionFinding?.evidenceSource === "object",
+  "JavaScript-action finding did not preserve parsed object evidence.",
+);
+assert(
   javascriptActionAllowedAdmission.status === "completed",
   `Allowed JavaScript-action admission status was ${javascriptActionAllowedAdmission.status}.`,
 );
@@ -3795,12 +3813,16 @@ assert(
   `Allowed JavaScript-action decision was ${javascriptActionAllowedAdmission.value?.decision ?? "missing"}.`,
 );
 assert(
+  javascriptActionAllowedFinding?.action === "allow",
+  `Allowed JavaScript-action finding action was ${javascriptActionAllowedFinding?.action ?? "missing"}.`,
+);
+assert(
   largeBenignJavascriptCommentAdmission.status === "completed",
   `Large benign-comment admission status was ${largeBenignJavascriptCommentAdmission.status}.`,
 );
 assert(
-  !largeBenignJavascriptCommentAdmission.value?.featureSignals.some(
-    (signal) => signal.kind === "javascript-actions" && signal.detected,
+  !largeBenignJavascriptCommentAdmission.value?.featureFindings.some(
+    (finding) => finding.kind === "javascript-actions",
   ),
   "Large benign comment still produced a JavaScript feature detection after full-structure parsing.",
 );
@@ -3829,37 +3851,37 @@ assert(
   !observationWithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
   "Encrypted observe with password still surfaced decryption-not-implemented.",
 );
-const encryptedFeatureSignals = admissionWithPassword.value?.featureSignals ?? [];
-const encryptionSignal = encryptedFeatureSignals.find((signal) => signal.kind === "encryption");
-const objectStreamSignal = encryptedFeatureSignals.find((signal) => signal.kind === "object-streams");
-const xrefStreamSignal = encryptedFeatureSignals.find((signal) => signal.kind === "xref-streams");
+const encryptedFeatureFindings = admissionWithPassword.value?.featureFindings ?? [];
+const encryptionFinding = encryptedFeatureFindings.find((finding) => finding.kind === "encryption");
+const objectStreamFinding = encryptedFeatureFindings.find((finding) => finding.kind === "object-streams");
+const xrefStreamFinding = encryptedFeatureFindings.find((finding) => finding.kind === "xref-streams");
 assert(
   admissionWithPassword.status === "completed",
   `Encrypted admission status with password was ${admissionWithPassword.status}.`,
 );
 assert(
-  encryptionSignal?.detected === true && encryptionSignal.evidenceSource === "object",
+  encryptionFinding?.evidenceSource === "object",
   "Encrypted admission did not use parsed object evidence for encryption.",
 );
 assert(
-  encryptionSignal?.objectRef?.objectNumber === 12,
-  `Encrypted admission encryption object ref was ${encryptionSignal?.objectRef?.objectNumber ?? "missing"}.`,
+  encryptionFinding?.objectRef?.objectNumber === 12,
+  `Encrypted admission encryption object ref was ${encryptionFinding?.objectRef?.objectNumber ?? "missing"}.`,
 );
 assert(
-  objectStreamSignal?.detected === true && objectStreamSignal.evidenceSource === "object",
+  objectStreamFinding?.evidenceSource === "object",
   "Encrypted admission did not use parsed object evidence for object streams.",
 );
 assert(
-  objectStreamSignal?.objectRef?.objectNumber === 8,
-  `Encrypted admission object-stream ref was ${objectStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
+  objectStreamFinding?.objectRef?.objectNumber === 8,
+  `Encrypted admission object-stream ref was ${objectStreamFinding?.objectRef?.objectNumber ?? "missing"}.`,
 );
 assert(
-  xrefStreamSignal?.detected === true && xrefStreamSignal.evidenceSource === "object",
+  xrefStreamFinding?.evidenceSource === "object",
   "Encrypted admission did not use parsed object evidence for xref streams.",
 );
 assert(
-  xrefStreamSignal?.objectRef?.objectNumber === 13,
-  `Encrypted admission xref-stream ref was ${xrefStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
+  xrefStreamFinding?.objectRef?.objectNumber === 13,
+  `Encrypted admission xref-stream ref was ${xrefStreamFinding?.objectRef?.objectNumber ?? "missing"}.`,
 );
 assert(
   observationAes256WithoutPassword.status === "blocked",
@@ -3891,37 +3913,37 @@ assert(
   !observationAes256WithPassword.diagnostics.some((diagnostic) => diagnostic.code === "decryption-not-implemented"),
   "AES-256 encrypted observe with password still surfaced decryption-not-implemented.",
 );
-const encryptedAes256FeatureSignals = admissionAes256WithPassword.value?.featureSignals ?? [];
-const aes256EncryptionSignal = encryptedAes256FeatureSignals.find((signal) => signal.kind === "encryption");
-const aes256ObjectStreamSignal = encryptedAes256FeatureSignals.find((signal) => signal.kind === "object-streams");
-const aes256XrefStreamSignal = encryptedAes256FeatureSignals.find((signal) => signal.kind === "xref-streams");
+const encryptedAes256FeatureFindings = admissionAes256WithPassword.value?.featureFindings ?? [];
+const aes256EncryptionFinding = encryptedAes256FeatureFindings.find((finding) => finding.kind === "encryption");
+const aes256ObjectStreamFinding = encryptedAes256FeatureFindings.find((finding) => finding.kind === "object-streams");
+const aes256XrefStreamFinding = encryptedAes256FeatureFindings.find((finding) => finding.kind === "xref-streams");
 assert(
   admissionAes256WithPassword.status === "completed",
   `AES-256 encrypted admission status with password was ${admissionAes256WithPassword.status}.`,
 );
 assert(
-  aes256EncryptionSignal?.detected === true && aes256EncryptionSignal.evidenceSource === "object",
+  aes256EncryptionFinding?.evidenceSource === "object",
   "AES-256 encrypted admission did not use parsed object evidence for encryption.",
 );
 assert(
-  aes256EncryptionSignal?.objectRef?.objectNumber === 22,
-  `AES-256 encrypted admission encryption object ref was ${aes256EncryptionSignal?.objectRef?.objectNumber ?? "missing"}.`,
+  aes256EncryptionFinding?.objectRef?.objectNumber === 22,
+  `AES-256 encrypted admission encryption object ref was ${aes256EncryptionFinding?.objectRef?.objectNumber ?? "missing"}.`,
 );
 assert(
-  aes256ObjectStreamSignal?.detected === true && aes256ObjectStreamSignal.evidenceSource === "object",
+  aes256ObjectStreamFinding?.evidenceSource === "object",
   "AES-256 encrypted admission did not use parsed object evidence for object streams.",
 );
 assert(
-  aes256ObjectStreamSignal?.objectRef?.objectNumber === 2,
-  `AES-256 encrypted admission object-stream ref was ${aes256ObjectStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
+  aes256ObjectStreamFinding?.objectRef?.objectNumber === 2,
+  `AES-256 encrypted admission object-stream ref was ${aes256ObjectStreamFinding?.objectRef?.objectNumber ?? "missing"}.`,
 );
 assert(
-  aes256XrefStreamSignal?.detected === true && aes256XrefStreamSignal.evidenceSource === "object",
+  aes256XrefStreamFinding?.evidenceSource === "object",
   "AES-256 encrypted admission did not use parsed object evidence for xref streams.",
 );
 assert(
-  aes256XrefStreamSignal?.objectRef?.objectNumber === 23,
-  `AES-256 encrypted admission xref-stream ref was ${aes256XrefStreamSignal?.objectRef?.objectNumber ?? "missing"}.`,
+  aes256XrefStreamFinding?.objectRef?.objectNumber === 23,
+  `AES-256 encrypted admission xref-stream ref was ${aes256XrefStreamFinding?.objectRef?.objectNumber ?? "missing"}.`,
 );
 await engine.dispose();
 

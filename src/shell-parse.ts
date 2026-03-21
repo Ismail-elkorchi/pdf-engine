@@ -1654,7 +1654,7 @@ function readUnsignedInteger(
   };
 }
 
-function readObjectRefValue(value: string | undefined): PdfObjectRef | undefined {
+export function readObjectRefValue(value: string | undefined): PdfObjectRef | undefined {
   if (!value) {
     return undefined;
   }
@@ -1682,7 +1682,7 @@ function readObjectRefValue(value: string | undefined): PdfObjectRef | undefined
   };
 }
 
-function readObjectRefsValue(value: string | undefined): PdfObjectRef[] {
+export function readObjectRefsValue(value: string | undefined): PdfObjectRef[] {
   if (!value) {
     return [];
   }
@@ -1731,7 +1731,7 @@ function readIntegerValue(value: string | undefined): number | undefined {
   return integerToken?.value;
 }
 
-function readNameValue(value: string | undefined): string | undefined {
+export function readNameValue(value: string | undefined): string | undefined {
   if (!value) {
     return undefined;
   }
@@ -2397,7 +2397,7 @@ function decodePdfTokenBytes(token: string): Uint8Array {
   return decodedBytes;
 }
 
-function findFirstDictionaryToken(text: string): string | undefined {
+export function findFirstDictionaryToken(text: string): string | undefined {
   for (let index = 0; index < text.length; index += 1) {
     const dictionary = readPdfDictionaryToken(text, index);
     if (dictionary) {

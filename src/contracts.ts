@@ -52,8 +52,10 @@ export type PdfFeatureKind =
   | "launch-actions"
   | "forms"
   | "annotations"
+  | "links"
   | "outlines"
   | "signatures"
+  | "optional-content"
   | "encryption"
   | "object-streams"
   | "xref-streams"
@@ -63,7 +65,7 @@ export type PdfFeatureKind =
   | "duplicate-text-layer";
 
 /**
- * Evidence path used to evaluate one feature signal.
+ * Evidence path used to evaluate one feature finding.
  */
 export type PdfFeatureEvidenceSource = "object" | "scan";
 
@@ -420,22 +422,159 @@ export interface PdfDiagnostic {
 }
 
 /**
- * Detection result for one feature kind during admission.
+ * Shared fields for one typed feature finding.
  */
-export interface PdfFeatureSignal {
+export interface PdfFeatureFindingBase {
   /** Feature kind that was evaluated. */
   readonly kind: PdfFeatureKind;
   /** Policy action that applies to this feature kind. */
   readonly action: PdfPolicyAction;
-  /** Whether the feature was detected in the current source. */
-  readonly detected: boolean;
-  /** Evidence path used to evaluate this feature signal. */
+  /** Evidence path used to evaluate this feature finding. */
   readonly evidenceSource: PdfFeatureEvidenceSource;
   /** Related object reference when parsed object evidence identified a concrete source object. */
   readonly objectRef?: PdfObjectRef;
   /** Human-readable summary of the detection result. */
   readonly message: string;
 }
+
+/**
+ * Typed finding for JavaScript or launch actions.
+ */
+export interface PdfActionFinding extends PdfFeatureFindingBase {
+  /** Action finding kind. */
+  readonly kind: "javascript-actions" | "launch-actions";
+  /** Resolved action name when known. */
+  readonly actionName: "JavaScript" | "Launch";
+  /** Action object reference when known. */
+  readonly actionRef?: PdfObjectRef;
+  /** Trigger object reference when the action was found through another object. */
+  readonly triggerRef?: PdfObjectRef;
+}
+
+/**
+ * Typed finding for embedded files or file specifications.
+ */
+export interface PdfAttachmentFinding extends PdfFeatureFindingBase {
+  /** Attachment finding kind. */
+  readonly kind: "embedded-files";
+  /** File specification reference when known. */
+  readonly fileSpecRef?: PdfObjectRef;
+  /** Embedded file stream reference when known. */
+  readonly embeddedFileRef?: PdfObjectRef;
+}
+
+/**
+ * Typed finding for annotations attached to one page.
+ */
+export interface PdfAnnotationFinding extends PdfFeatureFindingBase {
+  /** Annotation finding kind. */
+  readonly kind: "annotations";
+  /** Annotation object reference when known. */
+  readonly annotationRef?: PdfObjectRef;
+  /** Page reference that owns the annotation when known. */
+  readonly pageRef?: PdfObjectRef;
+  /** Annotation subtype when the parser can resolve it. */
+  readonly annotationSubtype?: string;
+}
+
+/**
+ * Typed finding for link annotations or destinations.
+ */
+export interface PdfLinkFinding extends PdfFeatureFindingBase {
+  /** Link finding kind. */
+  readonly kind: "links";
+  /** Annotation reference that produced the link when known. */
+  readonly annotationRef?: PdfObjectRef;
+  /** Page reference that owns the link when known. */
+  readonly pageRef?: PdfObjectRef;
+  /** Annotation subtype when the parser can resolve it. */
+  readonly annotationSubtype?: string;
+  /** Destination reference when the link points to an indirect object. */
+  readonly destinationRef?: PdfObjectRef;
+  /** Action reference when the link points through an action dictionary. */
+  readonly actionRef?: PdfObjectRef;
+}
+
+/**
+ * Typed finding for an AcroForm root and its field references.
+ */
+export interface PdfFormFinding extends PdfFeatureFindingBase {
+  /** Form finding kind. */
+  readonly kind: "forms";
+  /** Form dictionary reference when known. */
+  readonly formRef?: PdfObjectRef;
+  /** Field references attached to the form root when known. */
+  readonly fieldRefs: readonly PdfObjectRef[];
+}
+
+/**
+ * Typed finding for an outline root and its first recovered items.
+ */
+export interface PdfOutlineFinding extends PdfFeatureFindingBase {
+  /** Outline finding kind. */
+  readonly kind: "outlines";
+  /** Outline root reference when known. */
+  readonly outlineRef?: PdfObjectRef;
+  /** Outline item references recovered from the outline tree. */
+  readonly itemRefs: readonly PdfObjectRef[];
+}
+
+/**
+ * Typed finding for signature dictionaries or signature fields.
+ */
+export interface PdfSignatureFinding extends PdfFeatureFindingBase {
+  /** Signature finding kind. */
+  readonly kind: "signatures";
+  /** Signature field reference when known. */
+  readonly fieldRef?: PdfObjectRef;
+  /** Signature value reference when known. */
+  readonly signatureRef?: PdfObjectRef;
+}
+
+/**
+ * Typed finding for optional-content configuration and membership.
+ */
+export interface PdfOptionalContentFinding extends PdfFeatureFindingBase {
+  /** Optional-content finding kind. */
+  readonly kind: "optional-content";
+  /** Optional-content configuration reference when known. */
+  readonly configRef?: PdfObjectRef;
+  /** Optional-content group references when known. */
+  readonly groupRefs: readonly PdfObjectRef[];
+  /** Object references that declare optional-content membership when known. */
+  readonly memberObjectRefs: readonly PdfObjectRef[];
+}
+
+/**
+ * Typed finding for structural or text-layer features summarized from object evidence.
+ */
+export interface PdfObjectFeatureFinding extends PdfFeatureFindingBase {
+  /** Object-backed feature kind. */
+  readonly kind:
+    | "encryption"
+    | "object-streams"
+    | "xref-streams"
+    | "images"
+    | "fonts"
+    | "hidden-text"
+    | "duplicate-text-layer";
+  /** Object references that support the current finding. */
+  readonly objectRefs: readonly PdfObjectRef[];
+}
+
+/**
+ * Typed finding for one detected feature.
+ */
+export type PdfFeatureFinding =
+  | PdfActionFinding
+  | PdfAttachmentFinding
+  | PdfAnnotationFinding
+  | PdfLinkFinding
+  | PdfFormFinding
+  | PdfOutlineFinding
+  | PdfSignatureFinding
+  | PdfOptionalContentFinding
+  | PdfObjectFeatureFinding;
 
 /**
  * Password request metadata passed to a caller-supplied password provider.
@@ -480,8 +619,8 @@ export interface PdfAdmissionArtifact {
   readonly repairState: PdfRepairState;
   /** Structural coverage reached by the current parser pass. */
   readonly parseCoverage: PdfParseCoverage;
-  /** Feature detection results captured during admission. */
-  readonly featureSignals: readonly PdfFeatureSignal[];
+  /** Typed feature findings captured during admission. */
+  readonly featureFindings: readonly PdfFeatureFinding[];
   /** Fully normalized policy used for the request. */
   readonly policy: PdfNormalizedAdmissionPolicy;
   /** Known implementation limits that materially affect this admission result. */
@@ -544,8 +683,8 @@ export interface PdfIrDocument {
   readonly trailer?: PdfTrailerShell;
   /** Indirect object summaries recovered by the current parser pass. */
   readonly indirectObjects: readonly PdfIndirectObjectShell[];
-  /** Feature kinds detected during admission. */
-  readonly featureKinds: readonly PdfFeatureKind[];
+  /** Typed feature findings resolved during admission and IR. */
+  readonly featureFindings: readonly PdfFeatureFinding[];
   /** Per-page parser summaries. */
   readonly pages: readonly PdfIrPageShell[];
   /** Whether the parser recovered at least one operator-ready stream body. */
