@@ -2755,6 +2755,13 @@ const repeatedBoundaryKnowledgeResult = await engine.toKnowledge({
     mediaType: "application/pdf",
   },
 });
+const repeatedBoundaryRenderResult = await engine.toRender({
+  source: {
+    bytes: encodeText(repeatedBoundaryPdf),
+    fileName: "repeated-boundary.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const observationWithoutPassword = await engine.observe({
   source: {
     bytes: encryptedStandardTextFixtureBytes,
@@ -2826,11 +2833,15 @@ assert(engine.identity.supportedStages.includes("ir"), "Engine identity does not
 assert(engine.identity.supportedStages.includes("observation"), "Engine identity does not claim observation support.");
 assert(engine.identity.supportedStages.includes("layout"), "Engine identity does not claim layout support.");
 assert(engine.identity.supportedStages.includes("knowledge"), "Engine identity does not claim knowledge support.");
+assert(engine.identity.supportedStages.includes("render"), "Engine identity does not claim render support.");
 assert(result.admission.status === "completed", `Admission status was ${result.admission.status}.`);
 assert(result.ir.status === "completed", `IR status was ${result.ir.status}.`);
 assert(result.observation.status === "completed", `Observation status was ${result.observation.status}.`);
+assert(result.render.status === "partial", `Render status was ${result.render.status}.`);
 assert(result.ir.value?.kind === "pdf-ir", `IR kind was ${result.ir.value?.kind ?? "missing"}.`);
 assert(result.observation.value?.kind === "pdf-observation", `Observation kind was ${result.observation.value?.kind ?? "missing"}.`);
+assert(result.render.value?.kind === "pdf-render", `Render kind was ${result.render.value?.kind ?? "missing"}.`);
+assert(result.render.value?.strategy === "observed-display-list", `Render strategy was ${result.render.value?.strategy ?? "missing"}.`);
 assert(result.admission.value?.repairState === "clean", `Repair state was ${result.admission.value?.repairState ?? "missing"}.`);
 assert((result.admission.value?.knownLimits.length ?? 0) === 0, "Admission known limits should be empty for the clean synthetic document.");
 assert(result.admission.value?.parseCoverage.startXref === true, "The parser did not recover startxref coverage.");
@@ -2852,6 +2863,25 @@ assert(result.observation.value?.pages[0]?.glyphs[0]?.contentStreamRef?.objectNu
 assert(result.observation.value?.pages[0]?.glyphs[0]?.origin === "native-text", "Observation glyph origin was not updated.");
 assert(result.observation.value?.strategy === "content-stream-interpreter", "Observation strategy was not updated.");
 assert(result.observation.value?.pages[0]?.marks[0]?.kind === "text", "Observation text marks were not emitted for the synthetic document.");
+assert(result.render.value?.pages[0]?.displayList.commands[0]?.kind === "text", "Render display list did not emit a text command for the synthetic document.");
+assert(
+  result.render.value?.knownLimits.includes("render-display-list-only"),
+  "Render known limits did not include render-display-list-only.",
+);
+assert(
+  result.render.value?.knownLimits.includes("render-raster-not-implemented"),
+  "Render known limits did not include render-raster-not-implemented.",
+);
+assert(
+  result.render.diagnostics.some((diagnostic) => diagnostic.code === "render-display-list-only"),
+  "Render diagnostics did not include render-display-list-only.",
+);
+assert(
+  result.render.diagnostics.some((diagnostic) => diagnostic.code === "render-raster-not-implemented"),
+  "Render diagnostics did not include render-raster-not-implemented.",
+);
+assert(repeatedBoundaryRenderResult.status === "partial", `Direct render status was ${repeatedBoundaryRenderResult.status}.`);
+assert(repeatedBoundaryRenderResult.value?.kind === "pdf-render", `Direct render kind was ${repeatedBoundaryRenderResult.value?.kind ?? "missing"}.`);
 assert(
   result.observation.value?.knownLimits.includes("text-decoding-heuristic"),
   "Observation known limits did not include text-decoding-heuristic.",
@@ -4150,6 +4180,9 @@ console.log(
       knowledge: result.knowledge.status,
       knowledgeStrategy: result.knowledge.value?.strategy ?? null,
       knowledgeChunkCount: result.knowledge.value?.chunks.length ?? null,
+      render: result.render.status,
+      renderStrategy: result.render.value?.strategy ?? null,
+      renderCommandCount: result.render.value?.pages[0]?.displayList.commands.length ?? null,
       text: result.observation.value?.extractedText ?? null,
     },
     null,
