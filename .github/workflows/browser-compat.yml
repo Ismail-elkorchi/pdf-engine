@@ -15,9 +15,41 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  browser-runtime-parity:
+    name: browser-runtime-parity
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup Node
+        uses: actions/setup-node@53b83947a5a98c8d113130e565377fae1a50d02f # v6.3.0
+        with:
+          node-version: 24.14.0
+          cache: npm
+
+      - name: Install
+        run: npm ci
+
+      - name: Install Playwright browsers
+        run: npx playwright install --with-deps chromium firefox webkit
+
+      - name: Browser runtime parity
+        run: npm run test:runtime:browser:compat
+
+      - name: Fail on tracked-file churn
+        shell: bash
+        run: |
+          if [[ -n "$(git status --porcelain=v1)" ]]; then
+            echo "Tracked files changed during the browser runtime parity job:"
+            git status --porcelain=v1
+            exit 1
+          fi
+
   browser-compat:
     name: ${{ matrix.browser }}
     runs-on: ${{ matrix.os }}
+    needs: browser-runtime-parity
     strategy:
       fail-fast: false
       matrix:
@@ -25,11 +57,13 @@ jobs:
           - browser: firefox
             os: ubuntu-latest
             install: npx playwright install --with-deps firefox
-            smoke: npm run smoke:browser:firefox
+            runtime_test: npm run test:runtime:browser:firefox
+            integration_test: npm run smoke:browser:firefox
           - browser: webkit
             os: macos-latest
             install: npx playwright install webkit
-            smoke: npm run smoke:browser:webkit
+            runtime_test: npm run test:runtime:browser:webkit
+            integration_test: npm run smoke:browser:webkit
     steps:
       - name: Checkout
         uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
@@ -46,8 +80,11 @@ jobs:
       - name: Install Playwright browser
         run: ${{ matrix.install }}
 
+      - name: Browser runtime tests
+        run: ${{ matrix.runtime_test }}
+
       - name: Browser smoke
-        run: ${{ matrix.smoke }}
+        run: ${{ matrix.integration_test }}
 
       - name: Fail on tracked-file churn
         shell: bash

@@ -51,14 +51,17 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Smoke (Web bundle)
-        run: npm run smoke:web
+      - name: Test (Node lower coverage)
+        run: npm run test:coverage:node-lower
 
-      - name: Smoke (Browser runtime)
-        run: npm run smoke:browser
+      - name: Test (Runtime Node)
+        run: npm run test:runtime:node
 
-      - name: Smoke (Node)
-        run: npm run smoke:node
+      - name: Test (Runtime Browser)
+        run: npm run test:runtime:browser
+
+      - name: Test (Integration Node)
+        run: npm run test:integration:node
 
       - name: Security fuzz
         run: npm run test:fuzz
@@ -96,8 +99,11 @@ jobs:
       - name: Install
         run: npm ci
 
-      - name: Smoke (Deno)
-        run: npm run smoke:deno
+      - name: Test (Runtime Deno)
+        run: npm run test:runtime:deno
+
+      - name: Test (Integration Deno)
+        run: npm run test:integration:deno
 
       - name: Fail on tracked-file churn
         shell: bash
@@ -135,8 +141,11 @@ jobs:
       - name: Build
         run: npm run build
 
-      - name: Smoke (Bun)
-        run: npm run smoke:bun
+      - name: Test (Runtime Bun)
+        run: npm run test:runtime:bun
+
+      - name: Test (Integration Bun)
+        run: npm run test:integration:bun
 
       - name: Fail on tracked-file churn
         shell: bash
