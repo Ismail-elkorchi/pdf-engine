@@ -3,17 +3,31 @@ import type {
   PdfDisplayList,
   PdfObservedMark,
   PdfObservedDocument,
+  PdfRenderHash,
   PdfRenderDocument,
   PdfRenderPage,
 } from "./contracts.ts";
 
-export function buildRenderDocument(observation: PdfObservedDocument): PdfRenderDocument {
-  const pages = observation.pages.map((page) => buildRenderPage(page.pageNumber, page.resolutionMethod, page.pageRef, page.marks));
+export async function buildRenderDocument(observation: PdfObservedDocument): Promise<PdfRenderDocument> {
+  const pages = await Promise.all(
+    observation.pages.map((page) => buildRenderPage(page.pageNumber, page.resolutionMethod, page.pageRef, page.marks)),
+  );
+  const renderHash = await buildRenderHash({
+    strategy: "observed-display-list",
+    pages: pages.map((page) => ({
+      pageNumber: page.pageNumber,
+      resolutionMethod: page.resolutionMethod,
+      ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
+      renderHash: page.renderHash,
+      displayList: page.displayList,
+    })),
+  });
 
   return {
     kind: "pdf-render",
     strategy: "observed-display-list",
     pages,
+    renderHash,
     knownLimits: dedupeKnownLimits([
       ...observation.knownLimits,
       "render-display-list-only",
@@ -22,21 +36,28 @@ export function buildRenderDocument(observation: PdfObservedDocument): PdfRender
   };
 }
 
-function buildRenderPage(
+async function buildRenderPage(
   pageNumber: number,
   resolutionMethod: PdfRenderPage["resolutionMethod"],
   pageRef: PdfRenderPage["pageRef"],
   marks: readonly PdfObservedMark[],
-): PdfRenderPage {
+): Promise<PdfRenderPage> {
   const displayList: PdfDisplayList = {
     commands: marks.map((mark) => toDisplayCommand(mark)),
   };
+  const renderHash = await buildRenderHash({
+    pageNumber,
+    resolutionMethod,
+    ...(pageRef !== undefined ? { pageRef } : {}),
+    displayList,
+  });
 
   return {
     pageNumber,
     resolutionMethod,
     ...(pageRef !== undefined ? { pageRef } : {}),
     displayList,
+    renderHash,
   };
 }
 
@@ -147,4 +168,39 @@ function toDisplayCommand(mark: PdfObservedMark): PdfDisplayCommand {
 
 function dedupeKnownLimits(knownLimits: readonly PdfRenderDocument["knownLimits"][number][]): readonly PdfRenderDocument["knownLimits"][number][] {
   return [...new Set(knownLimits)];
+}
+
+async function buildRenderHash(value: unknown): Promise<PdfRenderHash> {
+  const json = canonicalizeJson(value);
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
+  const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+
+  return {
+    algorithm: "sha-256",
+    hex,
+  };
+}
+
+function canonicalizeJson(value: unknown): string {
+  if (value === null) {
+    return "null";
+  }
+
+  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    return `[${value.map((entry) => canonicalizeJson(entry)).join(",")}]`;
+  }
+
+  if (typeof value === "object") {
+    const entries = Object.entries(value).filter(([, entry]) => entry !== undefined).sort(([left], [right]) =>
+      left.localeCompare(right)
+    );
+
+    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalizeJson(entry)}`).join(",")}}`;
+  }
+
+  throw new Error(`Render hashing does not support values of type ${typeof value}.`);
 }

@@ -798,6 +798,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
           renderKind: plainResult.render.value?.kind === "pdf-render",
           renderStatus: plainResult.render.status === "partial",
           renderStrategy: plainResult.render.value?.strategy === "observed-display-list",
+          renderDocumentHash:
+            plainResult.render.value?.renderHash.algorithm === "sha-256" &&
+            plainResult.render.value?.renderHash.hex.length === 64,
+          renderPageHash:
+            plainResult.render.value?.pages[0]?.renderHash.algorithm === "sha-256" &&
+            plainResult.render.value?.pages[0]?.renderHash.hex.length === 64,
           renderCommand: plainResult.render.value?.pages[0]?.displayList.commands[0]?.kind === "text",
           renderDisplayLimit:
             plainResult.render.value?.knownLimits.includes("render-display-list-only") === true,
@@ -975,6 +981,8 @@ async function runBrowserSmoke(baseUrl, browserName) {
           renderStatus: plainResult.render.status,
           renderStrategy: plainResult.render.value?.strategy ?? null,
           renderCommandCount: plainResult.render.value?.pages[0]?.displayList.commands.length ?? null,
+          renderHash: plainResult.render.value?.renderHash.hex ?? null,
+          renderPageHash: plainResult.render.value?.pages[0]?.renderHash.hex ?? null,
           identityHText: identityHCidFontResult.observation.value?.extractedText ?? null,
           identityVText: identityVCidFontResult.observation.value?.extractedText ?? null,
           verticalOrder: verticalWordColumnsResult.layout.value?.pages[0]?.blocks.map((block) => block.text).join(" ") ?? null,

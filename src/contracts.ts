@@ -1195,6 +1195,16 @@ export interface PdfKnowledgeDocument {
 export type PdfRenderStrategy = "observed-display-list";
 
 /**
+ * Stable hash attached to a render artifact.
+ */
+export interface PdfRenderHash {
+  /** Hash algorithm used for the current render artifact. */
+  readonly algorithm: "sha-256";
+  /** Lowercase hexadecimal digest. */
+  readonly hex: string;
+}
+
+/**
  * Base fields shared by every display-list command.
  */
 export interface PdfDisplayCommandBase {
@@ -1363,6 +1373,8 @@ export interface PdfRenderPage {
   readonly pageRef?: PdfObjectRef;
   /** Deterministic display-list artifact for the page. */
   readonly displayList: PdfDisplayList;
+  /** Stable hash for the current page render artifact. */
+  readonly renderHash: PdfRenderHash;
 }
 
 /**
@@ -1375,6 +1387,8 @@ export interface PdfRenderDocument {
   readonly strategy: PdfRenderStrategy;
   /** Rendered pages in source order. */
   readonly pages: readonly PdfRenderPage[];
+  /** Stable hash for the current document render artifact. */
+  readonly renderHash: PdfRenderHash;
   /** Known implementation limits that materially affect this render result. */
   readonly knownLimits: readonly PdfKnownLimitCode[];
 }

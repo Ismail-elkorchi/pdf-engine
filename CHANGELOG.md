@@ -13,3 +13,4 @@ All notable changes are documented in this file.
 - Breaking observation contract update: `PdfObservedPage` now exposes canonical `marks`, and observation strategy now reports `content-stream-interpreter` while preserving derived text `runs` and `glyphs`.
 - Observation marks now carry first marked-content, optional-content visibility, and hidden-layer evidence needed for the remaining render and geometry-backed interpretation work.
 - Breaking pipeline contract update: `PdfPipelineResult` now includes a first `render` stage, and `PdfEngine` now exposes `toRender(...)` with deterministic display-list output and explicit render limits.
+- Render artifacts now include stable SHA-256 hashes for the document and each rendered page so cross-runtime determinism can be proven directly from the public stage output.
