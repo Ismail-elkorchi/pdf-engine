@@ -4,6 +4,7 @@
     "module": "NodeNext",
     "moduleResolution": "NodeNext",
     "lib": ["ES2024", "DOM", "DOM.Iterable"],
+    "types": ["node"],
     "strict": true,
     "noImplicitOverride": true,
     "noImplicitReturns": true,
@@ -24,5 +25,5 @@
     "allowImportingTsExtensions": true,
     "rewriteRelativeImportExtensions": true
   },
-  "include": ["src/**/*.ts", "scripts/**/*.ts"]
+  "include": ["src/**/*.ts", "scripts/**/*.ts", "test/**/*.ts"]
 }
