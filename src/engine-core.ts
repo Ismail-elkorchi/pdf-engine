@@ -3,6 +3,7 @@ import { buildObservedPages } from "./layout/observed.ts";
 import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts";
 import { evaluatePdfFeatureFindings, hasDetectedFeatureFinding } from "./pdf-feature-findings.ts";
 import { preparePdfStandardPasswordSecurity } from "./pdf-standard-security.ts";
+import { buildRenderDocument } from "./render.ts";
 import { analyzePdfShell, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
 
 import type {
@@ -30,6 +31,8 @@ import type {
   PdfObservationRequest,
   PdfPipelineRequest,
   PdfPipelineResult,
+  PdfRenderDocument,
+  PdfRenderRequest,
   PdfRuntimeCapabilities,
   PdfRuntimeDescriptor,
   PdfStageResult,
@@ -57,7 +60,7 @@ const ENGINE_IDENTITY: PdfEngineIdentity = {
   version: "0.1.0",
   mode: "core",
   supportedRuntimes: ["node", "deno", "bun", "web"],
-  supportedStages: ["admission", "ir", "observation", "layout", "knowledge"],
+  supportedStages: ["admission", "ir", "observation", "layout", "knowledge", "render"],
 };
 
 interface PdfShellInspection {
@@ -97,6 +100,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     observe,
     toLayout,
     toKnowledge,
+    toRender,
     run,
   };
 
@@ -167,6 +171,21 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     return buildKnowledgeStage(observation, layout);
   }
 
+  async function toRender(request: PdfRenderRequest): Promise<PdfStageResult<PdfRenderDocument>> {
+    const policy = mergePolicy(defaultPolicy, request.policy);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const admission = buildAdmissionStage(
+      {
+        source: request.source,
+        ...(request.policy !== undefined ? { policy: request.policy } : {}),
+        ...(request.passwordProvider !== undefined ? { passwordProvider: request.passwordProvider } : {}),
+      },
+      inspection,
+    );
+    const observation = buildObservationStage(inspection, admission);
+    return buildRenderStage(observation);
+  }
+
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const inspection = await inspectSource(request.source, policy, request.passwordProvider);
@@ -175,6 +194,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     const observation = buildObservationStage(inspection, admission);
     const layout = buildLayoutStage(observation);
     const knowledge = buildKnowledgeStage(observation, layout);
+    const render = buildRenderStage(observation);
 
     return {
       engine: ENGINE_IDENTITY,
@@ -190,7 +210,15 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       observation,
       layout,
       knowledge,
-      diagnostics: dedupeDiagnostics([...admission.diagnostics, ...ir.diagnostics, ...observation.diagnostics, ...layout.diagnostics, ...knowledge.diagnostics]),
+      render,
+      diagnostics: dedupeDiagnostics([
+        ...admission.diagnostics,
+        ...ir.diagnostics,
+        ...observation.diagnostics,
+        ...layout.diagnostics,
+        ...knowledge.diagnostics,
+        ...render.diagnostics,
+      ]),
     };
   }
 }
@@ -668,6 +696,24 @@ function buildKnowledgeStage(
   );
 }
 
+function buildRenderStage(
+  observation: PdfStageResult<PdfObservedDocument>,
+): PdfStageResult<PdfRenderDocument> {
+  if (observation.value === undefined) {
+    return stageResult("render", observation.status === "failed" ? "failed" : "blocked", observation.diagnostics);
+  }
+
+  const render = buildRenderDocument(observation.value);
+  const diagnostics = createRenderDiagnostics(render);
+
+  return stageResult(
+    "render",
+    observation.status === "partial" || diagnostics.length > 0 ? "partial" : "completed",
+    diagnostics,
+    render,
+  );
+}
+
 function canAdvance(admission: PdfStageResult<PdfAdmissionArtifact>): boolean {
   return admission.value?.decision === "accepted" && (admission.status === "completed" || admission.status === "partial");
 }
@@ -1002,6 +1048,34 @@ function createKnowledgeDiagnostics(
       stage: "knowledge",
       level: "medium",
       message: "The knowledge stage did not emit any chunks because the layout stage recovered no usable blocks.",
+    });
+  }
+
+  return diagnostics;
+}
+
+function createRenderDiagnostics(render: PdfRenderDocument): PdfDiagnostic[] {
+  const diagnostics: PdfDiagnostic[] = [];
+
+  diagnostics.push({
+    code: "render-display-list-only",
+    stage: "render",
+    level: "medium",
+    message: "The current render stage emits deterministic display lists but does not paint pixels yet.",
+  });
+  diagnostics.push({
+    code: "render-raster-not-implemented",
+    stage: "render",
+    level: "medium",
+    message: "The current render stage does not emit raster output yet.",
+  });
+
+  if (render.pages.every((page) => page.displayList.commands.length === 0)) {
+    diagnostics.push({
+      code: "render-empty",
+      stage: "render",
+      level: "medium",
+      message: "The render stage emitted no display-list commands because the observation stage recovered no page marks.",
     });
   }
 

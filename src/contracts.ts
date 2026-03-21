@@ -126,7 +126,9 @@ export type PdfKnownLimitCode =
   | "layout-reading-order-heuristic"
   | "knowledge-chunk-heuristic"
   | "table-projection-heuristic"
-  | "table-projection-not-implemented";
+  | "table-projection-not-implemented"
+  | "render-display-list-only"
+  | "render-raster-not-implemented";
 
 /**
  * Decode state for one recovered stream object.
@@ -1188,6 +1190,196 @@ export interface PdfKnowledgeDocument {
 }
 
 /**
+ * First render-stage strategy used by the current implementation.
+ */
+export type PdfRenderStrategy = "observed-display-list";
+
+/**
+ * Base fields shared by every display-list command.
+ */
+export interface PdfDisplayCommandBase {
+  /** Stable command identifier within the render result. */
+  readonly id: string;
+  /** Command kind. */
+  readonly kind: PdfObservedMark["kind"];
+  /** Zero-based content-order position for the command. */
+  readonly contentOrder: number;
+  /** Optional originating object reference. */
+  readonly objectRef?: PdfObjectRef;
+  /** Enclosing marked-content identifier when known. */
+  readonly markedContentId?: string;
+  /** Bounding box when the current implementation can recover one. */
+  readonly bbox?: PdfBoundingBox;
+  /** Active transform when the current implementation can recover one. */
+  readonly transform?: PdfTransformMatrix;
+  /** Visibility state when the current implementation can recover one. */
+  readonly visibilityState?: PdfVisibilityState;
+}
+
+/**
+ * Display-list text command derived from an observed text mark.
+ */
+export interface PdfDisplayTextCommand extends PdfDisplayCommandBase {
+  /** Text command kind. */
+  readonly kind: "text";
+  /** Source run identifier. */
+  readonly runId: string;
+  /** Source glyph identifiers. */
+  readonly glyphIds: readonly string[];
+  /** Text payload. */
+  readonly text: string;
+  /** Observation origin. */
+  readonly origin: PdfObservationOrigin;
+  /** Font object reference when known. */
+  readonly fontRef?: PdfObjectRef;
+  /** Encoding form used to decode the text when known. */
+  readonly textEncodingKind?: PdfTextEncodingKind;
+  /** Unicode mapping path when known. */
+  readonly unicodeMappingSource?: PdfUnicodeMappingSource;
+  /** Writing mode when known. */
+  readonly writingMode?: PdfWritingMode;
+  /** Marked-content classification when known. */
+  readonly markedContentKind?: PdfMarkedContentKind;
+  /** Preferred ActualText payload when known. */
+  readonly actualText?: string;
+  /** Approximate text anchor when known. */
+  readonly anchor?: PdfPoint;
+  /** Active font size when known. */
+  readonly fontSize?: number;
+  /** Whether the text started on a new line. */
+  readonly startsNewLine?: boolean;
+  /** Whether the current command is a hidden-text candidate. */
+  readonly hiddenTextCandidate?: boolean;
+  /** Whether the current command is a duplicate-layer candidate. */
+  readonly duplicateLayerCandidate?: boolean;
+}
+
+/**
+ * Display-list path command derived from an observed path mark.
+ */
+export interface PdfDisplayPathCommand extends PdfDisplayCommandBase {
+  /** Path command kind. */
+  readonly kind: "path";
+  /** Painting operator that finalized the path. */
+  readonly paintOperator: PdfObservedPathPaintOperator;
+  /** Number of points considered while recovering the path. */
+  readonly pointCount: number;
+  /** Whether the path was explicitly closed. */
+  readonly closed: boolean;
+}
+
+/**
+ * Display-list XObject command derived from an observed XObject mark.
+ */
+export interface PdfDisplayXObjectCommand extends PdfDisplayCommandBase {
+  /** XObject command kind. */
+  readonly kind: "xobject";
+  /** Resource name used by the `Do` operator. */
+  readonly resourceName: string;
+  /** XObject reference when known. */
+  readonly xObjectRef?: PdfObjectRef;
+  /** XObject subtype when known. */
+  readonly subtypeName?: string;
+}
+
+/**
+ * Display-list image command derived from an observed image mark.
+ */
+export interface PdfDisplayImageCommand extends PdfDisplayCommandBase {
+  /** Image command kind. */
+  readonly kind: "image";
+  /** Resource name used by the `Do` operator. */
+  readonly resourceName: string;
+  /** Image XObject reference when known. */
+  readonly xObjectRef?: PdfObjectRef;
+  /** Image width when known. */
+  readonly width?: number;
+  /** Image height when known. */
+  readonly height?: number;
+}
+
+/**
+ * Display-list clip command derived from an observed clip mark.
+ */
+export interface PdfDisplayClipCommand extends PdfDisplayCommandBase {
+  /** Clip command kind. */
+  readonly kind: "clip";
+  /** Clip operator that established the clipping path. */
+  readonly clipOperator: PdfObservedClipOperator;
+}
+
+/**
+ * Display-list marked-content command derived from an observed marked-content mark.
+ */
+export interface PdfDisplayMarkedContentCommand extends PdfDisplayCommandBase {
+  /** Marked-content command kind. */
+  readonly kind: "marked-content";
+  /** Original tag name without the leading slash. */
+  readonly tagName: string;
+  /** Broad marked-content classification. */
+  readonly markedContentKind: PdfMarkedContentKind;
+  /** Nesting depth when this marked-content sequence started. */
+  readonly depth: number;
+  /** Properties resource name used by `BDC` when known. */
+  readonly propertyName?: string;
+  /** Optional-content object reference when known. */
+  readonly optionalContentRef?: PdfObjectRef;
+  /** Marked-content identifier when known. */
+  readonly mcid?: number;
+  /** Preferred ActualText payload when known. */
+  readonly actualText?: string;
+  /** Content-order position where this sequence closed when known. */
+  readonly closedContentOrder?: number;
+}
+
+/**
+ * Canonical display-list command union.
+ */
+export type PdfDisplayCommand =
+  | PdfDisplayTextCommand
+  | PdfDisplayPathCommand
+  | PdfDisplayXObjectCommand
+  | PdfDisplayImageCommand
+  | PdfDisplayClipCommand
+  | PdfDisplayMarkedContentCommand;
+
+/**
+ * Display list emitted for one rendered page.
+ */
+export interface PdfDisplayList {
+  /** Commands in content order. */
+  readonly commands: readonly PdfDisplayCommand[];
+}
+
+/**
+ * One rendered page in the current render result.
+ */
+export interface PdfRenderPage {
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** How page ordering for this render page was resolved. */
+  readonly resolutionMethod: PdfPageResolutionMethod;
+  /** Page object reference when known. */
+  readonly pageRef?: PdfObjectRef;
+  /** Deterministic display-list artifact for the page. */
+  readonly displayList: PdfDisplayList;
+}
+
+/**
+ * Current render-stage result for a document.
+ */
+export interface PdfRenderDocument {
+  /** Render implementation kind. */
+  readonly kind: "pdf-render";
+  /** Render strategy used by the current implementation. */
+  readonly strategy: PdfRenderStrategy;
+  /** Rendered pages in source order. */
+  readonly pages: readonly PdfRenderPage[];
+  /** Known implementation limits that materially affect this render result. */
+  readonly knownLimits: readonly PdfKnownLimitCode[];
+}
+
+/**
  * Generic result wrapper for one pipeline stage.
  *
  * @typeParam T Value emitted by the stage when available.
@@ -1266,6 +1458,18 @@ export interface PdfKnowledgeRequest {
 }
 
 /**
+ * Request accepted by the render stage.
+ */
+export interface PdfRenderRequest {
+  /** Source document. */
+  readonly source: PdfDocumentSource;
+  /** Optional request-specific policy overrides. */
+  readonly policy?: PdfAdmissionPolicy;
+  /** Optional password provider for encrypted documents. */
+  readonly passwordProvider?: PdfPasswordProvider;
+}
+
+/**
  * Request accepted by the full staged pipeline.
  */
 export interface PdfPipelineRequest {
@@ -1313,6 +1517,8 @@ export interface PdfPipelineResult {
   readonly layout: PdfStageResult<PdfLayoutDocument>;
   /** Knowledge stage result. */
   readonly knowledge: PdfStageResult<PdfKnowledgeDocument>;
+  /** Render stage result. */
+  readonly render: PdfStageResult<PdfRenderDocument>;
   /** De-duplicated diagnostics across the completed stages. */
   readonly diagnostics: readonly PdfDiagnostic[];
 }
@@ -1379,6 +1585,13 @@ export interface PdfEngine {
    * @returns Knowledge stage result.
    */
   toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>>;
+  /**
+   * Produces the current render result for one document.
+   *
+   * @param request Render request.
+   * @returns Render stage result.
+   */
+  toRender(request: PdfRenderRequest): Promise<PdfStageResult<PdfRenderDocument>>;
   /**
    * Runs the staged pipeline for one document.
    *
