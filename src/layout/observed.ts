@@ -12,10 +12,15 @@ import {
 import { hasDetectedFeatureFinding } from "../pdf-feature-findings.ts";
 import {
   decodePdfLiteral,
-  parseContentStreamOperators,
+  findFirstDictionaryToken,
   keyOfObjectRef,
+  parseContentStreamOperators,
+  parseDictionaryEntries,
   parseTextOperatorRuns,
+  readObjectRefValue,
+  readObjectRefsValue,
   type ParsedContentStreamOperator,
+  type ParsedIndirectObject,
   type ParsedTextOperatorRun,
   type PdfShellAnalysis,
 } from "../shell-parse.ts";
@@ -24,9 +29,11 @@ import { parseTrueTypeGlyphUnicodeMap } from "../truetype-cmap.ts";
 import type {
   PdfDiagnostic,
   PdfFeatureFinding,
+  PdfMarkedContentKind,
   PdfObjectRef,
   PdfObservedGlyph,
   PdfObservedMark,
+  PdfObservedMarkedContentMark,
   PdfObservedPage,
   PdfObservedPathMark,
   PdfObservedTextRun,
@@ -34,6 +41,7 @@ import type {
   PdfTextEncodingKind,
   PdfTransformMatrix,
   PdfUnicodeMappingSource,
+  PdfVisibilityState,
   PdfWritingMode,
 } from "../contracts.ts";
 
@@ -58,6 +66,10 @@ interface PdfXObjectBinding {
   readonly height?: number;
 }
 
+interface PdfPropertyBinding {
+  readonly objectRef: PdfObjectRef;
+}
+
 interface PdfObservedPathBounds {
   readonly minX: number;
   readonly minY: number;
@@ -76,8 +88,34 @@ interface PdfObservedGraphicsState {
 
 interface PdfObservedContentMarksResult {
   readonly marks: readonly Exclude<PdfObservedMark, PdfObservedTextMark>[];
-  readonly textContentOrders: readonly number[];
+  readonly textContexts: readonly PdfObservedTextContext[];
   readonly nextContentOrder: number;
+}
+
+interface PdfObservedTextContext {
+  readonly contentOrder: number;
+  readonly markedContentId?: string;
+  readonly visibilityState?: PdfVisibilityState;
+}
+
+interface PdfObservedMarkedContentState {
+  readonly markId: string;
+  readonly markIndex: number;
+  readonly visibilityState: PdfVisibilityState;
+}
+
+interface PdfObservedMarkedContentProperties {
+  readonly propertyName?: string;
+  readonly actualText?: string;
+  readonly mcid?: number;
+  readonly optionalContentRef?: PdfObjectRef;
+  readonly visibilityState?: PdfVisibilityState;
+}
+
+interface PdfOptionalContentVisibilityConfig {
+  readonly baseState: "on" | "off" | "unknown";
+  readonly onKeys: ReadonlySet<string>;
+  readonly offKeys: ReadonlySet<string>;
 }
 
 const IDENTITY_TRANSFORM: PdfTransformMatrix = {
@@ -136,6 +174,7 @@ export function buildObservedPages(
       pageNumber: 1,
       contentStreamRefs: fallbackStreamRefs,
       fontBindings: [],
+      propertyBindings: [],
       xObjectBindings: [],
     },
     inspection,
@@ -154,6 +193,7 @@ function buildObservedPage(
     readonly pageRef?: PdfObjectRef;
     readonly contentStreamRefs: readonly PdfObjectRef[];
     readonly fontBindings: readonly { readonly resourceName: string; readonly fontRef: PdfObjectRef }[];
+    readonly propertyBindings: readonly { readonly resourceName: string; readonly objectRef: PdfObjectRef }[];
     readonly xObjectBindings: readonly {
       readonly resourceName: string;
       readonly objectRef: PdfObjectRef;
@@ -177,12 +217,17 @@ function buildObservedPage(
   let hasSevereFontMappingGap = false;
   let hasSevereLiteralFontEncodingGap = false;
   const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
+  const propertyBindingByResourceName = new Map(pageEntry.propertyBindings.map((binding) => [binding.resourceName, {
+    objectRef: binding.objectRef,
+  }] as const));
   const xObjectBindingByResourceName = new Map(pageEntry.xObjectBindings.map((binding) => [binding.resourceName, {
     objectRef: binding.objectRef,
     ...(binding.subtypeName !== undefined ? { subtypeName: binding.subtypeName } : {}),
     ...(binding.width !== undefined ? { width: binding.width } : {}),
     ...(binding.height !== undefined ? { height: binding.height } : {}),
   }] as const));
+  const optionalContentVisibilityConfig = resolveOptionalContentVisibilityConfig(inspection);
+  const hasDuplicateTextLayerFeature = hasDetectedFeatureFinding(inspection.featureFindings, "duplicate-text-layer");
   const unicodeCMapByFontKey = new Map<string, ReturnType<typeof parsePdfUnicodeCMap>>();
   const embeddedFontMappingByFontKey = new Map<string, PdfEmbeddedFontMapping | undefined>();
   const singleByteFontEncodingByFontKey = new Map<string, PdfSingleByteFontEncoding | undefined>();
@@ -197,12 +242,15 @@ function buildObservedPage(
       contentStream.streamText,
       pageNumber,
       contentStreamRef,
+      propertyBindingByResourceName,
+      optionalContentVisibilityConfig,
+      inspection.analysis.objectIndex,
       xObjectBindingByResourceName,
       contentOrder,
     );
     contentOrder = contentMarkResult.nextContentOrder;
     marks.push(...contentMarkResult.marks);
-    const textContentOrders = [...contentMarkResult.textContentOrders];
+    const textContexts = [...contentMarkResult.textContexts];
     const parsedRuns = parseTextOperatorRuns(contentStream.streamText);
     for (const parsedRun of parsedRuns) {
       const observedRun = observeParsedTextRun(
@@ -226,7 +274,8 @@ function buildObservedPage(
         continue;
       }
 
-      const runContentOrder = textContentOrders.shift() ?? contentOrder;
+      const textContext = textContexts.shift();
+      const runContentOrder = textContext?.contentOrder ?? contentOrder;
       if (runContentOrder >= contentOrder) {
         contentOrder = runContentOrder + 1;
       }
@@ -292,10 +341,16 @@ function buildObservedPage(
         ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
         ...(observedRun.unicodeMappingSource !== undefined ? { unicodeMappingSource: observedRun.unicodeMappingSource } : {}),
         ...(observedRun.writingMode !== undefined ? { writingMode: observedRun.writingMode } : {}),
+        ...(parsedRun.markedContentKind !== undefined ? { markedContentKind: parsedRun.markedContentKind } : {}),
+        ...(parsedRun.actualText !== undefined ? { actualText: parsedRun.actualText } : {}),
         objectRef: contentStreamRef,
+        ...(textContext?.markedContentId !== undefined ? { markedContentId: textContext.markedContentId } : {}),
+        ...(textContext?.visibilityState !== undefined ? { visibilityState: textContext.visibilityState } : {}),
         ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
         ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
         ...(observedRun.startsNewLine ? { startsNewLine: true } : {}),
+        ...(textContext?.visibilityState === "hidden" ? { hiddenTextCandidate: true } : {}),
+        ...(hasDuplicateTextLayerFeature && textContext?.visibilityState === "hidden" ? { duplicateLayerCandidate: true } : {}),
       });
     }
   }
@@ -333,13 +388,17 @@ function observeContentStreamMarks(
   contentStreamText: string,
   pageNumber: number,
   contentStreamRef: PdfObjectRef,
+  propertyBindingByResourceName: ReadonlyMap<string, PdfPropertyBinding>,
+  optionalContentVisibilityConfig: PdfOptionalContentVisibilityConfig | undefined,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
   xObjectBindingByResourceName: ReadonlyMap<string, PdfXObjectBinding>,
   startingContentOrder: number,
 ): PdfObservedContentMarksResult {
   const marks: Array<Exclude<PdfObservedMark, PdfObservedTextMark>> = [];
-  const textContentOrders: number[] = [];
+  const textContexts: PdfObservedTextContext[] = [];
   const operators = parseContentStreamOperators(contentStreamText);
   const graphicsStateStack: PdfObservedGraphicsState[] = [];
+  const markedContentStack: PdfObservedMarkedContentState[] = [];
   let graphicsState: PdfObservedGraphicsState = {
     transform: IDENTITY_TRANSFORM,
     currentPath: undefined,
@@ -350,8 +409,72 @@ function observeContentStreamMarks(
 
   for (const operator of operators) {
     if (isTextShowOperator(operator.operator)) {
-      textContentOrders.push(contentOrder);
+      const currentMarkedContentId = resolveCurrentMarkedContentId(markedContentStack);
+      const currentVisibilityState = resolveEffectiveVisibilityState(markedContentStack);
+      textContexts.push({
+        contentOrder,
+        ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
+        ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
+      });
       contentOrder += 1;
+      continue;
+    }
+
+    if (operator.operator === "BDC" || operator.operator === "BMC") {
+      const tagName = readMarkedContentTagName(operator) ?? "Unknown";
+      const markedContentKind = classifyObservedMarkedContent(tagName);
+      const markedContentProperties = operator.operator === "BDC"
+        ? readMarkedContentProperties(
+          operator,
+          propertyBindingByResourceName,
+          optionalContentVisibilityConfig,
+          objectIndex,
+        )
+        : {};
+      const visibilityState = combineVisibilityStates(
+        resolveEffectiveVisibilityState(markedContentStack),
+        markedContentProperties.visibilityState,
+      ) ?? "visible";
+      const markId = `mark-marked-content-${pageNumber}-${contentOrder + 1}`;
+      const markedContentMark: PdfObservedMarkedContentMark = {
+        id: markId,
+        kind: "marked-content",
+        pageNumber,
+        contentOrder,
+        contentStreamRef,
+        objectRef: markedContentProperties.optionalContentRef ?? contentStreamRef,
+        tagName,
+        markedContentKind,
+        depth: markedContentStack.length,
+        ...(markedContentProperties.propertyName !== undefined ? { propertyName: markedContentProperties.propertyName } : {}),
+        ...(markedContentProperties.optionalContentRef !== undefined
+          ? { optionalContentRef: markedContentProperties.optionalContentRef }
+          : {}),
+        ...(markedContentProperties.mcid !== undefined ? { mcid: markedContentProperties.mcid } : {}),
+        ...(markedContentProperties.actualText !== undefined ? { actualText: markedContentProperties.actualText } : {}),
+        visibilityState,
+      };
+      marks.push(markedContentMark);
+      markedContentStack.push({
+        markId,
+        markIndex: marks.length - 1,
+        visibilityState,
+      });
+      contentOrder += 1;
+      continue;
+    }
+
+    if (operator.operator === "EMC") {
+      const markedContentState = markedContentStack.pop();
+      if (markedContentState) {
+        const existingMark = marks[markedContentState.markIndex];
+        if (existingMark?.kind === "marked-content") {
+          marks[markedContentState.markIndex] = {
+            ...existingMark,
+            closedContentOrder: contentOrder > existingMark.contentOrder ? contentOrder - 1 : existingMark.contentOrder,
+          };
+        }
+      }
       continue;
     }
 
@@ -476,6 +599,8 @@ function observeContentStreamMarks(
       const currentPath = graphicsState.currentPath;
       const pendingClipBounds = graphicsState.pendingClipBounds;
       const pendingClipOperator = graphicsState.pendingClipOperator;
+      const currentMarkedContentId = resolveCurrentMarkedContentId(markedContentStack);
+      const currentVisibilityState = resolveEffectiveVisibilityState(markedContentStack);
       if (currentPath) {
         const pathBoundingBox = toObservedBoundingBox(currentPath);
         marks.push({
@@ -488,8 +613,10 @@ function observeContentStreamMarks(
           paintOperator: operator.operator as PdfObservedPathMark["paintOperator"],
           pointCount: currentPath.pointCount,
           closed: currentPath.closed || operator.operator === "s" || operator.operator === "b" || operator.operator === "b*",
+          ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
           ...(pathBoundingBox !== undefined ? { bbox: pathBoundingBox } : {}),
           transform: graphicsState.transform,
+          ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
         });
         contentOrder += 1;
       }
@@ -503,8 +630,10 @@ function observeContentStreamMarks(
           contentStreamRef,
           objectRef: contentStreamRef,
           clipOperator: pendingClipOperator,
+          ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
           ...(clipBoundingBox !== undefined ? { bbox: clipBoundingBox } : {}),
           transform: graphicsState.transform,
+          ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
         });
         contentOrder += 1;
       }
@@ -524,6 +653,8 @@ function observeContentStreamMarks(
       }
 
       const xObjectBinding = xObjectBindingByResourceName.get(resourceName);
+      const currentMarkedContentId = resolveCurrentMarkedContentId(markedContentStack);
+      const currentVisibilityState = resolveEffectiveVisibilityState(markedContentStack);
       if (xObjectBinding?.subtypeName === "/Image") {
         const imageBoundingBox = resolveXObjectBoundingBox(graphicsState.transform, xObjectBinding);
         marks.push({
@@ -535,10 +666,12 @@ function observeContentStreamMarks(
           objectRef: xObjectBinding.objectRef,
           xObjectRef: xObjectBinding.objectRef,
           resourceName,
+          ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
           ...(xObjectBinding.width !== undefined ? { width: xObjectBinding.width } : {}),
           ...(xObjectBinding.height !== undefined ? { height: xObjectBinding.height } : {}),
           ...(imageBoundingBox !== undefined ? { bbox: imageBoundingBox } : {}),
           transform: graphicsState.transform,
+          ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
         });
         contentOrder += 1;
         continue;
@@ -553,10 +686,12 @@ function observeContentStreamMarks(
         contentStreamRef,
         ...(xObjectBinding?.objectRef !== undefined ? { objectRef: xObjectBinding.objectRef } : { objectRef: contentStreamRef }),
         resourceName,
+        ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
         ...(xObjectBinding?.objectRef !== undefined ? { xObjectRef: xObjectBinding.objectRef } : {}),
         ...(xObjectBinding?.subtypeName !== undefined ? { subtypeName: xObjectBinding.subtypeName } : {}),
         ...(xObjectBoundingBox !== undefined ? { bbox: xObjectBoundingBox } : {}),
         transform: graphicsState.transform,
+        ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
       });
       contentOrder += 1;
     }
@@ -564,9 +699,309 @@ function observeContentStreamMarks(
 
   return {
     marks,
-    textContentOrders,
+    textContexts,
     nextContentOrder: contentOrder,
   };
+}
+
+function resolveCurrentMarkedContentId(
+  markedContentStack: readonly PdfObservedMarkedContentState[],
+): string | undefined {
+  return markedContentStack.at(-1)?.markId;
+}
+
+function resolveEffectiveVisibilityState(
+  markedContentStack: readonly PdfObservedMarkedContentState[],
+): PdfVisibilityState | undefined {
+  if (markedContentStack.length === 0) {
+    return undefined;
+  }
+
+  if (markedContentStack.some((markedContent) => markedContent.visibilityState === "hidden")) {
+    return "hidden";
+  }
+  if (markedContentStack.some((markedContent) => markedContent.visibilityState === "unknown")) {
+    return "unknown";
+  }
+  return "visible";
+}
+
+function combineVisibilityStates(
+  inheritedVisibilityState: PdfVisibilityState | undefined,
+  currentVisibilityState: PdfVisibilityState | undefined,
+): PdfVisibilityState | undefined {
+  if (inheritedVisibilityState === "hidden" || currentVisibilityState === "hidden") {
+    return "hidden";
+  }
+  if (inheritedVisibilityState === "unknown" || currentVisibilityState === "unknown") {
+    return "unknown";
+  }
+  if (currentVisibilityState !== undefined) {
+    return currentVisibilityState;
+  }
+  return inheritedVisibilityState;
+}
+
+function readMarkedContentTagName(operator: ParsedContentStreamOperator): string | undefined {
+  const nameOperand = operator.operands.find((operand) => operand.kind === "name");
+  return nameOperand?.kind === "name" ? nameOperand.token.slice(1) : undefined;
+}
+
+function classifyObservedMarkedContent(tagName: string): PdfMarkedContentKind {
+  if (tagName === "Artifact") {
+    return "artifact";
+  }
+  if (tagName === "Span") {
+    return "span";
+  }
+  return "other";
+}
+
+function readMarkedContentProperties(
+  operator: ParsedContentStreamOperator,
+  propertyBindingByResourceName: ReadonlyMap<string, PdfPropertyBinding>,
+  optionalContentVisibilityConfig: PdfOptionalContentVisibilityConfig | undefined,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): PdfObservedMarkedContentProperties {
+  const nameOperands = operator.operands.filter((operand) => operand.kind === "name");
+  const propertyOperand = nameOperands.length > 1 ? nameOperands[1] : undefined;
+  const propertyName = propertyOperand?.kind === "name" ? propertyOperand.token.slice(1) : undefined;
+  const dictionaryOperand = operator.operands.find((operand) => operand.kind === "dictionary");
+  const dictionaryEntries = dictionaryOperand?.kind === "dictionary"
+    ? parseDictionaryEntries(dictionaryOperand.token)
+    : undefined;
+  const actualTextToken = dictionaryEntries?.get("ActualText");
+  const actualText = actualTextToken !== undefined ? decodeMarkedContentActualText(actualTextToken) : undefined;
+  const mcid = readMarkedContentIdentifier(dictionaryEntries?.get("MCID"));
+  const propertyBindingRef = propertyName !== undefined ? propertyBindingByResourceName.get(propertyName)?.objectRef : undefined;
+  const dictionaryOptionalContentRef = readObjectRefValue(dictionaryEntries?.get("OC"));
+  const optionalContentRef = propertyBindingRef ?? dictionaryOptionalContentRef;
+  const visibilityState = optionalContentRef !== undefined
+    ? resolveOptionalContentVisibilityState(optionalContentRef, optionalContentVisibilityConfig, objectIndex)
+    : undefined;
+
+  return {
+    ...(propertyName !== undefined ? { propertyName } : {}),
+    ...(actualText !== undefined ? { actualText } : {}),
+    ...(mcid !== undefined ? { mcid } : {}),
+    ...(optionalContentRef !== undefined ? { optionalContentRef } : {}),
+    ...(visibilityState !== undefined ? { visibilityState } : {}),
+  };
+}
+
+function decodeMarkedContentActualText(token: string): string | undefined {
+  if (token.startsWith("(") && token.endsWith(")")) {
+    return decodePdfLiteral(token);
+  }
+
+  if (token.startsWith("<") && token.endsWith(">")) {
+    return decodeMarkedContentHexText(token);
+  }
+
+  return undefined;
+}
+
+function decodeMarkedContentHexText(token: string): string {
+  const normalized = token.slice(1, -1).replaceAll(/\s+/g, "");
+  const padded = normalized.length % 2 === 0 ? normalized : `${normalized}0`;
+  const bytes = new Uint8Array(padded.length / 2);
+
+  for (let index = 0; index < padded.length; index += 2) {
+    bytes[index / 2] = Number.parseInt(padded.slice(index, index + 2), 16);
+  }
+
+  if (bytes.byteLength >= 2 && bytes[0] === 0xfe && bytes[1] === 0xff) {
+    return decodeMarkedContentUtf16(bytes.subarray(2), "be");
+  }
+  if (bytes.byteLength >= 2 && bytes[0] === 0xff && bytes[1] === 0xfe) {
+    return decodeMarkedContentUtf16(bytes.subarray(2), "le");
+  }
+
+  return Array.from(bytes, (value) => String.fromCharCode(value)).join("");
+}
+
+function decodeMarkedContentUtf16(bytes: Uint8Array, endianness: "be" | "le"): string {
+  let value = "";
+
+  for (let index = 0; index + 1 < bytes.byteLength; index += 2) {
+    const firstByte = bytes[index] ?? 0;
+    const secondByte = bytes[index + 1] ?? 0;
+    const codePoint = endianness === "be"
+      ? (firstByte << 8) | secondByte
+      : firstByte | (secondByte << 8);
+    value += String.fromCharCode(codePoint);
+  }
+
+  return value;
+}
+
+function readMarkedContentIdentifier(value: string | undefined): number | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : undefined;
+}
+
+function resolveOptionalContentVisibilityConfig(
+  inspection: PdfObservationInspection,
+): PdfOptionalContentVisibilityConfig | undefined {
+  const rootRef = inspection.analysis.trailer?.rootRef;
+  const rootObject = rootRef ? inspection.analysis.objectIndex.get(keyOfObjectRef(rootRef)) : undefined;
+  const rawOcProperties = rootObject?.dictionaryEntries.get("OCProperties");
+  const ocPropertiesDictionary = resolveNestedDictionaryText(rawOcProperties, inspection.analysis.objectIndex);
+  if (ocPropertiesDictionary === undefined) {
+    return undefined;
+  }
+
+  const ocPropertiesEntries = parseDictionaryEntries(ocPropertiesDictionary);
+  const defaultConfigDictionary = resolveNestedDictionaryText(ocPropertiesEntries.get("D"), inspection.analysis.objectIndex);
+  if (defaultConfigDictionary === undefined) {
+    return {
+      baseState: "unknown",
+      onKeys: new Set<string>(),
+      offKeys: new Set<string>(),
+    };
+  }
+
+  const defaultConfigEntries = parseDictionaryEntries(defaultConfigDictionary);
+  const baseStateToken = defaultConfigEntries.get("BaseState")?.trim();
+  const baseState = baseStateToken === "/OFF"
+    ? "off"
+    : baseStateToken === "/Unchanged"
+      ? "unknown"
+      : "on";
+
+  return {
+    baseState,
+    onKeys: new Set(readObjectRefsValue(defaultConfigEntries.get("ON")).map((ref) => keyOfObjectRef(ref))),
+    offKeys: new Set(readObjectRefsValue(defaultConfigEntries.get("OFF")).map((ref) => keyOfObjectRef(ref))),
+  };
+}
+
+function resolveOptionalContentVisibilityState(
+  optionalContentRef: PdfObjectRef,
+  config: PdfOptionalContentVisibilityConfig | undefined,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): PdfVisibilityState {
+  if (config === undefined) {
+    return "unknown";
+  }
+
+  const objectShell = objectIndex.get(keyOfObjectRef(optionalContentRef));
+  if (!objectShell) {
+    return "unknown";
+  }
+
+  if (objectShell.typeName === "OCMD") {
+    return resolveOptionalContentMembershipVisibility(optionalContentRef, config, objectIndex, new Set<string>());
+  }
+
+  return resolveOptionalContentGroupVisibility(optionalContentRef, config);
+}
+
+function resolveOptionalContentMembershipVisibility(
+  membershipRef: PdfObjectRef,
+  config: PdfOptionalContentVisibilityConfig,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+  visitedKeys: Set<string>,
+): PdfVisibilityState {
+  const membershipKey = keyOfObjectRef(membershipRef);
+  if (visitedKeys.has(membershipKey)) {
+    return "unknown";
+  }
+  visitedKeys.add(membershipKey);
+  const membershipObject = objectIndex.get(membershipKey);
+  const membershipEntries = membershipObject?.dictionaryEntries;
+  const policyToken = membershipEntries?.get("P")?.trim() ?? "/AnyOn";
+  const memberRefs = dedupeObjectRefs([
+    ...readObjectRefsValue(membershipEntries?.get("OCGs")),
+    ...(readObjectRefValue(membershipEntries?.get("OCG")) !== undefined
+      ? [readObjectRefValue(membershipEntries?.get("OCG")) as PdfObjectRef]
+      : []),
+  ]);
+  if (memberRefs.length === 0) {
+    return "unknown";
+  }
+
+  const memberVisibilities = memberRefs.map((memberRef) => {
+    const memberObject = objectIndex.get(keyOfObjectRef(memberRef));
+    return memberObject?.typeName === "OCMD"
+      ? resolveOptionalContentMembershipVisibility(memberRef, config, objectIndex, visitedKeys)
+      : resolveOptionalContentGroupVisibility(memberRef, config);
+  });
+
+  if (memberVisibilities.some((state) => state === "unknown")) {
+    return "unknown";
+  }
+
+  if (policyToken === "/AllOn") {
+    return memberVisibilities.every((state) => state === "visible") ? "visible" : "hidden";
+  }
+  if (policyToken === "/AnyOff") {
+    return memberVisibilities.some((state) => state === "hidden") ? "visible" : "hidden";
+  }
+  if (policyToken === "/AllOff") {
+    return memberVisibilities.every((state) => state === "hidden") ? "visible" : "hidden";
+  }
+
+  return memberVisibilities.some((state) => state === "visible") ? "visible" : "hidden";
+}
+
+function resolveOptionalContentGroupVisibility(
+  groupRef: PdfObjectRef,
+  config: PdfOptionalContentVisibilityConfig,
+): PdfVisibilityState {
+  const groupKey = keyOfObjectRef(groupRef);
+  if (config.onKeys.has(groupKey)) {
+    return "visible";
+  }
+  if (config.offKeys.has(groupKey)) {
+    return "hidden";
+  }
+  if (config.baseState === "on") {
+    return "visible";
+  }
+  if (config.baseState === "off") {
+    return "hidden";
+  }
+  return "unknown";
+}
+
+function resolveNestedDictionaryText(
+  rawValue: string | undefined,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): string | undefined {
+  if (rawValue === undefined) {
+    return undefined;
+  }
+  if (rawValue.startsWith("<<") && rawValue.endsWith(">>")) {
+    return rawValue;
+  }
+
+  const objectRef = readObjectRefValue(rawValue);
+  if (objectRef === undefined) {
+    return undefined;
+  }
+
+  return findFirstDictionaryToken(objectIndex.get(keyOfObjectRef(objectRef))?.objectValueText ?? "");
+}
+
+function dedupeObjectRefs(objectRefs: readonly PdfObjectRef[]): readonly PdfObjectRef[] {
+  const seenKeys = new Set<string>();
+  const deduped: PdfObjectRef[] = [];
+
+  for (const objectRef of objectRefs) {
+    const key = keyOfObjectRef(objectRef);
+    if (seenKeys.has(key)) {
+      continue;
+    }
+    seenKeys.add(key);
+    deduped.push(objectRef);
+  }
+
+  return deduped;
 }
 
 function isTextShowOperator(operator: string): boolean {

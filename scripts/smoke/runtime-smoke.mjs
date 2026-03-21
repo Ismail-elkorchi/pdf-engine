@@ -232,6 +232,49 @@ function buildImageXObjectPdf() {
   return encodeText(template.replace("__IMAGE_XOBJECT_STARTXREF__", String(startXrefOffset)));
 }
 
+function buildHiddenOptionalContentPdf() {
+  const contentStreamText = [
+    "BT",
+    "/OC /MC1 BDC",
+    "(Hidden Layer) Tj",
+    "EMC",
+    "ET",
+  ].join("\n");
+  const template = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R /OCProperties << /OCGs [5 0 R] /D << /BaseState /ON /OFF [5 0 R] >> >> >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Resources << /Properties << /MC1 5 0 R >> >> /Contents 4 0 R >>",
+    "endobj",
+    "4 0 obj",
+    `<< /Length ${String(encodeText(contentStreamText).byteLength)} >>`,
+    "stream",
+    contentStreamText,
+    "endstream",
+    "endobj",
+    "5 0 obj",
+    "<< /Type /OCG /Name (Hidden Layer) >>",
+    "endobj",
+    "xref",
+    "0 6",
+    "0000000000 65535 f",
+    "trailer",
+    "<< /Root 1 0 R /Size 6 >>",
+    "startxref",
+    "__HIDDEN_OC_STARTXREF__",
+    "%%EOF",
+    "",
+  ].join("\n");
+  const startXrefOffset = template.indexOf("\nxref\n0 6") + 1;
+  assert(startXrefOffset > 0, "Hidden optional-content synthetic PDF did not contain an xref section.");
+  return encodeText(template.replace("__HIDDEN_OC_STARTXREF__", String(startXrefOffset)));
+}
+
 function buildFilteredContentStreamPdfBytes({ streamBytes, filterValue, decodeParamsValue }) {
   const prefix = [
     "%PDF-1.4",
@@ -608,8 +651,18 @@ const observedMarksPdf = buildPdfWithPageContents([
     "ET",
   ].join("\n"),
 ]);
+const markedContentActualTextPdf = buildPdfWithPageContents([
+  [
+    "BT",
+    "/Span << /ActualText (Tagged Hello) /MCID 7 >> BDC",
+    "(Hello) Tj",
+    "EMC",
+    "ET",
+  ].join("\n"),
+]);
 const delayedContentPdfBytes = buildDelayedContentPdf();
 const imageXObjectPdfBytes = buildImageXObjectPdf();
+const hiddenOptionalContentPdfBytes = buildHiddenOptionalContentPdf();
 const javascriptActionPdfBytes = buildJavascriptActionPdf();
 const largeBenignJavascriptCommentPdfBytes = buildLargeBenignJavascriptCommentPdf();
 const streamBoundaryPdfBytes = buildStreamBoundaryPdf();
@@ -2147,6 +2200,13 @@ const observedMarksResult = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const markedContentActualTextResult = await engine.run({
+  source: {
+    bytes: encodeText(markedContentActualTextPdf),
+    fileName: "marked-content-actual-text.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const flateResult = await engine.run({
   source: {
     bytes: flatePdfBytes,
@@ -2207,6 +2267,13 @@ const imageXObjectResult = await engine.run({
   source: {
     bytes: imageXObjectPdfBytes,
     fileName: "image-xobject.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const hiddenOptionalContentResult = await engine.run({
+  source: {
+    bytes: hiddenOptionalContentPdfBytes,
+    fileName: "hidden-optional-content.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2805,6 +2872,33 @@ assert(
     imageXObjectResult.observation.value.pages[0]?.marks[0]?.width === 2 &&
     imageXObjectResult.observation.value.pages[0]?.marks[0]?.height === 1,
   `Observed image mark was ${JSON.stringify(imageXObjectResult.observation.value?.pages[0]?.marks[0] ?? null)}.`,
+);
+assert(
+  markedContentActualTextResult.observation.value?.pages[0]?.marks[0]?.kind === "marked-content" &&
+    markedContentActualTextResult.observation.value.pages[0]?.marks[0]?.tagName === "Span" &&
+    markedContentActualTextResult.observation.value.pages[0]?.marks[0]?.actualText === "Tagged Hello" &&
+    markedContentActualTextResult.observation.value.pages[0]?.marks[0]?.mcid === 7,
+  `Observed marked-content mark was ${JSON.stringify(markedContentActualTextResult.observation.value?.pages[0]?.marks[0] ?? null)}.`,
+);
+assert(
+  markedContentActualTextResult.observation.value?.pages[0]?.marks[1]?.kind === "text" &&
+    markedContentActualTextResult.observation.value.pages[0]?.marks[1]?.markedContentKind === "span" &&
+    markedContentActualTextResult.observation.value.pages[0]?.marks[1]?.actualText === "Tagged Hello" &&
+    markedContentActualTextResult.observation.value.pages[0]?.marks[1]?.markedContentId ===
+      markedContentActualTextResult.observation.value.pages[0]?.marks[0]?.id,
+  `Observed marked-content text mark was ${JSON.stringify(markedContentActualTextResult.observation.value?.pages[0]?.marks[1] ?? null)}.`,
+);
+assert(
+  hiddenOptionalContentResult.observation.value?.pages[0]?.marks[0]?.kind === "marked-content" &&
+    hiddenOptionalContentResult.observation.value.pages[0]?.marks[0]?.visibilityState === "hidden" &&
+    hiddenOptionalContentResult.observation.value.pages[0]?.marks[0]?.propertyName === "MC1",
+  `Observed hidden optional-content mark was ${JSON.stringify(hiddenOptionalContentResult.observation.value?.pages[0]?.marks[0] ?? null)}.`,
+);
+assert(
+  hiddenOptionalContentResult.observation.value?.pages[0]?.marks[1]?.kind === "text" &&
+    hiddenOptionalContentResult.observation.value.pages[0]?.marks[1]?.visibilityState === "hidden" &&
+    hiddenOptionalContentResult.observation.value.pages[0]?.marks[1]?.hiddenTextCandidate === true,
+  `Observed hidden text mark was ${JSON.stringify(hiddenOptionalContentResult.observation.value?.pages[0]?.marks[1] ?? null)}.`,
 );
 assert(
   result.observation.value?.extractedText === "Hello PDF Engine",

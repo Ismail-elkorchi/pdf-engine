@@ -33,6 +33,7 @@ export interface ParsedPageEntry {
   readonly contentStreamRefs: readonly PdfObjectRef[];
   readonly annotationRefs: readonly PdfObjectRef[];
   readonly fontBindings: readonly ParsedFontResourceBinding[];
+  readonly propertyBindings: readonly ParsedPropertyResourceBinding[];
   readonly xObjectBindings: readonly ParsedXObjectResourceBinding[];
   readonly resourceRef?: PdfObjectRef;
   readonly resourceCount: number;
@@ -42,6 +43,11 @@ export interface ParsedPageEntry {
 export interface ParsedFontResourceBinding {
   readonly resourceName: string;
   readonly fontRef: PdfObjectRef;
+}
+
+export interface ParsedPropertyResourceBinding {
+  readonly resourceName: string;
+  readonly objectRef: PdfObjectRef;
 }
 
 export interface ParsedXObjectResourceBinding {
@@ -1267,6 +1273,7 @@ function toPageEntry(
       ? "inherited"
       : undefined;
   const fontBindings = resourceValue ? readFontResourceBindings(resourceValue.rawValue, objectIndex) : [];
+  const propertyBindings = resourceValue ? readPropertyResourceBindings(resourceValue.rawValue, objectIndex) : [];
   const xObjectBindings = resourceValue ? readXObjectResourceBindings(resourceValue.rawValue, objectIndex) : [];
 
   return {
@@ -1275,6 +1282,7 @@ function toPageEntry(
     contentStreamRefs,
     annotationRefs,
     fontBindings,
+    propertyBindings,
     xObjectBindings,
     ...(resourceValue?.ref !== undefined ? { resourceRef: resourceValue.ref } : {}),
     ...(resourceOrigin !== undefined ? { resourceOrigin } : {}),
@@ -1316,6 +1324,42 @@ function readFontResourceBindings(
   }
 
   return fontBindings;
+}
+
+function readPropertyResourceBindings(
+  resourceValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): ParsedPropertyResourceBinding[] {
+  const resolvedResourceDictionary = resolveDictionaryValue(resourceValue, objectIndex);
+  if (!resolvedResourceDictionary) {
+    return [];
+  }
+
+  const resourceEntries = parseDictionaryEntries(resolvedResourceDictionary);
+  const propertyValue = resourceEntries.get("Properties");
+  if (!propertyValue) {
+    return [];
+  }
+
+  const resolvedPropertyDictionary = resolveDictionaryValue(propertyValue, objectIndex);
+  if (!resolvedPropertyDictionary) {
+    return [];
+  }
+
+  const propertyEntries = parseDictionaryEntries(resolvedPropertyDictionary);
+  const propertyBindings: ParsedPropertyResourceBinding[] = [];
+
+  for (const [resourceName, propertyValueToken] of propertyEntries.entries()) {
+    const objectRef = readObjectRefValue(propertyValueToken);
+    if (objectRef !== undefined) {
+      propertyBindings.push({
+        resourceName,
+        objectRef,
+      });
+    }
+  }
+
+  return propertyBindings;
 }
 
 function readXObjectResourceBindings(
@@ -1413,7 +1457,7 @@ function detectRepairState(input: {
   return "recovered";
 }
 
-function parseDictionaryEntries(dictionaryText: string): Map<string, string> {
+export function parseDictionaryEntries(dictionaryText: string): Map<string, string> {
   const entries = new Map<string, string>();
   if (!dictionaryText.startsWith("<<") || !dictionaryText.endsWith(">>")) {
     return entries;
