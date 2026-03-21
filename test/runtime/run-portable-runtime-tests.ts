@@ -42,6 +42,7 @@ async function writeTextFile(path: string | undefined, value: string): Promise<v
   }
 
   if (typeof Deno !== "undefined") {
+    await ensureParentDirectory(path);
     await Deno.writeTextFile(path, value);
     return;
   }
@@ -56,6 +57,18 @@ async function writeTextFile(path: string | undefined, value: string): Promise<v
     const { dirname } = await import("node:path");
     await mkdir(dirname(path), { recursive: true });
     await writeFile(path, value, "utf8");
+  }
+}
+
+async function ensureParentDirectory(path: string): Promise<void> {
+  const lastSlashIndex = Math.max(path.lastIndexOf("/"), path.lastIndexOf("\\"));
+  if (lastSlashIndex <= 0) {
+    return;
+  }
+
+  const directory = path.slice(0, lastSlashIndex);
+  if (typeof Deno !== "undefined") {
+    await Deno.mkdir(directory, { recursive: true });
   }
 }
 
