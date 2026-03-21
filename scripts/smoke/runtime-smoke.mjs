@@ -186,6 +186,52 @@ function buildPdfWithPageContents(pageContents) {
   return template.replace("__STARTXREF__", String(xrefOffset));
 }
 
+function buildImageXObjectPdf() {
+  const contentStreamText = [
+    "q",
+    "64 0 0 32 72 680 cm",
+    "/Im1 Do",
+    "Q",
+  ].join("\n");
+  const imageStreamText = "AA";
+  const template = [
+    "%PDF-1.4",
+    "1 0 obj",
+    "<< /Type /Catalog /Pages 2 0 R >>",
+    "endobj",
+    "2 0 obj",
+    "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    "endobj",
+    "3 0 obj",
+    "<< /Type /Page /Parent 2 0 R /Resources << /XObject << /Im1 5 0 R >> >> /Contents 4 0 R >>",
+    "endobj",
+    "4 0 obj",
+    `<< /Length ${String(encodeText(contentStreamText).byteLength)} >>`,
+    "stream",
+    contentStreamText,
+    "endstream",
+    "endobj",
+    "5 0 obj",
+    `<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${String(encodeText(imageStreamText).byteLength)} >>`,
+    "stream",
+    imageStreamText,
+    "endstream",
+    "endobj",
+    "xref",
+    "0 6",
+    "0000000000 65535 f",
+    "trailer",
+    "<< /Root 1 0 R /Size 6 >>",
+    "startxref",
+    "__IMAGE_XOBJECT_STARTXREF__",
+    "%%EOF",
+    "",
+  ].join("\n");
+  const startXrefOffset = template.indexOf("\nxref\n0 6") + 1;
+  assert(startXrefOffset > 0, "Image XObject synthetic PDF did not contain an xref section.");
+  return encodeText(template.replace("__IMAGE_XOBJECT_STARTXREF__", String(startXrefOffset)));
+}
+
 function buildFilteredContentStreamPdfBytes({ streamBytes, filterValue, decodeParamsValue }) {
   const prefix = [
     "%PDF-1.4",
@@ -554,7 +600,16 @@ const syntheticPdfTemplate = [
 ].join("\n");
 
 const verticalWordColumnsPdf = buildVerticalWordColumnsPdf();
+const observedMarksPdf = buildPdfWithPageContents([
+  [
+    "0 0 50 20 re S",
+    "BT",
+    "(Marked Hello) Tj",
+    "ET",
+  ].join("\n"),
+]);
 const delayedContentPdfBytes = buildDelayedContentPdf();
+const imageXObjectPdfBytes = buildImageXObjectPdf();
 const javascriptActionPdfBytes = buildJavascriptActionPdf();
 const largeBenignJavascriptCommentPdfBytes = buildLargeBenignJavascriptCommentPdf();
 const streamBoundaryPdfBytes = buildStreamBoundaryPdf();
@@ -2085,6 +2140,13 @@ const result = await engine.run({
     mediaType: "application/pdf",
   },
 });
+const observedMarksResult = await engine.run({
+  source: {
+    bytes: encodeText(observedMarksPdf),
+    fileName: "observed-marks.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const flateResult = await engine.run({
   source: {
     bytes: flatePdfBytes,
@@ -2138,6 +2200,13 @@ const inheritedResourceResult = await engine.run({
   source: {
     bytes: inheritedResourcePdfBytes,
     fileName: "inherited-resources.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const imageXObjectResult = await engine.run({
+  source: {
+    bytes: imageXObjectPdfBytes,
+    fileName: "image-xobject.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2714,10 +2783,28 @@ assert(result.observation.value?.pages[0]?.runs[0]?.objectRef?.objectNumber === 
 assert(result.observation.value?.pages[0]?.runs[0]?.origin === "native-text", "Observation run origin was not updated.");
 assert(result.observation.value?.pages[0]?.glyphs[0]?.contentStreamRef?.objectNumber === 4, "Observation glyph content stream ref was not preserved.");
 assert(result.observation.value?.pages[0]?.glyphs[0]?.origin === "native-text", "Observation glyph origin was not updated.");
-assert(result.observation.value?.strategy === "decoded-text-operators", "Observation strategy was not updated.");
+assert(result.observation.value?.strategy === "content-stream-interpreter", "Observation strategy was not updated.");
+assert(result.observation.value?.pages[0]?.marks[0]?.kind === "text", "Observation text marks were not emitted for the synthetic document.");
 assert(
   result.observation.value?.knownLimits.includes("text-decoding-heuristic"),
   "Observation known limits did not include text-decoding-heuristic.",
+);
+assert(
+  observedMarksResult.observation.value?.pages[0]?.marks.map((mark) => mark.kind).join(",") === "path,text",
+  `Observed mark kinds were ${JSON.stringify(observedMarksResult.observation.value?.pages[0]?.marks.map((mark) => mark.kind) ?? null)}.`,
+);
+assert(
+  observedMarksResult.observation.value?.pages[0]?.marks[0]?.kind === "path" &&
+    observedMarksResult.observation.value.pages[0]?.marks[0]?.bbox?.width === 50 &&
+    observedMarksResult.observation.value.pages[0]?.marks[0]?.bbox?.height === 20,
+  `Observed path mark bbox was ${JSON.stringify(observedMarksResult.observation.value?.pages[0]?.marks[0] ?? null)}.`,
+);
+assert(
+  imageXObjectResult.observation.value?.pages[0]?.marks[0]?.kind === "image" &&
+    imageXObjectResult.observation.value.pages[0]?.marks[0]?.resourceName === "Im1" &&
+    imageXObjectResult.observation.value.pages[0]?.marks[0]?.width === 2 &&
+    imageXObjectResult.observation.value.pages[0]?.marks[0]?.height === 1,
+  `Observed image mark was ${JSON.stringify(imageXObjectResult.observation.value?.pages[0]?.marks[0] ?? null)}.`,
 );
 assert(
   result.observation.value?.extractedText === "Hello PDF Engine",

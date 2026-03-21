@@ -12,8 +12,10 @@ import {
 import { hasDetectedFeatureFinding } from "../pdf-feature-findings.ts";
 import {
   decodePdfLiteral,
+  parseContentStreamOperators,
   keyOfObjectRef,
   parseTextOperatorRuns,
+  type ParsedContentStreamOperator,
   type ParsedTextOperatorRun,
   type PdfShellAnalysis,
 } from "../shell-parse.ts";
@@ -24,9 +26,13 @@ import type {
   PdfFeatureFinding,
   PdfObjectRef,
   PdfObservedGlyph,
+  PdfObservedMark,
   PdfObservedPage,
+  PdfObservedPathMark,
   PdfObservedTextRun,
+  PdfObservedTextMark,
   PdfTextEncodingKind,
+  PdfTransformMatrix,
   PdfUnicodeMappingSource,
   PdfWritingMode,
 } from "../contracts.ts";
@@ -44,6 +50,46 @@ interface PdfTextDecodeResult {
   readonly sourceUnitCount: number;
   readonly mappedUnitCount: number;
 }
+
+interface PdfXObjectBinding {
+  readonly objectRef: PdfObjectRef;
+  readonly subtypeName?: string;
+  readonly width?: number;
+  readonly height?: number;
+}
+
+interface PdfObservedPathBounds {
+  readonly minX: number;
+  readonly minY: number;
+  readonly maxX: number;
+  readonly maxY: number;
+  readonly pointCount: number;
+  readonly closed: boolean;
+}
+
+interface PdfObservedGraphicsState {
+  readonly transform: PdfTransformMatrix;
+  readonly currentPath: PdfObservedPathBounds | undefined;
+  readonly pendingClipOperator: "W" | "W*" | undefined;
+  readonly pendingClipBounds: PdfObservedPathBounds | undefined;
+}
+
+interface PdfObservedContentMarksResult {
+  readonly marks: readonly Exclude<PdfObservedMark, PdfObservedTextMark>[];
+  readonly textContentOrders: readonly number[];
+  readonly nextContentOrder: number;
+}
+
+const IDENTITY_TRANSFORM: PdfTransformMatrix = {
+  a: 1,
+  b: 0,
+  c: 0,
+  d: 1,
+  e: 0,
+  f: 0,
+};
+
+const PATH_PAINT_OPERATORS = new Set<PdfObservedPathMark["paintOperator"]>(["S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n"]);
 
 export interface PdfObservationInspection {
   readonly analysis: PdfShellAnalysis;
@@ -90,6 +136,7 @@ export function buildObservedPages(
       pageNumber: 1,
       contentStreamRefs: fallbackStreamRefs,
       fontBindings: [],
+      xObjectBindings: [],
     },
     inspection,
     "stream-fallback",
@@ -107,6 +154,13 @@ function buildObservedPage(
     readonly pageRef?: PdfObjectRef;
     readonly contentStreamRefs: readonly PdfObjectRef[];
     readonly fontBindings: readonly { readonly resourceName: string; readonly fontRef: PdfObjectRef }[];
+    readonly xObjectBindings: readonly {
+      readonly resourceName: string;
+      readonly objectRef: PdfObjectRef;
+      readonly subtypeName?: string;
+      readonly width?: number;
+      readonly height?: number;
+    }[];
   },
   inspection: PdfObservationInspection,
   resolutionMethodOverride?: "page-tree" | "recovered-page-order" | "stream-fallback",
@@ -115,6 +169,7 @@ function buildObservedPage(
     (inspection.analysis.pageTreeResolved ? "page-tree" : "recovered-page-order");
   const pageNumber = pageEntry.pageNumber;
   const glyphs: PdfObservedGlyph[] = [];
+  const marks: PdfObservedMark[] = [];
   const runs: PdfObservedTextRun[] = [];
   let contentOrder = 0;
   let fontMappingGapCount = 0;
@@ -122,6 +177,12 @@ function buildObservedPage(
   let hasSevereFontMappingGap = false;
   let hasSevereLiteralFontEncodingGap = false;
   const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
+  const xObjectBindingByResourceName = new Map(pageEntry.xObjectBindings.map((binding) => [binding.resourceName, {
+    objectRef: binding.objectRef,
+    ...(binding.subtypeName !== undefined ? { subtypeName: binding.subtypeName } : {}),
+    ...(binding.width !== undefined ? { width: binding.width } : {}),
+    ...(binding.height !== undefined ? { height: binding.height } : {}),
+  }] as const));
   const unicodeCMapByFontKey = new Map<string, ReturnType<typeof parsePdfUnicodeCMap>>();
   const embeddedFontMappingByFontKey = new Map<string, PdfEmbeddedFontMapping | undefined>();
   const singleByteFontEncodingByFontKey = new Map<string, PdfSingleByteFontEncoding | undefined>();
@@ -132,6 +193,16 @@ function buildObservedPage(
       continue;
     }
 
+    const contentMarkResult = observeContentStreamMarks(
+      contentStream.streamText,
+      pageNumber,
+      contentStreamRef,
+      xObjectBindingByResourceName,
+      contentOrder,
+    );
+    contentOrder = contentMarkResult.nextContentOrder;
+    marks.push(...contentMarkResult.marks);
+    const textContentOrders = [...contentMarkResult.textContentOrders];
     const parsedRuns = parseTextOperatorRuns(contentStream.streamText);
     for (const parsedRun of parsedRuns) {
       const observedRun = observeParsedTextRun(
@@ -155,17 +226,22 @@ function buildObservedPage(
         continue;
       }
 
+      const runContentOrder = textContentOrders.shift() ?? contentOrder;
+      if (runContentOrder >= contentOrder) {
+        contentOrder = runContentOrder + 1;
+      }
+
       const glyphIds: string[] = [];
       const codePoints = Array.from(observedRun.text);
 
       for (const [glyphIndex, text] of codePoints.entries()) {
-        const glyphId = `glyph-${pageNumber}-${contentOrder + 1}-${glyphIndex + 1}`;
+        const glyphId = `glyph-${pageNumber}-${runContentOrder + 1}-${glyphIndex + 1}`;
         glyphIds.push(glyphId);
         glyphs.push({
           id: glyphId,
           pageNumber,
           glyphIndex,
-          contentOrder,
+          contentOrder: runContentOrder,
           text,
           unicodeCodePoint: text.codePointAt(0) ?? 0,
           hidden: false,
@@ -185,9 +261,9 @@ function buildObservedPage(
       }
 
       runs.push({
-        id: `run-${pageNumber}-${contentOrder + 1}`,
+        id: `run-${pageNumber}-${runContentOrder + 1}`,
         pageNumber,
-        contentOrder,
+        contentOrder: runContentOrder,
         text: observedRun.text,
         glyphIds,
         origin: "native-text",
@@ -202,7 +278,25 @@ function buildObservedPage(
         ...(observedRun.startsNewLine ? { startsNewLine: true } : {}),
       });
 
-      contentOrder += 1;
+      marks.push({
+        id: `mark-text-${pageNumber}-${runContentOrder + 1}`,
+        kind: "text",
+        pageNumber,
+        contentOrder: runContentOrder,
+        runId: `run-${pageNumber}-${runContentOrder + 1}`,
+        glyphIds,
+        text: observedRun.text,
+        origin: "native-text",
+        contentStreamRef,
+        ...(observedRun.fontRef !== undefined ? { fontRef: observedRun.fontRef } : {}),
+        ...(observedRun.textEncodingKind !== undefined ? { textEncodingKind: observedRun.textEncodingKind } : {}),
+        ...(observedRun.unicodeMappingSource !== undefined ? { unicodeMappingSource: observedRun.unicodeMappingSource } : {}),
+        ...(observedRun.writingMode !== undefined ? { writingMode: observedRun.writingMode } : {}),
+        objectRef: contentStreamRef,
+        ...(observedRun.anchor !== undefined ? { anchor: observedRun.anchor } : {}),
+        ...(observedRun.fontSize !== undefined ? { fontSize: observedRun.fontSize } : {}),
+        ...(observedRun.startsNewLine ? { startsNewLine: true } : {}),
+      });
     }
   }
 
@@ -212,6 +306,9 @@ function buildObservedPage(
   ));
   const normalizedGlyphs = pageWritingMode === undefined ? glyphs : glyphs.map((glyph) => (
     glyph.writingMode !== undefined ? glyph : { ...glyph, writingMode: pageWritingMode }
+  ));
+  const normalizedMarks = pageWritingMode === undefined ? marks : marks.map((mark) => (
+    mark.kind === "text" && mark.writingMode === undefined ? { ...mark, writingMode: pageWritingMode } : mark
   ));
 
   const hasFontMappingGap = hasSevereFontMappingGap || fontMappingGapCount > 1;
@@ -225,10 +322,460 @@ function buildObservedPage(
       ...(pageEntry.pageRef !== undefined ? { pageRef: pageEntry.pageRef } : {}),
       glyphs: normalizedGlyphs,
       runs: normalizedRuns,
+      marks: normalizedMarks.toSorted((left, right) => left.contentOrder - right.contentOrder || left.id.localeCompare(right.id)),
     },
     hasFontMappingGap,
     hasLiteralFontEncodingGap,
   };
+}
+
+function observeContentStreamMarks(
+  contentStreamText: string,
+  pageNumber: number,
+  contentStreamRef: PdfObjectRef,
+  xObjectBindingByResourceName: ReadonlyMap<string, PdfXObjectBinding>,
+  startingContentOrder: number,
+): PdfObservedContentMarksResult {
+  const marks: Array<Exclude<PdfObservedMark, PdfObservedTextMark>> = [];
+  const textContentOrders: number[] = [];
+  const operators = parseContentStreamOperators(contentStreamText);
+  const graphicsStateStack: PdfObservedGraphicsState[] = [];
+  let graphicsState: PdfObservedGraphicsState = {
+    transform: IDENTITY_TRANSFORM,
+    currentPath: undefined,
+    pendingClipOperator: undefined,
+    pendingClipBounds: undefined,
+  };
+  let contentOrder = startingContentOrder;
+
+  for (const operator of operators) {
+    if (isTextShowOperator(operator.operator)) {
+      textContentOrders.push(contentOrder);
+      contentOrder += 1;
+      continue;
+    }
+
+    if (operator.operator === "q") {
+      graphicsStateStack.push(cloneGraphicsState(graphicsState));
+      continue;
+    }
+
+    if (operator.operator === "Q") {
+      graphicsState = graphicsStateStack.pop() ?? {
+        transform: IDENTITY_TRANSFORM,
+        currentPath: undefined,
+        pendingClipOperator: undefined,
+        pendingClipBounds: undefined,
+      };
+      continue;
+    }
+
+    if (operator.operator === "cm") {
+      const matrix = readTransformMatrixOperands(operator);
+      if (matrix) {
+        graphicsState = {
+          ...graphicsState,
+          transform: multiplyTransformMatrices(graphicsState.transform, matrix),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "m") {
+      const point = readTrailingPoint(operator, 1);
+      if (point) {
+        graphicsState = {
+          ...graphicsState,
+          currentPath: createObservedPathBounds([transformPoint(graphicsState.transform, point)]),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "l") {
+      const point = readTrailingPoint(operator, 1);
+      if (point) {
+        graphicsState = {
+          ...graphicsState,
+          currentPath: extendObservedPathBounds(
+            graphicsState.currentPath,
+            [transformPoint(graphicsState.transform, point)],
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "c") {
+      const points = readTrailingPoints(operator, 3);
+      if (points.length > 0) {
+        graphicsState = {
+          ...graphicsState,
+          currentPath: extendObservedPathBounds(
+            graphicsState.currentPath,
+            points.map((point) => transformPoint(graphicsState.transform, point)),
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "v" || operator.operator === "y") {
+      const points = readTrailingPoints(operator, 2);
+      if (points.length > 0) {
+        graphicsState = {
+          ...graphicsState,
+          currentPath: extendObservedPathBounds(
+            graphicsState.currentPath,
+            points.map((point) => transformPoint(graphicsState.transform, point)),
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "h") {
+      if (graphicsState.currentPath) {
+        graphicsState = {
+          ...graphicsState,
+          currentPath: {
+            ...graphicsState.currentPath,
+            closed: true,
+          },
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "re") {
+      const rectangle = readTrailingRectangle(operator);
+      if (rectangle) {
+        graphicsState = {
+          ...graphicsState,
+          currentPath: extendObservedPathBounds(
+            graphicsState.currentPath,
+            rectangleToPoints(rectangle).map((point) => transformPoint(graphicsState.transform, point)),
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "W" || operator.operator === "W*") {
+      if (graphicsState.currentPath) {
+        graphicsState = {
+          ...graphicsState,
+          pendingClipOperator: operator.operator,
+          pendingClipBounds: graphicsState.currentPath,
+        };
+      }
+      continue;
+    }
+
+    if (PATH_PAINT_OPERATORS.has(operator.operator as PdfObservedPathMark["paintOperator"])) {
+      const currentPath = graphicsState.currentPath;
+      const pendingClipBounds = graphicsState.pendingClipBounds;
+      const pendingClipOperator = graphicsState.pendingClipOperator;
+      if (currentPath) {
+        const pathBoundingBox = toObservedBoundingBox(currentPath);
+        marks.push({
+          id: `mark-path-${pageNumber}-${contentOrder + 1}`,
+          kind: "path",
+          pageNumber,
+          contentOrder,
+          contentStreamRef,
+          objectRef: contentStreamRef,
+          paintOperator: operator.operator as PdfObservedPathMark["paintOperator"],
+          pointCount: currentPath.pointCount,
+          closed: currentPath.closed || operator.operator === "s" || operator.operator === "b" || operator.operator === "b*",
+          ...(pathBoundingBox !== undefined ? { bbox: pathBoundingBox } : {}),
+          transform: graphicsState.transform,
+        });
+        contentOrder += 1;
+      }
+      if (pendingClipBounds && pendingClipOperator) {
+        const clipBoundingBox = toObservedBoundingBox(pendingClipBounds);
+        marks.push({
+          id: `mark-clip-${pageNumber}-${contentOrder + 1}`,
+          kind: "clip",
+          pageNumber,
+          contentOrder,
+          contentStreamRef,
+          objectRef: contentStreamRef,
+          clipOperator: pendingClipOperator,
+          ...(clipBoundingBox !== undefined ? { bbox: clipBoundingBox } : {}),
+          transform: graphicsState.transform,
+        });
+        contentOrder += 1;
+      }
+      graphicsState = {
+        ...graphicsState,
+        currentPath: undefined,
+        pendingClipBounds: undefined,
+        pendingClipOperator: undefined,
+      };
+      continue;
+    }
+
+    if (operator.operator === "Do") {
+      const resourceName = readTrailingNameOperand(operator);
+      if (!resourceName) {
+        continue;
+      }
+
+      const xObjectBinding = xObjectBindingByResourceName.get(resourceName);
+      if (xObjectBinding?.subtypeName === "/Image") {
+        const imageBoundingBox = resolveXObjectBoundingBox(graphicsState.transform, xObjectBinding);
+        marks.push({
+          id: `mark-image-${pageNumber}-${contentOrder + 1}`,
+          kind: "image",
+          pageNumber,
+          contentOrder,
+          contentStreamRef,
+          objectRef: xObjectBinding.objectRef,
+          xObjectRef: xObjectBinding.objectRef,
+          resourceName,
+          ...(xObjectBinding.width !== undefined ? { width: xObjectBinding.width } : {}),
+          ...(xObjectBinding.height !== undefined ? { height: xObjectBinding.height } : {}),
+          ...(imageBoundingBox !== undefined ? { bbox: imageBoundingBox } : {}),
+          transform: graphicsState.transform,
+        });
+        contentOrder += 1;
+        continue;
+      }
+
+      const xObjectBoundingBox = resolveXObjectBoundingBox(graphicsState.transform, xObjectBinding);
+      marks.push({
+        id: `mark-xobject-${pageNumber}-${contentOrder + 1}`,
+        kind: "xobject",
+        pageNumber,
+        contentOrder,
+        contentStreamRef,
+        ...(xObjectBinding?.objectRef !== undefined ? { objectRef: xObjectBinding.objectRef } : { objectRef: contentStreamRef }),
+        resourceName,
+        ...(xObjectBinding?.objectRef !== undefined ? { xObjectRef: xObjectBinding.objectRef } : {}),
+        ...(xObjectBinding?.subtypeName !== undefined ? { subtypeName: xObjectBinding.subtypeName } : {}),
+        ...(xObjectBoundingBox !== undefined ? { bbox: xObjectBoundingBox } : {}),
+        transform: graphicsState.transform,
+      });
+      contentOrder += 1;
+    }
+  }
+
+  return {
+    marks,
+    textContentOrders,
+    nextContentOrder: contentOrder,
+  };
+}
+
+function isTextShowOperator(operator: string): boolean {
+  return operator === "Tj" || operator === "TJ" || operator === "'" || operator === "\"";
+}
+
+function cloneGraphicsState(graphicsState: PdfObservedGraphicsState): PdfObservedGraphicsState {
+  return {
+    transform: { ...graphicsState.transform },
+    currentPath: graphicsState.currentPath !== undefined ? { ...graphicsState.currentPath } : undefined,
+    pendingClipOperator: graphicsState.pendingClipOperator,
+    pendingClipBounds: graphicsState.pendingClipBounds !== undefined ? { ...graphicsState.pendingClipBounds } : undefined,
+  };
+}
+
+function readTransformMatrixOperands(operator: ParsedContentStreamOperator): PdfTransformMatrix | undefined {
+  const values = readTrailingNumericOperandsFromOperator(operator, 6);
+  if (values === undefined) {
+    return undefined;
+  }
+
+  return {
+    a: values[0] ?? 1,
+    b: values[1] ?? 0,
+    c: values[2] ?? 0,
+    d: values[3] ?? 1,
+    e: values[4] ?? 0,
+    f: values[5] ?? 0,
+  };
+}
+
+function readTrailingPoint(
+  operator: ParsedContentStreamOperator,
+  count: number,
+): { readonly x: number; readonly y: number } | undefined {
+  const points = readTrailingPoints(operator, count);
+  return points.at(-1);
+}
+
+function readTrailingPoints(
+  operator: ParsedContentStreamOperator,
+  count: number,
+): readonly { readonly x: number; readonly y: number }[] {
+  const values = readTrailingNumericOperandsFromOperator(operator, count * 2);
+  if (values === undefined) {
+    return [];
+  }
+
+  const points: Array<{ readonly x: number; readonly y: number }> = [];
+  for (let index = 0; index < values.length; index += 2) {
+    const x = values[index];
+    const y = values[index + 1];
+    if (x === undefined || y === undefined) {
+      continue;
+    }
+    points.push({ x, y });
+  }
+  return points;
+}
+
+function readTrailingRectangle(
+  operator: ParsedContentStreamOperator,
+): { readonly x: number; readonly y: number; readonly width: number; readonly height: number } | undefined {
+  const values = readTrailingNumericOperandsFromOperator(operator, 4);
+  if (values === undefined) {
+    return undefined;
+  }
+
+  const [x, y, width, height] = values;
+  if (x === undefined || y === undefined || width === undefined || height === undefined) {
+    return undefined;
+  }
+
+  return { x, y, width, height };
+}
+
+function rectangleToPoints(
+  rectangle: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+): readonly { readonly x: number; readonly y: number }[] {
+  return [
+    { x: rectangle.x, y: rectangle.y },
+    { x: rectangle.x + rectangle.width, y: rectangle.y },
+    { x: rectangle.x, y: rectangle.y + rectangle.height },
+    { x: rectangle.x + rectangle.width, y: rectangle.y + rectangle.height },
+  ];
+}
+
+function readTrailingNameOperand(operator: ParsedContentStreamOperator): string | undefined {
+  const operand = [...operator.operands].reverse().find((candidate) => candidate.kind === "name");
+  return operand?.kind === "name" ? operand.token.slice(1) : undefined;
+}
+
+function readTrailingNumericOperandsFromOperator(
+  operator: ParsedContentStreamOperator,
+  count: number,
+): readonly number[] | undefined {
+  const numericValues: number[] = [];
+
+  for (let index = operator.operands.length - 1; index >= 0 && numericValues.length < count; index -= 1) {
+    const operand = operator.operands[index];
+    if (operand?.kind !== "other") {
+      continue;
+    }
+    const value = Number(operand.token);
+    if (!Number.isFinite(value)) {
+      continue;
+    }
+    numericValues.push(value);
+  }
+
+  return numericValues.length === count ? numericValues.reverse() : undefined;
+}
+
+function multiplyTransformMatrices(
+  left: PdfTransformMatrix,
+  right: PdfTransformMatrix,
+): PdfTransformMatrix {
+  return {
+    a: left.a * right.a + left.b * right.c,
+    b: left.a * right.b + left.b * right.d,
+    c: left.c * right.a + left.d * right.c,
+    d: left.c * right.b + left.d * right.d,
+    e: left.e * right.a + left.f * right.c + right.e,
+    f: left.e * right.b + left.f * right.d + right.f,
+  };
+}
+
+function transformPoint(
+  transform: PdfTransformMatrix,
+  point: { readonly x: number; readonly y: number },
+): { readonly x: number; readonly y: number } {
+  return {
+    x: point.x * transform.a + point.y * transform.c + transform.e,
+    y: point.x * transform.b + point.y * transform.d + transform.f,
+  };
+}
+
+function createObservedPathBounds(
+  points: readonly { readonly x: number; readonly y: number }[],
+): PdfObservedPathBounds | undefined {
+  if (points.length === 0) {
+    return undefined;
+  }
+
+  return extendObservedPathBounds(undefined, points);
+}
+
+function extendObservedPathBounds(
+  currentBounds: PdfObservedPathBounds | undefined,
+  points: readonly { readonly x: number; readonly y: number }[],
+): PdfObservedPathBounds | undefined {
+  if (points.length === 0) {
+    return currentBounds;
+  }
+
+  let minX = currentBounds?.minX ?? Number.POSITIVE_INFINITY;
+  let minY = currentBounds?.minY ?? Number.POSITIVE_INFINITY;
+  let maxX = currentBounds?.maxX ?? Number.NEGATIVE_INFINITY;
+  let maxY = currentBounds?.maxY ?? Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    minX = Math.min(minX, point.x);
+    minY = Math.min(minY, point.y);
+    maxX = Math.max(maxX, point.x);
+    maxY = Math.max(maxY, point.y);
+  }
+
+  if (!Number.isFinite(minX) || !Number.isFinite(minY) || !Number.isFinite(maxX) || !Number.isFinite(maxY)) {
+    return currentBounds;
+  }
+
+  return {
+    minX,
+    minY,
+    maxX,
+    maxY,
+    pointCount: (currentBounds?.pointCount ?? 0) + points.length,
+    closed: currentBounds?.closed ?? false,
+  };
+}
+
+function toObservedBoundingBox(bounds: PdfObservedPathBounds | undefined) {
+  if (!bounds) {
+    return undefined;
+  }
+
+  return {
+    x: bounds.minX,
+    y: bounds.minY,
+    width: Math.max(0, bounds.maxX - bounds.minX),
+    height: Math.max(0, bounds.maxY - bounds.minY),
+  };
+}
+
+function resolveXObjectBoundingBox(
+  transform: PdfTransformMatrix,
+  xObjectBinding: PdfXObjectBinding | undefined,
+) {
+  const width = xObjectBinding?.width;
+  const height = xObjectBinding?.height;
+  if (width === undefined || height === undefined) {
+    return undefined;
+  }
+
+  return toObservedBoundingBox(createObservedPathBounds([
+    transformPoint(transform, { x: 0, y: 0 }),
+    transformPoint(transform, { x: width, y: 0 }),
+    transformPoint(transform, { x: 0, y: height }),
+    transformPoint(transform, { x: width, y: height }),
+  ]));
 }
 
 function observeParsedTextRun(

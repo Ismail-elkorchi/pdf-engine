@@ -33,6 +33,7 @@ export interface ParsedPageEntry {
   readonly contentStreamRefs: readonly PdfObjectRef[];
   readonly annotationRefs: readonly PdfObjectRef[];
   readonly fontBindings: readonly ParsedFontResourceBinding[];
+  readonly xObjectBindings: readonly ParsedXObjectResourceBinding[];
   readonly resourceRef?: PdfObjectRef;
   readonly resourceCount: number;
   readonly resourceOrigin?: PdfPageValueOrigin;
@@ -41,6 +42,14 @@ export interface ParsedPageEntry {
 export interface ParsedFontResourceBinding {
   readonly resourceName: string;
   readonly fontRef: PdfObjectRef;
+}
+
+export interface ParsedXObjectResourceBinding {
+  readonly resourceName: string;
+  readonly objectRef: PdfObjectRef;
+  readonly subtypeName?: string;
+  readonly width?: number;
+  readonly height?: number;
 }
 
 type ParsedTextArrayOperand =
@@ -69,6 +78,19 @@ export interface ParsedTextOperatorRun {
   readonly operands: ReadonlyArray<ParsedTextArrayOperand>;
   readonly markedContentKind?: ParsedMarkedContentKind;
   readonly actualText?: string;
+}
+
+export type ParsedContentStreamOperand =
+  | { readonly kind: "name"; readonly token: string }
+  | { readonly kind: "literal"; readonly token: string }
+  | { readonly kind: "hex"; readonly token: string }
+  | { readonly kind: "dictionary"; readonly token: string }
+  | { readonly kind: "array"; readonly items: ReadonlyArray<ParsedTextArrayOperand> }
+  | { readonly kind: "other"; readonly token: string };
+
+export interface ParsedContentStreamOperator {
+  readonly operator: string;
+  readonly operands: ReadonlyArray<ParsedContentStreamOperand>;
 }
 
 export interface PdfShellAnalysis {
@@ -1245,6 +1267,7 @@ function toPageEntry(
       ? "inherited"
       : undefined;
   const fontBindings = resourceValue ? readFontResourceBindings(resourceValue.rawValue, objectIndex) : [];
+  const xObjectBindings = resourceValue ? readXObjectResourceBindings(resourceValue.rawValue, objectIndex) : [];
 
   return {
     pageNumber,
@@ -1252,6 +1275,7 @@ function toPageEntry(
     contentStreamRefs,
     annotationRefs,
     fontBindings,
+    xObjectBindings,
     ...(resourceValue?.ref !== undefined ? { resourceRef: resourceValue.ref } : {}),
     ...(resourceOrigin !== undefined ? { resourceOrigin } : {}),
     resourceCount: resourceValue ? 1 : 0,
@@ -1292,6 +1316,51 @@ function readFontResourceBindings(
   }
 
   return fontBindings;
+}
+
+function readXObjectResourceBindings(
+  resourceValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): ParsedXObjectResourceBinding[] {
+  const resolvedResourceDictionary = resolveDictionaryValue(resourceValue, objectIndex);
+  if (!resolvedResourceDictionary) {
+    return [];
+  }
+
+  const resourceEntries = parseDictionaryEntries(resolvedResourceDictionary);
+  const xObjectValue = resourceEntries.get("XObject");
+  if (!xObjectValue) {
+    return [];
+  }
+
+  const resolvedXObjectDictionary = resolveDictionaryValue(xObjectValue, objectIndex);
+  if (!resolvedXObjectDictionary) {
+    return [];
+  }
+
+  const xObjectEntries = parseDictionaryEntries(resolvedXObjectDictionary);
+  const xObjectBindings: ParsedXObjectResourceBinding[] = [];
+
+  for (const [resourceName, xObjectValueToken] of xObjectEntries.entries()) {
+    const objectRef = readObjectRefValue(xObjectValueToken);
+    if (objectRef === undefined) {
+      continue;
+    }
+
+    const objectShell = objectIndex?.get(keyOfObjectRef(objectRef));
+    const subtypeName = objectShell?.dictionaryEntries.get("Subtype")?.trim();
+    const width = readNumericTokenValue(objectShell?.dictionaryEntries.get("Width") ?? "");
+    const height = readNumericTokenValue(objectShell?.dictionaryEntries.get("Height") ?? "");
+    xObjectBindings.push({
+      resourceName,
+      objectRef,
+      ...(subtypeName !== undefined ? { subtypeName } : {}),
+      ...(width !== undefined ? { width } : {}),
+      ...(height !== undefined ? { height } : {}),
+    });
+  }
+
+  return xObjectBindings;
 }
 
 function resolveDictionaryValue(
@@ -1745,6 +1814,18 @@ function readNumericTokenValue(token: string): number | undefined {
   return Number.isFinite(value) ? value : undefined;
 }
 
+function isContentStreamOperatorToken(token: string): boolean {
+  if (token.length === 0) {
+    return false;
+  }
+
+  if (readNumericTokenValue(token) !== undefined) {
+    return false;
+  }
+
+  return token !== "true" && token !== "false" && token !== "null";
+}
+
 function readTrailingNumericOperands(
   operands: ReadonlyArray<
     | { readonly kind: "name"; readonly token: string }
@@ -1793,6 +1874,102 @@ function advanceToNextLine(anchor: PdfPoint | undefined, leading: number | undef
     x: anchor.x,
     y: anchor.y - leading,
   };
+}
+
+export function parseContentStreamOperators(text: string): readonly ParsedContentStreamOperator[] {
+  const operators: ParsedContentStreamOperator[] = [];
+  const operands: ParsedContentStreamOperand[] = [];
+
+  for (let index = 0; index < text.length; ) {
+    index = skipPdfWhitespaceAndComments(text, index);
+    const current = text[index];
+
+    if (current === undefined) {
+      break;
+    }
+
+    if (current === "(") {
+      const literal = readPdfLiteralToken(text, index);
+      if (!literal) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "literal", token: literal.token });
+      index = literal.nextIndex;
+      continue;
+    }
+
+    if (current === "/") {
+      const nameToken = readPdfNameToken(text, index);
+      if (!nameToken) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "name", token: nameToken.raw });
+      index = nameToken.nextIndex;
+      continue;
+    }
+
+    if (current === "<" && text[index + 1] !== "<") {
+      const hex = readPdfHexStringToken(text, index);
+      if (!hex) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "hex", token: hex.token });
+      index = hex.nextIndex;
+      continue;
+    }
+
+    if (current === "<" && text[index + 1] === "<") {
+      const dictionary = readPdfDictionaryToken(text, index);
+      if (!dictionary) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "dictionary", token: dictionary.token });
+      index = dictionary.nextIndex;
+      continue;
+    }
+
+    if (current === "[") {
+      const array = readPdfTextArrayToken(text, index);
+      if (!array) {
+        index += 1;
+        continue;
+      }
+
+      operands.push({ kind: "array", items: array.items });
+      index = array.nextIndex;
+      continue;
+    }
+
+    const tokenEnd = readUntilDelimiter(text, index);
+    if (tokenEnd <= index) {
+      index += 1;
+      continue;
+    }
+
+    const token = text.slice(index, tokenEnd);
+    if (isContentStreamOperatorToken(token)) {
+      operators.push({
+        operator: token,
+        operands: [...operands],
+      });
+      operands.length = 0;
+      index = tokenEnd;
+      continue;
+    }
+
+    operands.push({ kind: "other", token });
+    index = tokenEnd;
+  }
+
+  return operators;
 }
 
 export function parseTextOperatorRuns(text: string): readonly ParsedTextOperatorRun[] {

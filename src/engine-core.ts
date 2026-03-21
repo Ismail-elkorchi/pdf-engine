@@ -576,7 +576,7 @@ function buildObservationStage(
   const pages = observedPageResult.pages;
   const extractedText = buildObservationParagraphText({
     kind: "pdf-observation",
-    strategy: "decoded-text-operators",
+    strategy: "content-stream-interpreter",
     extractedText: "",
     pages,
     knownLimits: [],
@@ -612,7 +612,7 @@ function buildObservationStage(
 
   const observation: PdfObservedDocument = {
     kind: "pdf-observation",
-    strategy: "decoded-text-operators",
+    strategy: "content-stream-interpreter",
     extractedText,
     pages,
     knownLimits: collectObservationKnownLimits(
