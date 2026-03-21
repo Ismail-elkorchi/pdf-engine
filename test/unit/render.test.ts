@@ -32,6 +32,16 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
             pageNumber: 1,
             contentOrder: 1,
             paintOperator: "S",
+            paintState: {
+              lineWidth: 2,
+              lineCapStyle: "round",
+              lineJoinStyle: "bevel",
+              miterLimit: 5,
+              dashPattern: {
+                segments: [3, 1],
+                phase: 2,
+              },
+            },
             pointCount: 2,
             closed: false,
           },
@@ -46,6 +56,21 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
   assert.equal(renderDocument.pages[0]?.displayList.commands.length, 2);
   assert.equal(renderDocument.pages[0]?.displayList.commands[0]?.kind, "text");
   assert.equal(renderDocument.pages[0]?.displayList.commands[1]?.kind, "path");
+  assert.deepEqual(
+    renderDocument.pages[0]?.displayList.commands[1]?.kind === "path"
+      ? renderDocument.pages[0].displayList.commands[1].paintState
+      : undefined,
+    {
+      lineWidth: 2,
+      lineCapStyle: "round",
+      lineJoinStyle: "bevel",
+      miterLimit: 5,
+      dashPattern: {
+        segments: [3, 1],
+        phase: 2,
+      },
+    },
+  );
   assert.ok(renderDocument.knownLimits.includes("layout-block-heuristic"));
   assert.ok(renderDocument.knownLimits.includes("render-display-list-only"));
   assert.ok(renderDocument.knownLimits.includes("render-raster-not-implemented"));

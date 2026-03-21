@@ -67,6 +67,16 @@ test("buildObservedPages preserves marked-content context, path geometry, and li
   assert.equal(markedContentMark.visibilityState, "visible");
 
   assert.equal(pathMark.paintOperator, "S");
+  assert.deepEqual(pathMark.paintState, {
+    lineWidth: 1,
+    lineCapStyle: "butt",
+    lineJoinStyle: "miter",
+    miterLimit: 10,
+    dashPattern: {
+      segments: [],
+      phase: 0,
+    },
+  });
   assert.equal(pathMark.pointCount, 2);
   assert.equal(pathMark.closed, false);
   assert.deepEqual(pathMark.bbox, {
@@ -90,4 +100,74 @@ test("buildObservedPages preserves marked-content context, path geometry, and li
   assert.equal(textMark.visibilityState, "visible");
   assert.equal(page.runs[0]?.text, "Visible");
   assert.equal(page.glyphs.length, "Visible".length);
+});
+
+test("buildObservedPages captures explicit paint state and restores it through q/Q", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageContents([
+    [
+      "2 w",
+      "1 J",
+      "2 j",
+      "5 M",
+      "[3 1] 2 d",
+      "q",
+      "4 w",
+      "0 J",
+      "0 j",
+      "11 M",
+      "[2] 1 d",
+      "0 0 m",
+      "10 0 l",
+      "S",
+      "Q",
+      "0 0 m",
+      "10 10 l",
+      "S",
+    ].join("\n"),
+  ]);
+  const analysis = await analyzePdfShell(
+    {
+      bytes,
+      fileName: "observed-paint-state-test.pdf",
+    },
+    engine.defaultPolicy,
+  );
+  const diagnostics: PdfDiagnostic[] = [];
+  const observed = buildObservedPages(
+    {
+      analysis,
+      featureFindings: [],
+    },
+    diagnostics,
+  );
+
+  assert.deepEqual(diagnostics, []);
+  const pathMarks = observed.pages[0]?.marks.filter((mark) => mark.kind === "path");
+  assert.equal(pathMarks?.length, 2);
+  const [pushedPathMark, restoredPathMark] = pathMarks ?? [];
+  if (pushedPathMark?.kind !== "path" || restoredPathMark?.kind !== "path") {
+    return;
+  }
+
+  assert.deepEqual(pushedPathMark.paintState, {
+    lineWidth: 4,
+    lineCapStyle: "butt",
+    lineJoinStyle: "miter",
+    miterLimit: 11,
+    dashPattern: {
+      segments: [2],
+      phase: 1,
+    },
+  });
+  assert.deepEqual(restoredPathMark.paintState, {
+    lineWidth: 2,
+    lineCapStyle: "round",
+    lineJoinStyle: "bevel",
+    miterLimit: 5,
+    dashPattern: {
+      segments: [3, 1],
+      phase: 2,
+    },
+  });
 });
