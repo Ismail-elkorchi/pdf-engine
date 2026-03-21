@@ -139,6 +139,16 @@ export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter
 export type PdfObservationStrategy = "content-stream-interpreter" | "heuristic-literal-scan";
 
 /**
+ * Visibility state recovered for marked content or other observed page evidence.
+ */
+export type PdfVisibilityState = "visible" | "hidden" | "unknown";
+
+/**
+ * Broad marked-content classification recovered from content-stream operators.
+ */
+export type PdfMarkedContentKind = "artifact" | "span" | "other";
+
+/**
  * Structural role for one recovered stream object.
  */
 export type PdfStreamRole = "content" | "tounicode" | "cmap" | "xref" | "object-stream" | "unknown";
@@ -821,10 +831,14 @@ export interface PdfObservedMarkBase {
   readonly contentStreamRef?: PdfObjectRef;
   /** Optional originating object reference. */
   readonly objectRef?: PdfObjectRef;
+  /** Enclosing marked-content identifier when this mark belongs to one. */
+  readonly markedContentId?: string;
   /** Bounding box when the current implementation can recover one. */
   readonly bbox?: PdfBoundingBox;
   /** Active transform when the current implementation can recover one. */
   readonly transform?: PdfTransformMatrix;
+  /** Visibility state when the current implementation can recover one. */
+  readonly visibilityState?: PdfVisibilityState;
 }
 
 /**
@@ -849,12 +863,20 @@ export interface PdfObservedTextMark extends PdfObservedMarkBase {
   readonly unicodeMappingSource?: PdfUnicodeMappingSource;
   /** Writing mode active for this mark when the current implementation can recover it. */
   readonly writingMode?: PdfWritingMode;
+  /** Marked-content classification active for this mark when known. */
+  readonly markedContentKind?: PdfMarkedContentKind;
+  /** Preferred ActualText payload attached to the enclosing marked-content sequence when known. */
+  readonly actualText?: string;
   /** Approximate text anchor when the current implementation can recover one. */
   readonly anchor?: PdfPoint;
   /** Active font size when the current implementation can recover it. */
   readonly fontSize?: number;
   /** Whether this mark started on a new text line. */
   readonly startsNewLine?: boolean;
+  /** Whether this mark is a hidden-text candidate under the current evidence model. */
+  readonly hiddenTextCandidate?: boolean;
+  /** Whether this mark is a duplicate-layer candidate under the current evidence model. */
+  readonly duplicateLayerCandidate?: boolean;
 }
 
 /**
@@ -912,6 +934,30 @@ export interface PdfObservedClipMark extends PdfObservedMarkBase {
 }
 
 /**
+ * Observed marked-content boundary recovered from `BMC`, `BDC`, and `EMC`.
+ */
+export interface PdfObservedMarkedContentMark extends PdfObservedMarkBase {
+  /** Discriminator for marked-content marks. */
+  readonly kind: "marked-content";
+  /** Original tag name without the leading slash. */
+  readonly tagName: string;
+  /** Broad marked-content classification. */
+  readonly markedContentKind: PdfMarkedContentKind;
+  /** Nesting depth when this marked-content sequence started. */
+  readonly depth: number;
+  /** Properties resource name used by `BDC` when known. */
+  readonly propertyName?: string;
+  /** Optional-content object reference when the current implementation can resolve one. */
+  readonly optionalContentRef?: PdfObjectRef;
+  /** Marked-content identifier when provided by the property dictionary. */
+  readonly mcid?: number;
+  /** Preferred ActualText payload when attached to the property dictionary. */
+  readonly actualText?: string;
+  /** Content-order position where this marked-content sequence closed when known. */
+  readonly closedContentOrder?: number;
+}
+
+/**
  * Canonical observed page-mark union.
  */
 export type PdfObservedMark =
@@ -919,7 +965,8 @@ export type PdfObservedMark =
   | PdfObservedPathMark
   | PdfObservedXObjectMark
   | PdfObservedImageMark
-  | PdfObservedClipMark;
+  | PdfObservedClipMark
+  | PdfObservedMarkedContentMark;
 
 /**
  * One observed page in the current observation result.

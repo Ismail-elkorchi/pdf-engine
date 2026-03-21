@@ -11,3 +11,4 @@ All notable changes are documented in this file.
 - Admission now blocks policy-driving risky features when they are only found through scan fallback instead of parsed object authority.
 - Breaking admission and IR contract update: coarse `featureSignals`/`featureKinds` are replaced with typed `featureFindings` backed by parsed-object evidence for actions, links, attachments, annotations, forms, outlines, signatures, and optional-content membership.
 - Breaking observation contract update: `PdfObservedPage` now exposes canonical `marks`, and observation strategy now reports `content-stream-interpreter` while preserving derived text `runs` and `glyphs`.
+- Observation marks now carry first marked-content, optional-content visibility, and hidden-layer evidence needed for the remaining render and geometry-backed interpretation work.
