@@ -32,7 +32,7 @@ The published surface is still early, but it is no longer contracts-only. This r
 - typed feature findings for risky and structural document features, including parsed-object evidence for actions, links, attachments, annotations, forms, outlines, signatures, and optional-content membership
 - inherited page-resource state, content-stream provenance for observed text, run-level anchor and font-size hints, and operator-ready stream bodies for unfiltered, `ASCIIHexDecode`, `ASCII85Decode`, `RunLengthDecode`, `FlateDecode` plus predictors, `LZWDecode`, and `CCITTFaxDecode` streams
 - content-stream-interpreter observation with page marks for text, paths, images, XObjects, clipping, and first marked-content plus visibility evidence, a line-oriented layout stage with explicit heuristic limitation markers, and extractive knowledge chunks with source citations
-- a first render stage that emits deterministic page display lists from observed page marks while surfacing explicit render limits for raster output
+- a first render stage that emits deterministic page display lists and stable SHA-256 render hashes from observed page marks while surfacing explicit render limits for raster output
 - a first heuristic table projection that stays citation-backed and emits no table when layout evidence is too weak
 - a browser-only `./viewer` subpath that renders page and reader views from staged layout blocks, cited knowledge chunks, projected tables, heading outlines, and staged-text search over existing pipeline results
 - runtime support claims and a no-op disposal contract for future worker or WASM backends

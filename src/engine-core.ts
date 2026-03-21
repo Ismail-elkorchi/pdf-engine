@@ -183,7 +183,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       inspection,
     );
     const observation = buildObservationStage(inspection, admission);
-    return buildRenderStage(observation);
+    return await buildRenderStage(observation);
   }
 
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
@@ -194,7 +194,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     const observation = buildObservationStage(inspection, admission);
     const layout = buildLayoutStage(observation);
     const knowledge = buildKnowledgeStage(observation, layout);
-    const render = buildRenderStage(observation);
+    const render = await buildRenderStage(observation);
 
     return {
       engine: ENGINE_IDENTITY,
@@ -696,14 +696,14 @@ function buildKnowledgeStage(
   );
 }
 
-function buildRenderStage(
+async function buildRenderStage(
   observation: PdfStageResult<PdfObservedDocument>,
-): PdfStageResult<PdfRenderDocument> {
+): Promise<PdfStageResult<PdfRenderDocument>> {
   if (observation.value === undefined) {
     return stageResult("render", observation.status === "failed" ? "failed" : "blocked", observation.diagnostics);
   }
 
-  const render = buildRenderDocument(observation.value);
+  const render = await buildRenderDocument(observation.value);
   const diagnostics = createRenderDiagnostics(render);
 
   return stageResult(

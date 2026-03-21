@@ -2762,6 +2762,13 @@ const repeatedBoundaryRenderResult = await engine.toRender({
     mediaType: "application/pdf",
   },
 });
+const repeatedBoundaryRenderRepeatResult = await engine.toRender({
+  source: {
+    bytes: encodeText(repeatedBoundaryPdf),
+    fileName: "repeated-boundary.pdf",
+    mediaType: "application/pdf",
+  },
+});
 const observationWithoutPassword = await engine.observe({
   source: {
     bytes: encryptedStandardTextFixtureBytes,
@@ -2842,6 +2849,8 @@ assert(result.ir.value?.kind === "pdf-ir", `IR kind was ${result.ir.value?.kind 
 assert(result.observation.value?.kind === "pdf-observation", `Observation kind was ${result.observation.value?.kind ?? "missing"}.`);
 assert(result.render.value?.kind === "pdf-render", `Render kind was ${result.render.value?.kind ?? "missing"}.`);
 assert(result.render.value?.strategy === "observed-display-list", `Render strategy was ${result.render.value?.strategy ?? "missing"}.`);
+assert(result.render.value?.renderHash.algorithm === "sha-256", `Render document hash algorithm was ${result.render.value?.renderHash.algorithm ?? "missing"}.`);
+assert((result.render.value?.renderHash.hex.length ?? 0) === 64, `Render document hash length was ${result.render.value?.renderHash.hex.length ?? 0}.`);
 assert(result.admission.value?.repairState === "clean", `Repair state was ${result.admission.value?.repairState ?? "missing"}.`);
 assert((result.admission.value?.knownLimits.length ?? 0) === 0, "Admission known limits should be empty for the clean synthetic document.");
 assert(result.admission.value?.parseCoverage.startXref === true, "The parser did not recover startxref coverage.");
@@ -2864,6 +2873,8 @@ assert(result.observation.value?.pages[0]?.glyphs[0]?.origin === "native-text", 
 assert(result.observation.value?.strategy === "content-stream-interpreter", "Observation strategy was not updated.");
 assert(result.observation.value?.pages[0]?.marks[0]?.kind === "text", "Observation text marks were not emitted for the synthetic document.");
 assert(result.render.value?.pages[0]?.displayList.commands[0]?.kind === "text", "Render display list did not emit a text command for the synthetic document.");
+assert(result.render.value?.pages[0]?.renderHash.algorithm === "sha-256", `Render page hash algorithm was ${result.render.value?.pages[0]?.renderHash.algorithm ?? "missing"}.`);
+assert((result.render.value?.pages[0]?.renderHash.hex.length ?? 0) === 64, `Render page hash length was ${result.render.value?.pages[0]?.renderHash.hex.length ?? 0}.`);
 assert(
   result.render.value?.knownLimits.includes("render-display-list-only"),
   "Render known limits did not include render-display-list-only.",
@@ -2882,6 +2893,18 @@ assert(
 );
 assert(repeatedBoundaryRenderResult.status === "partial", `Direct render status was ${repeatedBoundaryRenderResult.status}.`);
 assert(repeatedBoundaryRenderResult.value?.kind === "pdf-render", `Direct render kind was ${repeatedBoundaryRenderResult.value?.kind ?? "missing"}.`);
+assert(
+  (repeatedBoundaryRenderResult.value?.renderHash.hex.length ?? 0) === 64,
+  `Direct render hash length was ${repeatedBoundaryRenderResult.value?.renderHash.hex.length ?? 0}.`,
+);
+assert(
+  repeatedBoundaryRenderResult.value?.renderHash.hex === repeatedBoundaryRenderRepeatResult.value?.renderHash.hex,
+  "Direct render document hashes were not stable across repeated runs.",
+);
+assert(
+  repeatedBoundaryRenderResult.value?.pages[0]?.renderHash.hex === repeatedBoundaryRenderRepeatResult.value?.pages[0]?.renderHash.hex,
+  "Direct render page hashes were not stable across repeated runs.",
+);
 assert(
   result.observation.value?.knownLimits.includes("text-decoding-heuristic"),
   "Observation known limits did not include text-decoding-heuristic.",
@@ -4183,6 +4206,8 @@ console.log(
       render: result.render.status,
       renderStrategy: result.render.value?.strategy ?? null,
       renderCommandCount: result.render.value?.pages[0]?.displayList.commands.length ?? null,
+      renderHash: result.render.value?.renderHash.hex ?? null,
+      renderPageHash: result.render.value?.pages[0]?.renderHash.hex ?? null,
       text: result.observation.value?.extractedText ?? null,
     },
     null,
