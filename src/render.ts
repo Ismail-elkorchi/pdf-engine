@@ -95,6 +95,7 @@ function toDisplayCommand(mark: PdfObservedMark): PdfDisplayCommand {
         kind: "path",
         contentOrder: mark.contentOrder,
         paintOperator: mark.paintOperator,
+        paintState: mark.paintState,
         pointCount: mark.pointCount,
         closed: mark.closed,
         ...(mark.objectRef !== undefined ? { objectRef: mark.objectRef } : {}),

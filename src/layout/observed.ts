@@ -28,12 +28,16 @@ import { parseTrueTypeGlyphUnicodeMap } from "../truetype-cmap.ts";
 
 import type {
   PdfDiagnostic,
+  PdfObservedDashPattern,
   PdfFeatureFinding,
+  PdfObservedLineCapStyle,
+  PdfObservedLineJoinStyle,
   PdfMarkedContentKind,
   PdfObjectRef,
   PdfObservedGlyph,
   PdfObservedMark,
   PdfObservedMarkedContentMark,
+  PdfObservedPaintState,
   PdfObservedPage,
   PdfObservedPathMark,
   PdfObservedTextRun,
@@ -81,6 +85,7 @@ interface PdfObservedPathBounds {
 
 interface PdfObservedGraphicsState {
   readonly transform: PdfTransformMatrix;
+  readonly paintState: PdfObservedPaintState;
   readonly currentPath: PdfObservedPathBounds | undefined;
   readonly pendingClipOperator: "W" | "W*" | undefined;
   readonly pendingClipBounds: PdfObservedPathBounds | undefined;
@@ -128,6 +133,17 @@ const IDENTITY_TRANSFORM: PdfTransformMatrix = {
 };
 
 const PATH_PAINT_OPERATORS = new Set<PdfObservedPathMark["paintOperator"]>(["S", "s", "f", "F", "f*", "B", "B*", "b", "b*", "n"]);
+const DEFAULT_DASH_PATTERN: PdfObservedDashPattern = {
+  segments: [],
+  phase: 0,
+};
+const DEFAULT_PAINT_STATE: PdfObservedPaintState = {
+  lineWidth: 1,
+  lineCapStyle: "butt",
+  lineJoinStyle: "miter",
+  miterLimit: 10,
+  dashPattern: DEFAULT_DASH_PATTERN,
+};
 
 export interface PdfObservationInspection {
   readonly analysis: PdfShellAnalysis;
@@ -401,6 +417,7 @@ function observeContentStreamMarks(
   const markedContentStack: PdfObservedMarkedContentState[] = [];
   let graphicsState: PdfObservedGraphicsState = {
     transform: IDENTITY_TRANSFORM,
+    paintState: cloneObservedPaintState(DEFAULT_PAINT_STATE),
     currentPath: undefined,
     pendingClipOperator: undefined,
     pendingClipBounds: undefined,
@@ -486,6 +503,7 @@ function observeContentStreamMarks(
     if (operator.operator === "Q") {
       graphicsState = graphicsStateStack.pop() ?? {
         transform: IDENTITY_TRANSFORM,
+        paintState: cloneObservedPaintState(DEFAULT_PAINT_STATE),
         currentPath: undefined,
         pendingClipOperator: undefined,
         pendingClipBounds: undefined,
@@ -499,6 +517,76 @@ function observeContentStreamMarks(
         graphicsState = {
           ...graphicsState,
           transform: multiplyTransformMatrices(graphicsState.transform, matrix),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "w") {
+      const lineWidth = readTrailingNumericOperandsFromOperator(operator, 1)?.[0];
+      if (lineWidth !== undefined && lineWidth >= 0) {
+        graphicsState = {
+          ...graphicsState,
+          paintState: {
+            ...graphicsState.paintState,
+            lineWidth,
+          },
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "J") {
+      const lineCapStyle = resolveObservedLineCapStyle(readTrailingNumericOperandsFromOperator(operator, 1)?.[0]);
+      if (lineCapStyle !== undefined) {
+        graphicsState = {
+          ...graphicsState,
+          paintState: {
+            ...graphicsState.paintState,
+            lineCapStyle,
+          },
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "j") {
+      const lineJoinStyle = resolveObservedLineJoinStyle(readTrailingNumericOperandsFromOperator(operator, 1)?.[0]);
+      if (lineJoinStyle !== undefined) {
+        graphicsState = {
+          ...graphicsState,
+          paintState: {
+            ...graphicsState.paintState,
+            lineJoinStyle,
+          },
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "M") {
+      const miterLimit = readTrailingNumericOperandsFromOperator(operator, 1)?.[0];
+      if (miterLimit !== undefined && miterLimit >= 0) {
+        graphicsState = {
+          ...graphicsState,
+          paintState: {
+            ...graphicsState.paintState,
+            miterLimit,
+          },
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "d") {
+      const dashPattern = readObservedDashPattern(operator);
+      if (dashPattern !== undefined) {
+        graphicsState = {
+          ...graphicsState,
+          paintState: {
+            ...graphicsState.paintState,
+            dashPattern,
+          },
         };
       }
       continue;
@@ -611,6 +699,7 @@ function observeContentStreamMarks(
           contentStreamRef,
           objectRef: contentStreamRef,
           paintOperator: operator.operator as PdfObservedPathMark["paintOperator"],
+          paintState: cloneObservedPaintState(graphicsState.paintState),
           pointCount: currentPath.pointCount,
           closed: currentPath.closed || operator.operator === "s" || operator.operator === "b" || operator.operator === "b*",
           ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
@@ -1011,9 +1100,23 @@ function isTextShowOperator(operator: string): boolean {
 function cloneGraphicsState(graphicsState: PdfObservedGraphicsState): PdfObservedGraphicsState {
   return {
     transform: { ...graphicsState.transform },
+    paintState: cloneObservedPaintState(graphicsState.paintState),
     currentPath: graphicsState.currentPath !== undefined ? { ...graphicsState.currentPath } : undefined,
     pendingClipOperator: graphicsState.pendingClipOperator,
     pendingClipBounds: graphicsState.pendingClipBounds !== undefined ? { ...graphicsState.pendingClipBounds } : undefined,
+  };
+}
+
+function cloneObservedPaintState(paintState: PdfObservedPaintState): PdfObservedPaintState {
+  return {
+    lineWidth: paintState.lineWidth,
+    lineCapStyle: paintState.lineCapStyle,
+    lineJoinStyle: paintState.lineJoinStyle,
+    miterLimit: paintState.miterLimit,
+    dashPattern: {
+      segments: [...paintState.dashPattern.segments],
+      phase: paintState.dashPattern.phase,
+    },
   };
 }
 
@@ -1094,6 +1197,27 @@ function readTrailingNameOperand(operator: ParsedContentStreamOperator): string 
   return operand?.kind === "name" ? operand.token.slice(1) : undefined;
 }
 
+function readObservedDashPattern(operator: ParsedContentStreamOperator): PdfObservedDashPattern | undefined {
+  const dashArrayOperand = operator.operands.find((operand) => operand.kind === "array");
+  const dashPhase = readTrailingNumericOperandsFromOperator(operator, 1)?.[0];
+  if (dashArrayOperand?.kind !== "array" || dashPhase === undefined || dashPhase < 0) {
+    return undefined;
+  }
+
+  const segments: number[] = [];
+  for (const item of dashArrayOperand.items) {
+    if (item.kind !== "adjustment" || !Number.isFinite(item.value) || item.value < 0) {
+      return undefined;
+    }
+    segments.push(item.value);
+  }
+
+  return {
+    segments,
+    phase: dashPhase,
+  };
+}
+
 function readTrailingNumericOperandsFromOperator(
   operator: ParsedContentStreamOperator,
   count: number,
@@ -1113,6 +1237,40 @@ function readTrailingNumericOperandsFromOperator(
   }
 
   return numericValues.length === count ? numericValues.reverse() : undefined;
+}
+
+function resolveObservedLineCapStyle(value: number | undefined): PdfObservedLineCapStyle | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  switch (value) {
+    case 0:
+      return "butt";
+    case 1:
+      return "round";
+    case 2:
+      return "projecting-square";
+    default:
+      return undefined;
+  }
+}
+
+function resolveObservedLineJoinStyle(value: number | undefined): PdfObservedLineJoinStyle | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  switch (value) {
+    case 0:
+      return "miter";
+    case 1:
+      return "round";
+    case 2:
+      return "bevel";
+    default:
+      return undefined;
+  }
 }
 
 function multiplyTransformMatrices(

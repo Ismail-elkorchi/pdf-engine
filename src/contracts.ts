@@ -820,6 +820,42 @@ export type PdfObservedPathPaintOperator = "S" | "s" | "f" | "F" | "f*" | "B" | 
 export type PdfObservedClipOperator = "W" | "W*";
 
 /**
+ * Normalized line-cap style active for one observed path.
+ */
+export type PdfObservedLineCapStyle = "butt" | "round" | "projecting-square";
+
+/**
+ * Normalized line-join style active for one observed path.
+ */
+export type PdfObservedLineJoinStyle = "miter" | "round" | "bevel";
+
+/**
+ * Normalized dash pattern active for one observed path.
+ */
+export interface PdfObservedDashPattern {
+  /** Dash and gap lengths in user-space units. */
+  readonly segments: readonly number[];
+  /** Dash phase in user-space units. */
+  readonly phase: number;
+}
+
+/**
+ * Normalized paint-state facts active for one observed path.
+ */
+export interface PdfObservedPaintState {
+  /** Active line width in user-space units. */
+  readonly lineWidth: number;
+  /** Active line-cap style. */
+  readonly lineCapStyle: PdfObservedLineCapStyle;
+  /** Active line-join style. */
+  readonly lineJoinStyle: PdfObservedLineJoinStyle;
+  /** Active miter limit. */
+  readonly miterLimit: number;
+  /** Active dash pattern. */
+  readonly dashPattern: PdfObservedDashPattern;
+}
+
+/**
  * Base fields shared by every observed page mark.
  */
 export interface PdfObservedMarkBase {
@@ -889,6 +925,8 @@ export interface PdfObservedPathMark extends PdfObservedMarkBase {
   readonly kind: "path";
   /** Painting operator that finalized this path. */
   readonly paintOperator: PdfObservedPathPaintOperator;
+  /** Normalized paint-state facts active when this path was painted. */
+  readonly paintState: PdfObservedPaintState;
   /** Number of path points considered when recovering the bounding box. */
   readonly pointCount: number;
   /** Whether the recovered path was explicitly closed. */
@@ -1272,6 +1310,8 @@ export interface PdfDisplayPathCommand extends PdfDisplayCommandBase {
   readonly kind: "path";
   /** Painting operator that finalized the path. */
   readonly paintOperator: PdfObservedPathPaintOperator;
+  /** Normalized paint-state facts active when this path was painted. */
+  readonly paintState: PdfObservedPaintState;
   /** Number of points considered while recovering the path. */
   readonly pointCount: number;
   /** Whether the path was explicitly closed. */
