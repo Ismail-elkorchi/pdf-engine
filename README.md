@@ -29,6 +29,14 @@ npm run test:runtime:browser:compat
 npm run test:integration
 ```
 
+## Testing Signals
+
+`npm run test:coverage:node-lower` is a diagnostic signal, not a release or step-completion oracle.
+
+- use coverage to find missing lower-layer tests
+- do not treat a percentage alone as proof that a subsystem is correct
+- keep contract, property, runtime-parity, integration, and fuzz evidence alongside coverage when behavior changes
+
 ## Status
 
 The published surface is still early, but it is no longer contracts-only. This repository currently ships:
