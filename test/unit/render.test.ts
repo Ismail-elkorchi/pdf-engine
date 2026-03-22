@@ -68,6 +68,16 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
               blendMode: "multiply",
               softMask: "present",
             },
+            segments: [
+              {
+                kind: "move-to",
+                to: { x: 0, y: 0 },
+              },
+              {
+                kind: "line-to",
+                to: { x: 10, y: 10 },
+              },
+            ],
             pointCount: 2,
             closed: false,
           },
@@ -152,6 +162,21 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
       blendMode: "multiply",
       softMask: "present",
     },
+  );
+  assert.deepEqual(
+    renderDocument.pages[0]?.displayList.commands[1]?.kind === "path"
+      ? renderDocument.pages[0].displayList.commands[1].segments
+      : undefined,
+    [
+      {
+        kind: "move-to",
+        to: { x: 0, y: 0 },
+      },
+      {
+        kind: "line-to",
+        to: { x: 10, y: 10 },
+      },
+    ],
   );
   assert.deepEqual(
     renderDocument.pages[0]?.displayList.commands[2]?.kind === "xobject"

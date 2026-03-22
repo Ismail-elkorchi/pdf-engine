@@ -77,6 +77,16 @@ test("buildObservedPages preserves marked-content context, path geometry, and li
       phase: 0,
     },
   });
+  assert.deepEqual(pathMark.segments, [
+    {
+      kind: "move-to",
+      to: { x: 0, y: 0 },
+    },
+    {
+      kind: "line-to",
+      to: { x: 5, y: 5 },
+    },
+  ]);
   assert.equal(pathMark.pointCount, 2);
   assert.equal(pathMark.closed, false);
   assert.deepEqual(pathMark.bbox, {
@@ -100,6 +110,102 @@ test("buildObservedPages preserves marked-content context, path geometry, and li
   assert.equal(textMark.visibilityState, "visible");
   assert.equal(page.runs[0]?.text, "Visible");
   assert.equal(page.glyphs.length, "Visible".length);
+});
+
+test("buildObservedPages normalizes path segments and keeps bbox in page space", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageContents([
+    [
+      "q",
+      "2 0 0 2 10 20 cm",
+      "0 0 m",
+      "5 0 l",
+      "5 5 10 5 10 10 c",
+      "15 15 20 20 v",
+      "25 25 30 30 y",
+      "h",
+      "1 2 3 4 re",
+      "S",
+      "Q",
+    ].join("\n"),
+  ]);
+  const analysis = await analyzePdfShell(
+    {
+      bytes,
+      fileName: "observed-path-geometry-test.pdf",
+    },
+    engine.defaultPolicy,
+  );
+  const diagnostics: PdfDiagnostic[] = [];
+  const observed = buildObservedPages(
+    {
+      analysis,
+      featureFindings: [],
+    },
+    diagnostics,
+  );
+
+  assert.deepEqual(diagnostics, []);
+  const pathMark = observed.pages[0]?.marks.find((mark) => mark.kind === "path");
+  assert.ok(pathMark);
+  if (pathMark?.kind !== "path") {
+    return;
+  }
+
+  assert.deepEqual(pathMark.segments, [
+    {
+      kind: "move-to",
+      to: { x: 0, y: 0 },
+    },
+    {
+      kind: "line-to",
+      to: { x: 5, y: 0 },
+    },
+    {
+      kind: "curve-to",
+      control1: { x: 5, y: 5 },
+      control2: { x: 10, y: 5 },
+      to: { x: 10, y: 10 },
+    },
+    {
+      kind: "curve-to",
+      control1: { x: 10, y: 10 },
+      control2: { x: 15, y: 15 },
+      to: { x: 20, y: 20 },
+    },
+    {
+      kind: "curve-to",
+      control1: { x: 25, y: 25 },
+      control2: { x: 30, y: 30 },
+      to: { x: 30, y: 30 },
+    },
+    {
+      kind: "close-path",
+    },
+    {
+      kind: "rectangle",
+      x: 1,
+      y: 2,
+      width: 3,
+      height: 4,
+    },
+  ]);
+  assert.equal(pathMark.pointCount, 15);
+  assert.equal(pathMark.closed, true);
+  assert.deepEqual(pathMark.bbox, {
+    x: 10,
+    y: 20,
+    width: 60,
+    height: 60,
+  });
+  assert.deepEqual(pathMark.transform, {
+    a: 2,
+    b: 0,
+    c: 0,
+    d: 2,
+    e: 10,
+    f: 20,
+  });
 });
 
 test("buildObservedPages captures explicit paint state and restores it through q/Q", async () => {

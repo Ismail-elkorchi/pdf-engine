@@ -98,6 +98,7 @@ function toDisplayCommand(mark: PdfObservedMark): PdfDisplayCommand {
         paintState: mark.paintState,
         colorState: mark.colorState,
         transparencyState: mark.transparencyState,
+        segments: mark.segments,
         pointCount: mark.pointCount,
         closed: mark.closed,
         ...(mark.objectRef !== undefined ? { objectRef: mark.objectRef } : {}),

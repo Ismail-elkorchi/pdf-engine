@@ -38,12 +38,14 @@ import type {
   PdfObservedLineJoinStyle,
   PdfMarkedContentKind,
   PdfObjectRef,
+  PdfPoint,
   PdfObservedGlyph,
   PdfObservedMark,
   PdfObservedMarkedContentMark,
   PdfObservedPaintState,
   PdfObservedPage,
   PdfObservedPathMark,
+  PdfObservedPathSegment,
   PdfObservedSoftMaskState,
   PdfObservedTransparencyGroup,
   PdfObservedTransparencyState,
@@ -97,8 +99,13 @@ interface PdfObservedPathBounds {
   readonly minY: number;
   readonly maxX: number;
   readonly maxY: number;
-  readonly pointCount: number;
-  readonly closed: boolean;
+}
+
+interface PdfObservedPathState {
+  readonly bounds: PdfObservedPathBounds;
+  readonly segments: readonly PdfObservedPathSegment[];
+  readonly currentPoint?: PdfPoint;
+  readonly subpathStartPoint?: PdfPoint;
 }
 
 interface PdfObservedGraphicsState {
@@ -106,9 +113,9 @@ interface PdfObservedGraphicsState {
   readonly paintState: PdfObservedPaintState;
   readonly colorState: PdfObservedColorState;
   readonly transparencyState: PdfObservedTransparencyState;
-  readonly currentPath: PdfObservedPathBounds | undefined;
+  readonly currentPath: PdfObservedPathState | undefined;
   readonly pendingClipOperator: "W" | "W*" | undefined;
-  readonly pendingClipBounds: PdfObservedPathBounds | undefined;
+  readonly pendingClipPath: PdfObservedPathState | undefined;
 }
 
 interface PdfObservedContentMarksResult {
@@ -495,7 +502,7 @@ function observeContentStreamMarks(
     transparencyState: cloneObservedTransparencyState(DEFAULT_TRANSPARENCY_STATE),
     currentPath: undefined,
     pendingClipOperator: undefined,
-    pendingClipBounds: undefined,
+    pendingClipPath: undefined,
   };
   let contentOrder = startingContentOrder;
 
@@ -583,7 +590,7 @@ function observeContentStreamMarks(
         transparencyState: cloneObservedTransparencyState(DEFAULT_TRANSPARENCY_STATE),
         currentPath: undefined,
         pendingClipOperator: undefined,
-        pendingClipBounds: undefined,
+        pendingClipPath: undefined,
       };
       continue;
     }
@@ -775,7 +782,7 @@ function observeContentStreamMarks(
       if (point) {
         graphicsState = {
           ...graphicsState,
-          currentPath: createObservedPathBounds([transformPoint(graphicsState.transform, point)]),
+          currentPath: appendObservedPathMoveTo(graphicsState.currentPath, point, graphicsState.transform),
         };
       }
       continue;
@@ -786,10 +793,7 @@ function observeContentStreamMarks(
       if (point) {
         graphicsState = {
           ...graphicsState,
-          currentPath: extendObservedPathBounds(
-            graphicsState.currentPath,
-            [transformPoint(graphicsState.transform, point)],
-          ),
+          currentPath: appendObservedPathLineTo(graphicsState.currentPath, point, graphicsState.transform),
         };
       }
       continue;
@@ -797,12 +801,19 @@ function observeContentStreamMarks(
 
     if (operator.operator === "c") {
       const points = readTrailingPoints(operator, 3);
-      if (points.length > 0) {
+      if (points.length === 3) {
+        const [control1, control2, to] = points;
+        if (control1 === undefined || control2 === undefined || to === undefined) {
+          continue;
+        }
         graphicsState = {
           ...graphicsState,
-          currentPath: extendObservedPathBounds(
+          currentPath: appendObservedPathCurveTo(
             graphicsState.currentPath,
-            points.map((point) => transformPoint(graphicsState.transform, point)),
+            control1,
+            control2,
+            to,
+            graphicsState.transform,
           ),
         };
       }
@@ -811,12 +822,19 @@ function observeContentStreamMarks(
 
     if (operator.operator === "v" || operator.operator === "y") {
       const points = readTrailingPoints(operator, 2);
-      if (points.length > 0) {
+      if (points.length === 2) {
+        const [firstPoint, secondPoint] = points;
+        if (firstPoint === undefined || secondPoint === undefined) {
+          continue;
+        }
         graphicsState = {
           ...graphicsState,
-          currentPath: extendObservedPathBounds(
+          currentPath: appendObservedPathShortcutCurve(
             graphicsState.currentPath,
-            points.map((point) => transformPoint(graphicsState.transform, point)),
+            operator.operator,
+            firstPoint,
+            secondPoint,
+            graphicsState.transform,
           ),
         };
       }
@@ -827,10 +845,7 @@ function observeContentStreamMarks(
       if (graphicsState.currentPath) {
         graphicsState = {
           ...graphicsState,
-          currentPath: {
-            ...graphicsState.currentPath,
-            closed: true,
-          },
+          currentPath: closeObservedPath(graphicsState.currentPath),
         };
       }
       continue;
@@ -841,10 +856,7 @@ function observeContentStreamMarks(
       if (rectangle) {
         graphicsState = {
           ...graphicsState,
-          currentPath: extendObservedPathBounds(
-            graphicsState.currentPath,
-            rectangleToPoints(rectangle).map((point) => transformPoint(graphicsState.transform, point)),
-          ),
+          currentPath: appendObservedPathRectangle(graphicsState.currentPath, rectangle, graphicsState.transform),
         };
       }
       continue;
@@ -855,7 +867,7 @@ function observeContentStreamMarks(
         graphicsState = {
           ...graphicsState,
           pendingClipOperator: operator.operator,
-          pendingClipBounds: graphicsState.currentPath,
+          pendingClipPath: cloneObservedPathState(graphicsState.currentPath),
         };
       }
       continue;
@@ -863,12 +875,13 @@ function observeContentStreamMarks(
 
     if (PATH_PAINT_OPERATORS.has(operator.operator as PdfObservedPathMark["paintOperator"])) {
       const currentPath = graphicsState.currentPath;
-      const pendingClipBounds = graphicsState.pendingClipBounds;
+      const pendingClipPath = graphicsState.pendingClipPath;
       const pendingClipOperator = graphicsState.pendingClipOperator;
       const currentMarkedContentId = resolveCurrentMarkedContentId(markedContentStack);
       const currentVisibilityState = resolveEffectiveVisibilityState(markedContentStack);
       if (currentPath) {
-        const pathBoundingBox = toObservedBoundingBox(currentPath);
+        const paintedSegments = buildPaintedPathSegments(currentPath, operator.operator as PdfObservedPathMark["paintOperator"]);
+        const pathBoundingBox = toObservedBoundingBox(currentPath.bounds);
         marks.push({
           id: `mark-path-${pageNumber}-${contentOrder + 1}`,
           kind: "path",
@@ -880,8 +893,9 @@ function observeContentStreamMarks(
           paintState: cloneObservedPaintState(graphicsState.paintState),
           colorState: cloneObservedColorState(graphicsState.colorState),
           transparencyState: cloneObservedTransparencyState(graphicsState.transparencyState),
-          pointCount: currentPath.pointCount,
-          closed: currentPath.closed || operator.operator === "s" || operator.operator === "b" || operator.operator === "b*",
+          segments: paintedSegments,
+          pointCount: countObservedPathPoints(paintedSegments),
+          closed: isObservedPathClosed(paintedSegments),
           ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
           ...(pathBoundingBox !== undefined ? { bbox: pathBoundingBox } : {}),
           transform: graphicsState.transform,
@@ -889,8 +903,8 @@ function observeContentStreamMarks(
         });
         contentOrder += 1;
       }
-      if (pendingClipBounds && pendingClipOperator) {
-        const clipBoundingBox = toObservedBoundingBox(pendingClipBounds);
+      if (pendingClipPath && pendingClipOperator) {
+        const clipBoundingBox = toObservedBoundingBox(pendingClipPath.bounds);
         marks.push({
           id: `mark-clip-${pageNumber}-${contentOrder + 1}`,
           kind: "clip",
@@ -909,7 +923,7 @@ function observeContentStreamMarks(
       graphicsState = {
         ...graphicsState,
         currentPath: undefined,
-        pendingClipBounds: undefined,
+        pendingClipPath: undefined,
         pendingClipOperator: undefined,
       };
       continue;
@@ -1284,9 +1298,9 @@ function cloneGraphicsState(graphicsState: PdfObservedGraphicsState): PdfObserve
     paintState: cloneObservedPaintState(graphicsState.paintState),
     colorState: cloneObservedColorState(graphicsState.colorState),
     transparencyState: cloneObservedTransparencyState(graphicsState.transparencyState),
-    currentPath: graphicsState.currentPath !== undefined ? { ...graphicsState.currentPath } : undefined,
+    currentPath: graphicsState.currentPath !== undefined ? cloneObservedPathState(graphicsState.currentPath) : undefined,
     pendingClipOperator: graphicsState.pendingClipOperator,
-    pendingClipBounds: graphicsState.pendingClipBounds !== undefined ? { ...graphicsState.pendingClipBounds } : undefined,
+    pendingClipPath: graphicsState.pendingClipPath !== undefined ? cloneObservedPathState(graphicsState.pendingClipPath) : undefined,
   };
 }
 
@@ -1926,14 +1940,252 @@ function transformPoint(
   };
 }
 
-function createObservedPathBounds(
-  points: readonly { readonly x: number; readonly y: number }[],
-): PdfObservedPathBounds | undefined {
-  if (points.length === 0) {
-    return undefined;
+function cloneObservedPathState(pathState: PdfObservedPathState): PdfObservedPathState {
+  return {
+    bounds: {
+      minX: pathState.bounds.minX,
+      minY: pathState.bounds.minY,
+      maxX: pathState.bounds.maxX,
+      maxY: pathState.bounds.maxY,
+    },
+    segments: pathState.segments.map(cloneObservedPathSegment),
+    ...(pathState.currentPoint !== undefined ? { currentPoint: { ...pathState.currentPoint } } : {}),
+    ...(pathState.subpathStartPoint !== undefined ? { subpathStartPoint: { ...pathState.subpathStartPoint } } : {}),
+  };
+}
+
+function cloneObservedPathSegment(segment: PdfObservedPathSegment): PdfObservedPathSegment {
+  switch (segment.kind) {
+    case "move-to":
+    case "line-to":
+      return {
+        kind: segment.kind,
+        to: { ...segment.to },
+      };
+    case "curve-to":
+      return {
+        kind: "curve-to",
+        control1: { ...segment.control1 },
+        control2: { ...segment.control2 },
+        to: { ...segment.to },
+      };
+    case "close-path":
+      return {
+        kind: "close-path",
+      };
+    case "rectangle":
+      return {
+        kind: "rectangle",
+        x: segment.x,
+        y: segment.y,
+        width: segment.width,
+        height: segment.height,
+      };
+  }
+}
+
+function appendObservedPathMoveTo(
+  currentPath: PdfObservedPathState | undefined,
+  point: PdfPoint,
+  transform: PdfTransformMatrix,
+): PdfObservedPathState {
+  return appendObservedPathState(
+    currentPath,
+    {
+      kind: "move-to",
+      to: { ...point },
+    },
+    [transformPoint(transform, point)],
+    point,
+    point,
+  );
+}
+
+function appendObservedPathLineTo(
+  currentPath: PdfObservedPathState | undefined,
+  point: PdfPoint,
+  transform: PdfTransformMatrix,
+): PdfObservedPathState {
+  if (currentPath?.currentPoint === undefined) {
+    return appendObservedPathMoveTo(currentPath, point, transform);
   }
 
-  return extendObservedPathBounds(undefined, points);
+  return appendObservedPathState(
+    currentPath,
+    {
+      kind: "line-to",
+      to: { ...point },
+    },
+    [transformPoint(transform, point)],
+    point,
+    currentPath.subpathStartPoint,
+  );
+}
+
+function appendObservedPathCurveTo(
+  currentPath: PdfObservedPathState | undefined,
+  control1: PdfPoint,
+  control2: PdfPoint,
+  to: PdfPoint,
+  transform: PdfTransformMatrix,
+): PdfObservedPathState {
+  if (currentPath?.currentPoint === undefined) {
+    return appendObservedPathMoveTo(currentPath, to, transform);
+  }
+
+  return appendObservedPathState(
+    currentPath,
+    {
+      kind: "curve-to",
+      control1: { ...control1 },
+      control2: { ...control2 },
+      to: { ...to },
+    },
+    [
+      transformPoint(transform, control1),
+      transformPoint(transform, control2),
+      transformPoint(transform, to),
+    ],
+    to,
+    currentPath.subpathStartPoint,
+  );
+}
+
+function appendObservedPathShortcutCurve(
+  currentPath: PdfObservedPathState | undefined,
+  operator: "v" | "y",
+  firstPoint: PdfPoint,
+  secondPoint: PdfPoint,
+  transform: PdfTransformMatrix,
+): PdfObservedPathState {
+  const currentPoint = currentPath?.currentPoint;
+  if (currentPoint === undefined) {
+    return appendObservedPathMoveTo(currentPath, secondPoint, transform);
+  }
+
+  return operator === "v"
+    ? appendObservedPathCurveTo(currentPath, currentPoint, firstPoint, secondPoint, transform)
+    : appendObservedPathCurveTo(currentPath, firstPoint, secondPoint, secondPoint, transform);
+}
+
+function appendObservedPathRectangle(
+  currentPath: PdfObservedPathState | undefined,
+  rectangle: { readonly x: number; readonly y: number; readonly width: number; readonly height: number },
+  transform: PdfTransformMatrix,
+): PdfObservedPathState {
+  const rectangleOrigin = { x: rectangle.x, y: rectangle.y };
+  return appendObservedPathState(
+    currentPath,
+    {
+      kind: "rectangle",
+      x: rectangle.x,
+      y: rectangle.y,
+      width: rectangle.width,
+      height: rectangle.height,
+    },
+    rectangleToPoints(rectangle).map((point) => transformPoint(transform, point)),
+    rectangleOrigin,
+    rectangleOrigin,
+  );
+}
+
+function closeObservedPath(currentPath: PdfObservedPathState): PdfObservedPathState {
+  const subpathStartPoint = currentPath.subpathStartPoint;
+  if (subpathStartPoint === undefined) {
+    return currentPath;
+  }
+
+  const lastSegment = currentPath.segments.at(-1);
+  if (lastSegment?.kind === "close-path" || lastSegment?.kind === "rectangle") {
+    return {
+      ...currentPath,
+      currentPoint: { ...subpathStartPoint },
+    };
+  }
+
+  return appendObservedPathState(
+    currentPath,
+    { kind: "close-path" },
+    [],
+    subpathStartPoint,
+    subpathStartPoint,
+  );
+}
+
+function appendObservedPathState(
+  currentPath: PdfObservedPathState | undefined,
+  segment: PdfObservedPathSegment,
+  transformedPoints: readonly PdfPoint[],
+  currentPoint: PdfPoint | undefined,
+  subpathStartPoint: PdfPoint | undefined,
+): PdfObservedPathState {
+  const bounds = transformedPoints.length > 0
+    ? extendObservedPathBounds(currentPath?.bounds, transformedPoints)
+    : currentPath?.bounds;
+
+  if (bounds === undefined) {
+    return {
+      bounds: {
+        minX: 0,
+        minY: 0,
+        maxX: 0,
+        maxY: 0,
+      },
+      segments: [...(currentPath?.segments ?? []), cloneObservedPathSegment(segment)],
+      ...(currentPoint !== undefined ? { currentPoint: { ...currentPoint } } : {}),
+      ...(subpathStartPoint !== undefined ? { subpathStartPoint: { ...subpathStartPoint } } : {}),
+    };
+  }
+
+  return {
+    bounds,
+    segments: [...(currentPath?.segments ?? []), cloneObservedPathSegment(segment)],
+    ...(currentPoint !== undefined ? { currentPoint: { ...currentPoint } } : {}),
+    ...(subpathStartPoint !== undefined ? { subpathStartPoint: { ...subpathStartPoint } } : {}),
+  };
+}
+
+function buildPaintedPathSegments(
+  currentPath: PdfObservedPathState,
+  paintOperator: PdfObservedPathMark["paintOperator"],
+): readonly PdfObservedPathSegment[] {
+  const segments = currentPath.segments.map(cloneObservedPathSegment);
+  if (!implicitlyClosesObservedPath(paintOperator)) {
+    return segments;
+  }
+
+  const lastSegment = segments.at(-1);
+  if (lastSegment?.kind === "close-path" || lastSegment?.kind === "rectangle" || currentPath.subpathStartPoint === undefined) {
+    return segments;
+  }
+
+  return [...segments, { kind: "close-path" }];
+}
+
+function implicitlyClosesObservedPath(
+  paintOperator: PdfObservedPathMark["paintOperator"],
+): boolean {
+  return paintOperator === "s" || paintOperator === "b" || paintOperator === "b*";
+}
+
+function countObservedPathPoints(segments: readonly PdfObservedPathSegment[]): number {
+  return segments.reduce((count, segment) => {
+    switch (segment.kind) {
+      case "move-to":
+      case "line-to":
+        return count + 1;
+      case "curve-to":
+        return count + 3;
+      case "rectangle":
+        return count + 4;
+      case "close-path":
+        return count;
+    }
+  }, 0);
+}
+
+function isObservedPathClosed(segments: readonly PdfObservedPathSegment[]): boolean {
+  return segments.some((segment) => segment.kind === "close-path" || segment.kind === "rectangle");
 }
 
 function extendObservedPathBounds(
@@ -1964,8 +2216,6 @@ function extendObservedPathBounds(
     minY,
     maxX,
     maxY,
-    pointCount: (currentBounds?.pointCount ?? 0) + points.length,
-    closed: currentBounds?.closed ?? false,
   };
 }
 
@@ -1992,12 +2242,14 @@ function resolveXObjectBoundingBox(
     return undefined;
   }
 
-  return toObservedBoundingBox(createObservedPathBounds([
-    transformPoint(transform, { x: 0, y: 0 }),
-    transformPoint(transform, { x: width, y: 0 }),
-    transformPoint(transform, { x: 0, y: height }),
-    transformPoint(transform, { x: width, y: height }),
-  ]));
+  return toObservedBoundingBox(
+    extendObservedPathBounds(undefined, [
+      transformPoint(transform, { x: 0, y: 0 }),
+      transformPoint(transform, { x: width, y: 0 }),
+      transformPoint(transform, { x: 0, y: height }),
+      transformPoint(transform, { x: width, y: height }),
+    ]),
+  );
 }
 
 function observeParsedTextRun(

@@ -123,6 +123,17 @@ test("public observation and render contracts expose path paint state", async ()
     blendMode: "multiply",
     softMask: "present",
   });
+  assert.deepEqual(pathMark.segments, [
+    {
+      kind: "move-to",
+      to: { x: 0, y: 0 },
+    },
+    {
+      kind: "line-to",
+      to: { x: 10, y: 10 },
+    },
+  ]);
   assert.deepEqual(pathCommand.colorState, pathMark.colorState);
   assert.deepEqual(pathCommand.transparencyState, pathMark.transparencyState);
+  assert.deepEqual(pathCommand.segments, pathMark.segments);
 });
