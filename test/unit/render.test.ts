@@ -42,8 +42,53 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
                 phase: 2,
               },
             },
+            colorState: {
+              strokeColorSpace: {
+                kind: "device-rgb",
+              },
+              fillColorSpace: {
+                kind: "device-rgb",
+              },
+              strokeColor: {
+                colorSpace: {
+                  kind: "device-rgb",
+                },
+                components: [0.1, 0.2, 0.3],
+              },
+              fillColor: {
+                colorSpace: {
+                  kind: "device-rgb",
+                },
+                components: [0.4, 0.5, 0.6],
+              },
+            },
+            transparencyState: {
+              strokeAlpha: 0.5,
+              fillAlpha: 0.25,
+              blendMode: "multiply",
+              softMask: "present",
+            },
             pointCount: 2,
             closed: false,
+          },
+          {
+            id: "xobject-1",
+            kind: "xobject",
+            pageNumber: 1,
+            contentOrder: 2,
+            resourceName: "Fx1",
+            xObjectRef: {
+              objectNumber: 12,
+              generationNumber: 0,
+            },
+            subtypeName: "/Form",
+            transparencyGroup: {
+              isolated: true,
+              knockout: false,
+              colorSpace: {
+                kind: "device-rgb",
+              },
+            },
           },
         ],
       },
@@ -53,9 +98,10 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
   assert.equal(renderDocument.kind, "pdf-render");
   assert.equal(renderDocument.strategy, "observed-display-list");
   assert.equal(renderDocument.pages.length, 1);
-  assert.equal(renderDocument.pages[0]?.displayList.commands.length, 2);
+  assert.equal(renderDocument.pages[0]?.displayList.commands.length, 3);
   assert.equal(renderDocument.pages[0]?.displayList.commands[0]?.kind, "text");
   assert.equal(renderDocument.pages[0]?.displayList.commands[1]?.kind, "path");
+  assert.equal(renderDocument.pages[0]?.displayList.commands[2]?.kind, "xobject");
   assert.deepEqual(
     renderDocument.pages[0]?.displayList.commands[1]?.kind === "path"
       ? renderDocument.pages[0].displayList.commands[1].paintState
@@ -68,6 +114,54 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
       dashPattern: {
         segments: [3, 1],
         phase: 2,
+      },
+    },
+  );
+  assert.deepEqual(
+    renderDocument.pages[0]?.displayList.commands[1]?.kind === "path"
+      ? renderDocument.pages[0].displayList.commands[1].colorState
+      : undefined,
+    {
+      strokeColorSpace: {
+        kind: "device-rgb",
+      },
+      fillColorSpace: {
+        kind: "device-rgb",
+      },
+      strokeColor: {
+        colorSpace: {
+          kind: "device-rgb",
+        },
+        components: [0.1, 0.2, 0.3],
+      },
+      fillColor: {
+        colorSpace: {
+          kind: "device-rgb",
+        },
+        components: [0.4, 0.5, 0.6],
+      },
+    },
+  );
+  assert.deepEqual(
+    renderDocument.pages[0]?.displayList.commands[1]?.kind === "path"
+      ? renderDocument.pages[0].displayList.commands[1].transparencyState
+      : undefined,
+    {
+      strokeAlpha: 0.5,
+      fillAlpha: 0.25,
+      blendMode: "multiply",
+      softMask: "present",
+    },
+  );
+  assert.deepEqual(
+    renderDocument.pages[0]?.displayList.commands[2]?.kind === "xobject"
+      ? renderDocument.pages[0].displayList.commands[2].transparencyGroup
+      : undefined,
+    {
+      isolated: true,
+      knockout: false,
+      colorSpace: {
+        kind: "device-rgb",
       },
     },
   );

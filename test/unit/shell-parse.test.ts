@@ -21,6 +21,16 @@ test("parseDictionaryEntries keeps nested dictionaries and arrays intact", () =>
   assert.equal(entries.get("Resources"), "<< /Font << /F1 3 0 R >> >>");
 });
 
+test("parseDictionaryEntries preserves decimal numeric values", () => {
+  const entries = parseDictionaryEntries(
+    "<< /Type /ExtGState /CA 0.5 /ca 0.25 /BM /Multiply >>",
+  );
+
+  assert.equal(entries.get("CA"), "0.5");
+  assert.equal(entries.get("ca"), "0.25");
+  assert.equal(entries.get("BM"), "/Multiply");
+});
+
 test("readObjectRefValue and readObjectRefsValue recover direct and array references", () => {
   assert.deepEqual(readObjectRefValue("12 0 R"), {
     objectNumber: 12,

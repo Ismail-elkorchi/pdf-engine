@@ -28,6 +28,10 @@ import { parseTrueTypeGlyphUnicodeMap } from "../truetype-cmap.ts";
 
 import type {
   PdfDiagnostic,
+  PdfObservedBlendMode,
+  PdfObservedColor,
+  PdfObservedColorSpace,
+  PdfObservedColorState,
   PdfObservedDashPattern,
   PdfFeatureFinding,
   PdfObservedLineCapStyle,
@@ -40,6 +44,9 @@ import type {
   PdfObservedPaintState,
   PdfObservedPage,
   PdfObservedPathMark,
+  PdfObservedSoftMaskState,
+  PdfObservedTransparencyGroup,
+  PdfObservedTransparencyState,
   PdfObservedTextRun,
   PdfObservedTextMark,
   PdfTextEncodingKind,
@@ -68,6 +75,17 @@ interface PdfXObjectBinding {
   readonly subtypeName?: string;
   readonly width?: number;
   readonly height?: number;
+  readonly transparencyGroup?: PdfObservedTransparencyGroup;
+}
+
+interface PdfColorSpaceBinding {
+  readonly rawValue: string;
+  readonly objectRef?: PdfObjectRef;
+}
+
+interface PdfGraphicsStateBinding {
+  readonly rawValue: string;
+  readonly objectRef?: PdfObjectRef;
 }
 
 interface PdfPropertyBinding {
@@ -86,6 +104,8 @@ interface PdfObservedPathBounds {
 interface PdfObservedGraphicsState {
   readonly transform: PdfTransformMatrix;
   readonly paintState: PdfObservedPaintState;
+  readonly colorState: PdfObservedColorState;
+  readonly transparencyState: PdfObservedTransparencyState;
   readonly currentPath: PdfObservedPathBounds | undefined;
   readonly pendingClipOperator: "W" | "W*" | undefined;
   readonly pendingClipBounds: PdfObservedPathBounds | undefined;
@@ -137,12 +157,33 @@ const DEFAULT_DASH_PATTERN: PdfObservedDashPattern = {
   segments: [],
   phase: 0,
 };
+const DEFAULT_DEVICE_GRAY_COLOR_SPACE: PdfObservedColorSpace = {
+  kind: "device-gray",
+};
 const DEFAULT_PAINT_STATE: PdfObservedPaintState = {
   lineWidth: 1,
   lineCapStyle: "butt",
   lineJoinStyle: "miter",
   miterLimit: 10,
   dashPattern: DEFAULT_DASH_PATTERN,
+};
+const DEFAULT_COLOR_STATE: PdfObservedColorState = {
+  strokeColorSpace: DEFAULT_DEVICE_GRAY_COLOR_SPACE,
+  fillColorSpace: DEFAULT_DEVICE_GRAY_COLOR_SPACE,
+  strokeColor: {
+    colorSpace: DEFAULT_DEVICE_GRAY_COLOR_SPACE,
+    components: [0],
+  },
+  fillColor: {
+    colorSpace: DEFAULT_DEVICE_GRAY_COLOR_SPACE,
+    components: [0],
+  },
+};
+const DEFAULT_TRANSPARENCY_STATE: PdfObservedTransparencyState = {
+  strokeAlpha: 1,
+  fillAlpha: 1,
+  blendMode: "normal",
+  softMask: "none",
 };
 
 export interface PdfObservationInspection {
@@ -190,6 +231,8 @@ export function buildObservedPages(
       pageNumber: 1,
       contentStreamRefs: fallbackStreamRefs,
       fontBindings: [],
+      colorSpaceBindings: [],
+      graphicsStateBindings: [],
       propertyBindings: [],
       xObjectBindings: [],
     },
@@ -209,6 +252,16 @@ function buildObservedPage(
     readonly pageRef?: PdfObjectRef;
     readonly contentStreamRefs: readonly PdfObjectRef[];
     readonly fontBindings: readonly { readonly resourceName: string; readonly fontRef: PdfObjectRef }[];
+    readonly colorSpaceBindings: readonly {
+      readonly resourceName: string;
+      readonly rawValue: string;
+      readonly objectRef?: PdfObjectRef;
+    }[];
+    readonly graphicsStateBindings: readonly {
+      readonly resourceName: string;
+      readonly rawValue: string;
+      readonly objectRef?: PdfObjectRef;
+    }[];
     readonly propertyBindings: readonly { readonly resourceName: string; readonly objectRef: PdfObjectRef }[];
     readonly xObjectBindings: readonly {
       readonly resourceName: string;
@@ -216,6 +269,11 @@ function buildObservedPage(
       readonly subtypeName?: string;
       readonly width?: number;
       readonly height?: number;
+      readonly transparencyGroup?: {
+        readonly isolated: boolean;
+        readonly knockout: boolean;
+        readonly colorSpaceValue?: string;
+      };
     }[];
   },
   inspection: PdfObservationInspection,
@@ -233,6 +291,14 @@ function buildObservedPage(
   let hasSevereFontMappingGap = false;
   let hasSevereLiteralFontEncodingGap = false;
   const fontRefByResourceName = new Map(pageEntry.fontBindings.map((binding) => [binding.resourceName, binding.fontRef] as const));
+  const colorSpaceBindingByResourceName = new Map(pageEntry.colorSpaceBindings.map((binding) => [binding.resourceName, {
+    rawValue: binding.rawValue,
+    ...(binding.objectRef !== undefined ? { objectRef: binding.objectRef } : {}),
+  }] as const));
+  const graphicsStateBindingByResourceName = new Map(pageEntry.graphicsStateBindings.map((binding) => [binding.resourceName, {
+    rawValue: binding.rawValue,
+    ...(binding.objectRef !== undefined ? { objectRef: binding.objectRef } : {}),
+  }] as const));
   const propertyBindingByResourceName = new Map(pageEntry.propertyBindings.map((binding) => [binding.resourceName, {
     objectRef: binding.objectRef,
   }] as const));
@@ -241,6 +307,9 @@ function buildObservedPage(
     ...(binding.subtypeName !== undefined ? { subtypeName: binding.subtypeName } : {}),
     ...(binding.width !== undefined ? { width: binding.width } : {}),
     ...(binding.height !== undefined ? { height: binding.height } : {}),
+    ...(binding.transparencyGroup !== undefined
+      ? { transparencyGroup: resolveObservedTransparencyGroup(binding.transparencyGroup, inspection.analysis.objectIndex) }
+      : {}),
   }] as const));
   const optionalContentVisibilityConfig = resolveOptionalContentVisibilityConfig(inspection);
   const hasDuplicateTextLayerFeature = hasDetectedFeatureFinding(inspection.featureFindings, "duplicate-text-layer");
@@ -258,6 +327,8 @@ function buildObservedPage(
       contentStream.streamText,
       pageNumber,
       contentStreamRef,
+      colorSpaceBindingByResourceName,
+      graphicsStateBindingByResourceName,
       propertyBindingByResourceName,
       optionalContentVisibilityConfig,
       inspection.analysis.objectIndex,
@@ -404,6 +475,8 @@ function observeContentStreamMarks(
   contentStreamText: string,
   pageNumber: number,
   contentStreamRef: PdfObjectRef,
+  colorSpaceBindingByResourceName: ReadonlyMap<string, PdfColorSpaceBinding>,
+  graphicsStateBindingByResourceName: ReadonlyMap<string, PdfGraphicsStateBinding>,
   propertyBindingByResourceName: ReadonlyMap<string, PdfPropertyBinding>,
   optionalContentVisibilityConfig: PdfOptionalContentVisibilityConfig | undefined,
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
@@ -418,6 +491,8 @@ function observeContentStreamMarks(
   let graphicsState: PdfObservedGraphicsState = {
     transform: IDENTITY_TRANSFORM,
     paintState: cloneObservedPaintState(DEFAULT_PAINT_STATE),
+    colorState: cloneObservedColorState(DEFAULT_COLOR_STATE),
+    transparencyState: cloneObservedTransparencyState(DEFAULT_TRANSPARENCY_STATE),
     currentPath: undefined,
     pendingClipOperator: undefined,
     pendingClipBounds: undefined,
@@ -504,6 +579,8 @@ function observeContentStreamMarks(
       graphicsState = graphicsStateStack.pop() ?? {
         transform: IDENTITY_TRANSFORM,
         paintState: cloneObservedPaintState(DEFAULT_PAINT_STATE),
+        colorState: cloneObservedColorState(DEFAULT_COLOR_STATE),
+        transparencyState: cloneObservedTransparencyState(DEFAULT_TRANSPARENCY_STATE),
         currentPath: undefined,
         pendingClipOperator: undefined,
         pendingClipBounds: undefined,
@@ -587,6 +664,107 @@ function observeContentStreamMarks(
             ...graphicsState.paintState,
             dashPattern,
           },
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "CS" || operator.operator === "cs") {
+      const colorSpaceName = readTrailingNameOperand(operator);
+      if (colorSpaceName !== undefined) {
+        const colorSpace = resolveObservedColorSpaceByName(
+          colorSpaceName,
+          colorSpaceBindingByResourceName,
+          objectIndex,
+        );
+        graphicsState = {
+          ...graphicsState,
+          colorState: applyObservedColorSpace(
+            graphicsState.colorState,
+            operator.operator === "CS" ? "stroke" : "fill",
+            colorSpace,
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "SC" || operator.operator === "SCN" || operator.operator === "sc" || operator.operator === "scn") {
+      const isStroke = operator.operator === "SC" || operator.operator === "SCN";
+      const color = readObservedColor(
+        operator,
+        isStroke ? graphicsState.colorState.strokeColorSpace : graphicsState.colorState.fillColorSpace,
+        operator.operator === "SCN" || operator.operator === "scn",
+      );
+      if (color !== undefined) {
+        graphicsState = {
+          ...graphicsState,
+          colorState: applyObservedColor(graphicsState.colorState, isStroke ? "stroke" : "fill", color),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "G" || operator.operator === "g") {
+      const color = readObservedDeviceColor(operator, { kind: "device-gray" });
+      if (color !== undefined) {
+        graphicsState = {
+          ...graphicsState,
+          colorState: applyObservedColorWithSpace(
+            graphicsState.colorState,
+            operator.operator === "G" ? "stroke" : "fill",
+            color.colorSpace,
+            color,
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "RG" || operator.operator === "rg") {
+      const color = readObservedDeviceColor(operator, { kind: "device-rgb" });
+      if (color !== undefined) {
+        graphicsState = {
+          ...graphicsState,
+          colorState: applyObservedColorWithSpace(
+            graphicsState.colorState,
+            operator.operator === "RG" ? "stroke" : "fill",
+            color.colorSpace,
+            color,
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "K" || operator.operator === "k") {
+      const color = readObservedDeviceColor(operator, { kind: "device-cmyk" });
+      if (color !== undefined) {
+        graphicsState = {
+          ...graphicsState,
+          colorState: applyObservedColorWithSpace(
+            graphicsState.colorState,
+            operator.operator === "K" ? "stroke" : "fill",
+            color.colorSpace,
+            color,
+          ),
+        };
+      }
+      continue;
+    }
+
+    if (operator.operator === "gs") {
+      const graphicsStateName = readTrailingNameOperand(operator);
+      if (graphicsStateName !== undefined) {
+        const transparencyState = resolveObservedTransparencyState(
+          graphicsStateName,
+          graphicsStateBindingByResourceName,
+          objectIndex,
+          graphicsState.transparencyState,
+        );
+        graphicsState = {
+          ...graphicsState,
+          transparencyState,
         };
       }
       continue;
@@ -700,6 +878,8 @@ function observeContentStreamMarks(
           objectRef: contentStreamRef,
           paintOperator: operator.operator as PdfObservedPathMark["paintOperator"],
           paintState: cloneObservedPaintState(graphicsState.paintState),
+          colorState: cloneObservedColorState(graphicsState.colorState),
+          transparencyState: cloneObservedTransparencyState(graphicsState.transparencyState),
           pointCount: currentPath.pointCount,
           closed: currentPath.closed || operator.operator === "s" || operator.operator === "b" || operator.operator === "b*",
           ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
@@ -778,6 +958,7 @@ function observeContentStreamMarks(
         ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
         ...(xObjectBinding?.objectRef !== undefined ? { xObjectRef: xObjectBinding.objectRef } : {}),
         ...(xObjectBinding?.subtypeName !== undefined ? { subtypeName: xObjectBinding.subtypeName } : {}),
+        ...(xObjectBinding?.transparencyGroup !== undefined ? { transparencyGroup: xObjectBinding.transparencyGroup } : {}),
         ...(xObjectBoundingBox !== undefined ? { bbox: xObjectBoundingBox } : {}),
         transform: graphicsState.transform,
         ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
@@ -1101,6 +1282,8 @@ function cloneGraphicsState(graphicsState: PdfObservedGraphicsState): PdfObserve
   return {
     transform: { ...graphicsState.transform },
     paintState: cloneObservedPaintState(graphicsState.paintState),
+    colorState: cloneObservedColorState(graphicsState.colorState),
+    transparencyState: cloneObservedTransparencyState(graphicsState.transparencyState),
     currentPath: graphicsState.currentPath !== undefined ? { ...graphicsState.currentPath } : undefined,
     pendingClipOperator: graphicsState.pendingClipOperator,
     pendingClipBounds: graphicsState.pendingClipBounds !== undefined ? { ...graphicsState.pendingClipBounds } : undefined,
@@ -1118,6 +1301,114 @@ function cloneObservedPaintState(paintState: PdfObservedPaintState): PdfObserved
       phase: paintState.dashPattern.phase,
     },
   };
+}
+
+function cloneObservedColorState(colorState: PdfObservedColorState): PdfObservedColorState {
+  return {
+    strokeColorSpace: cloneObservedColorSpace(colorState.strokeColorSpace),
+    fillColorSpace: cloneObservedColorSpace(colorState.fillColorSpace),
+    ...(colorState.strokeColor !== undefined ? { strokeColor: cloneObservedColor(colorState.strokeColor) } : {}),
+    ...(colorState.fillColor !== undefined ? { fillColor: cloneObservedColor(colorState.fillColor) } : {}),
+  };
+}
+
+function cloneObservedColorSpace(colorSpace: PdfObservedColorSpace): PdfObservedColorSpace {
+  return {
+    kind: colorSpace.kind,
+    ...(colorSpace.resourceName !== undefined ? { resourceName: colorSpace.resourceName } : {}),
+    ...(colorSpace.objectRef !== undefined ? { objectRef: colorSpace.objectRef } : {}),
+  };
+}
+
+function cloneObservedColor(color: PdfObservedColor): PdfObservedColor {
+  return {
+    colorSpace: cloneObservedColorSpace(color.colorSpace),
+    components: [...color.components],
+    ...(color.patternName !== undefined ? { patternName: color.patternName } : {}),
+  };
+}
+
+function cloneObservedTransparencyState(transparencyState: PdfObservedTransparencyState): PdfObservedTransparencyState {
+  return {
+    strokeAlpha: transparencyState.strokeAlpha,
+    fillAlpha: transparencyState.fillAlpha,
+    blendMode: transparencyState.blendMode,
+    softMask: transparencyState.softMask,
+  };
+}
+
+function applyObservedColorSpace(
+  colorState: PdfObservedColorState,
+  target: "stroke" | "fill",
+  colorSpace: PdfObservedColorSpace,
+): PdfObservedColorState {
+  const defaultColor = buildInitialObservedColor(colorSpace);
+  if (target === "stroke") {
+    return {
+      strokeColorSpace: colorSpace,
+      fillColorSpace: colorState.fillColorSpace,
+      ...(colorState.fillColor !== undefined ? { fillColor: colorState.fillColor } : {}),
+      ...(defaultColor !== undefined ? { strokeColor: defaultColor } : {}),
+    };
+  }
+
+  return {
+    strokeColorSpace: colorState.strokeColorSpace,
+    ...(colorState.strokeColor !== undefined ? { strokeColor: colorState.strokeColor } : {}),
+    fillColorSpace: colorSpace,
+    ...(defaultColor !== undefined ? { fillColor: defaultColor } : {}),
+  };
+}
+
+function applyObservedColor(
+  colorState: PdfObservedColorState,
+  target: "stroke" | "fill",
+  color: PdfObservedColor,
+): PdfObservedColorState {
+  return applyObservedColorWithSpace(colorState, target, color.colorSpace, color);
+}
+
+function applyObservedColorWithSpace(
+  colorState: PdfObservedColorState,
+  target: "stroke" | "fill",
+  colorSpace: PdfObservedColorSpace,
+  color: PdfObservedColor,
+): PdfObservedColorState {
+  if (target === "stroke") {
+    return {
+      ...colorState,
+      strokeColorSpace: colorSpace,
+      strokeColor: color,
+    };
+  }
+
+  return {
+    ...colorState,
+    fillColorSpace: colorSpace,
+    fillColor: color,
+  };
+}
+
+function buildInitialObservedColor(colorSpace: PdfObservedColorSpace): PdfObservedColor | undefined {
+  switch (colorSpace.kind) {
+    case "device-gray":
+      return { colorSpace, components: [0] };
+    case "device-rgb":
+      return { colorSpace, components: [0, 0, 0] };
+    case "device-cmyk":
+      return { colorSpace, components: [0, 0, 0, 1] };
+    case "cal-gray":
+    case "cal-rgb":
+    case "lab":
+    case "icc-based":
+    case "indexed":
+    case "pattern":
+    case "separation":
+    case "device-n":
+    case "unknown":
+    default:
+      return undefined;
+  }
 }
 
 function readTransformMatrixOperands(operator: ParsedContentStreamOperator): PdfTransformMatrix | undefined {
@@ -1216,6 +1507,344 @@ function readObservedDashPattern(operator: ParsedContentStreamOperator): PdfObse
     segments,
     phase: dashPhase,
   };
+}
+
+function readObservedDeviceColor(
+  operator: ParsedContentStreamOperator,
+  colorSpace: PdfObservedColorSpace,
+): PdfObservedColor | undefined {
+  const componentCount = componentCountForObservedColorSpace(colorSpace);
+  if (componentCount === undefined) {
+    return undefined;
+  }
+
+  const components = readTrailingNumericOperandsFromOperator(operator, componentCount);
+  if (components === undefined) {
+    return undefined;
+  }
+
+  return {
+    colorSpace,
+    components,
+  };
+}
+
+function readObservedColor(
+  operator: ParsedContentStreamOperator,
+  colorSpace: PdfObservedColorSpace,
+  allowPatternName: boolean,
+): PdfObservedColor | undefined {
+  const numericOperands = readNumericOperandsFromOperator(operator);
+  const componentCount = componentCountForObservedColorSpace(colorSpace);
+  const components = componentCount === undefined
+    ? numericOperands
+    : numericOperands.length >= componentCount
+      ? numericOperands.slice(-componentCount)
+      : undefined;
+  const patternName = allowPatternName ? readTrailingNameOperand(operator) : undefined;
+
+  if (components === undefined && patternName === undefined) {
+    return undefined;
+  }
+
+  return {
+    colorSpace,
+    components: components ?? [],
+    ...(patternName !== undefined ? { patternName } : {}),
+  };
+}
+
+function componentCountForObservedColorSpace(colorSpace: PdfObservedColorSpace): number | undefined {
+  switch (colorSpace.kind) {
+    case "device-gray":
+    case "cal-gray":
+      return 1;
+    case "device-rgb":
+    case "cal-rgb":
+    case "lab":
+      return 3;
+    case "device-cmyk":
+      return 4;
+    case "icc-based":
+    case "indexed":
+    case "pattern":
+    case "separation":
+    case "device-n":
+    case "unknown":
+    default:
+      return undefined;
+  }
+}
+
+function resolveObservedColorSpaceByName(
+  resourceOrBuiltInName: string,
+  colorSpaceBindingByResourceName: ReadonlyMap<string, PdfColorSpaceBinding>,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): PdfObservedColorSpace {
+  const builtInColorSpace = normalizeObservedColorSpaceName(resourceOrBuiltInName);
+  if (builtInColorSpace !== "unknown") {
+    return {
+      kind: builtInColorSpace,
+    };
+  }
+
+  const binding = colorSpaceBindingByResourceName.get(resourceOrBuiltInName);
+  if (binding === undefined) {
+    return {
+      kind: "unknown",
+      resourceName: resourceOrBuiltInName,
+    };
+  }
+
+  return resolveObservedColorSpaceValue(
+    binding.rawValue,
+    objectIndex,
+    resourceOrBuiltInName,
+    binding.objectRef,
+  );
+}
+
+function resolveObservedColorSpaceValue(
+  rawValue: string | undefined,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+  resourceName?: string,
+  objectRef?: PdfObjectRef,
+  depth = 0,
+): PdfObservedColorSpace {
+  if (rawValue === undefined || depth > 4) {
+    return {
+      kind: "unknown",
+      ...(resourceName !== undefined ? { resourceName } : {}),
+      ...(objectRef !== undefined ? { objectRef } : {}),
+    };
+  }
+
+  const trimmedValue = rawValue.trim();
+  if (trimmedValue.startsWith("/")) {
+    const kind = normalizeObservedColorSpaceName(trimmedValue.slice(1));
+    return {
+      kind,
+      ...toObservedColorSpaceSourceFields(kind, resourceName, objectRef),
+    };
+  }
+
+  if (trimmedValue.startsWith("[")) {
+    const familyMatch = trimmedValue.match(/^\[\s*\/([A-Za-z0-9_.-]+)/u);
+    const kind = normalizeObservedColorSpaceName(familyMatch?.[1]);
+    return {
+      kind,
+      ...toObservedColorSpaceSourceFields(kind, resourceName, objectRef),
+    };
+  }
+
+  const nestedObjectRef = readObjectRefValue(trimmedValue) ?? objectRef;
+  if (nestedObjectRef !== undefined) {
+    const nestedObject = objectIndex.get(keyOfObjectRef(nestedObjectRef));
+    if (nestedObject?.objectValueText !== undefined) {
+      return resolveObservedColorSpaceValue(
+        nestedObject.objectValueText,
+        objectIndex,
+        resourceName,
+        nestedObjectRef,
+        depth + 1,
+      );
+    }
+  }
+
+  return {
+    kind: "unknown",
+    ...(resourceName !== undefined ? { resourceName } : {}),
+    ...(objectRef !== undefined ? { objectRef } : {}),
+  };
+}
+
+function toObservedColorSpaceSourceFields(
+  kind: PdfObservedColorSpace["kind"],
+  resourceName: string | undefined,
+  objectRef: PdfObjectRef | undefined,
+): Partial<Pick<PdfObservedColorSpace, "resourceName" | "objectRef">> {
+  const shouldKeepSource = kind === "unknown" || kind === "icc-based" || kind === "indexed" || kind === "pattern" || kind === "separation" || kind === "device-n";
+
+  return shouldKeepSource
+    ? {
+      ...(resourceName !== undefined ? { resourceName } : {}),
+      ...(objectRef !== undefined ? { objectRef } : {}),
+    }
+    : {};
+}
+
+function normalizeObservedColorSpaceName(name: string | undefined): PdfObservedColorSpace["kind"] {
+  switch (name) {
+    case undefined:
+      return "unknown";
+    case "DeviceGray":
+      return "device-gray";
+    case "DeviceRGB":
+      return "device-rgb";
+    case "DeviceCMYK":
+      return "device-cmyk";
+    case "CalGray":
+      return "cal-gray";
+    case "CalRGB":
+      return "cal-rgb";
+    case "Lab":
+      return "lab";
+    case "ICCBased":
+      return "icc-based";
+    case "Indexed":
+      return "indexed";
+    case "Pattern":
+      return "pattern";
+    case "Separation":
+      return "separation";
+    case "DeviceN":
+      return "device-n";
+    default:
+      return "unknown";
+  }
+}
+
+function resolveObservedTransparencyState(
+  graphicsStateName: string,
+  graphicsStateBindingByResourceName: ReadonlyMap<string, PdfGraphicsStateBinding>,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+  currentState: PdfObservedTransparencyState,
+): PdfObservedTransparencyState {
+  const binding = graphicsStateBindingByResourceName.get(graphicsStateName);
+  if (binding === undefined) {
+    return currentState;
+  }
+
+  const graphicsStateDictionary = resolveNestedDictionaryText(binding.rawValue, objectIndex);
+  if (graphicsStateDictionary === undefined) {
+    return currentState;
+  }
+
+  const entries = parseDictionaryEntries(graphicsStateDictionary);
+  const strokeAlpha = readObservedNumericTokenValue(entries.get("CA")) ?? currentState.strokeAlpha;
+  const fillAlpha = readObservedNumericTokenValue(entries.get("ca")) ?? currentState.fillAlpha;
+  const blendMode = resolveObservedBlendMode(entries.get("BM")) ?? currentState.blendMode;
+  const softMask = resolveObservedSoftMaskState(entries.get("SMask")) ?? currentState.softMask;
+
+  return {
+    strokeAlpha,
+    fillAlpha,
+    blendMode,
+    softMask,
+  };
+}
+
+function resolveObservedBlendMode(value: string | undefined): PdfObservedBlendMode | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  const name = trimmedValue.startsWith("/")
+    ? trimmedValue.slice(1)
+    : trimmedValue.startsWith("[")
+      ? trimmedValue.match(/\/([A-Za-z0-9_.-]+)/u)?.[1]
+      : undefined;
+  if (name === undefined) {
+    return "unknown";
+  }
+
+  switch (name) {
+    case "Normal":
+      return "normal";
+    case "Multiply":
+      return "multiply";
+    case "Screen":
+      return "screen";
+    case "Overlay":
+      return "overlay";
+    case "Darken":
+      return "darken";
+    case "Lighten":
+      return "lighten";
+    case "ColorDodge":
+      return "color-dodge";
+    case "ColorBurn":
+      return "color-burn";
+    case "HardLight":
+      return "hard-light";
+    case "SoftLight":
+      return "soft-light";
+    case "Difference":
+      return "difference";
+    case "Exclusion":
+      return "exclusion";
+    case "Hue":
+      return "hue";
+    case "Saturation":
+      return "saturation";
+    case "Color":
+      return "color";
+    case "Luminosity":
+      return "luminosity";
+    case "Compatible":
+      return "compatible";
+    default:
+      return "unknown";
+  }
+}
+
+function resolveObservedSoftMaskState(value: string | undefined): PdfObservedSoftMaskState | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+
+  const trimmedValue = value.trim();
+  if (trimmedValue === "/None") {
+    return "none";
+  }
+  if (trimmedValue.length === 0) {
+    return undefined;
+  }
+
+  return trimmedValue.startsWith("/") ? "unknown" : "present";
+}
+
+function resolveObservedTransparencyGroup(
+  transparencyGroup: {
+    readonly isolated: boolean;
+    readonly knockout: boolean;
+    readonly colorSpaceValue?: string;
+  },
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): PdfObservedTransparencyGroup {
+  return {
+    isolated: transparencyGroup.isolated,
+    knockout: transparencyGroup.knockout,
+    ...(transparencyGroup.colorSpaceValue !== undefined
+      ? { colorSpace: resolveObservedColorSpaceValue(transparencyGroup.colorSpaceValue, objectIndex) }
+      : {}),
+  };
+}
+
+function readNumericOperandsFromOperator(operator: ParsedContentStreamOperator): readonly number[] {
+  const numericValues: number[] = [];
+
+  for (const operand of operator.operands) {
+    if (operand.kind !== "other") {
+      continue;
+    }
+    const value = Number(operand.token);
+    if (Number.isFinite(value)) {
+      numericValues.push(value);
+    }
+  }
+
+  return numericValues;
+}
+
+function readObservedNumericTokenValue(token: string | undefined): number | undefined {
+  if (token === undefined) {
+    return undefined;
+  }
+
+  const value = Number(token.trim());
+  return Number.isFinite(value) ? value : undefined;
 }
 
 function readTrailingNumericOperandsFromOperator(

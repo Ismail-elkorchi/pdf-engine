@@ -856,6 +856,115 @@ export interface PdfObservedPaintState {
 }
 
 /**
+ * Normalized color-space families that the current observation stage can expose.
+ */
+export type PdfObservedColorSpaceKind =
+  | "device-gray"
+  | "device-rgb"
+  | "device-cmyk"
+  | "cal-gray"
+  | "cal-rgb"
+  | "lab"
+  | "icc-based"
+  | "indexed"
+  | "pattern"
+  | "separation"
+  | "device-n"
+  | "unknown";
+
+/**
+ * Normalized color-space evidence active for one observed drawing operation.
+ */
+export interface PdfObservedColorSpace {
+  /** Normalized color-space family. */
+  readonly kind: PdfObservedColorSpaceKind;
+  /** Resource name when this color space came from page resources. */
+  readonly resourceName?: string;
+  /** Indirect object reference for the color-space definition when known. */
+  readonly objectRef?: PdfObjectRef;
+}
+
+/**
+ * Normalized fill or stroke color active for one observed drawing operation.
+ */
+export interface PdfObservedColor {
+  /** Active color-space evidence for this color value. */
+  readonly colorSpace: PdfObservedColorSpace;
+  /** Numeric components in PDF operand order. */
+  readonly components: readonly number[];
+  /** Pattern resource name when a pattern color was explicitly selected. */
+  readonly patternName?: string;
+}
+
+/**
+ * Normalized stroke and fill color facts active for one observed path.
+ */
+export interface PdfObservedColorState {
+  /** Active stroke color space. */
+  readonly strokeColorSpace: PdfObservedColorSpace;
+  /** Active fill color space. */
+  readonly fillColorSpace: PdfObservedColorSpace;
+  /** Active stroke color when the current implementation can recover one. */
+  readonly strokeColor?: PdfObservedColor;
+  /** Active fill color when the current implementation can recover one. */
+  readonly fillColor?: PdfObservedColor;
+}
+
+/**
+ * Normalized blend-mode families that the current observation stage can expose.
+ */
+export type PdfObservedBlendMode =
+  | "normal"
+  | "multiply"
+  | "screen"
+  | "overlay"
+  | "darken"
+  | "lighten"
+  | "color-dodge"
+  | "color-burn"
+  | "hard-light"
+  | "soft-light"
+  | "difference"
+  | "exclusion"
+  | "hue"
+  | "saturation"
+  | "color"
+  | "luminosity"
+  | "compatible"
+  | "unknown";
+
+/**
+ * Normalized soft-mask state active for one observed drawing operation.
+ */
+export type PdfObservedSoftMaskState = "none" | "present" | "unknown";
+
+/**
+ * Normalized transparency facts active for one observed drawing operation.
+ */
+export interface PdfObservedTransparencyState {
+  /** Active stroke alpha constant. */
+  readonly strokeAlpha: number;
+  /** Active fill alpha constant. */
+  readonly fillAlpha: number;
+  /** Active blend mode. */
+  readonly blendMode: PdfObservedBlendMode;
+  /** Active soft-mask state. */
+  readonly softMask: PdfObservedSoftMaskState;
+}
+
+/**
+ * Transparency-group evidence recovered from a form XObject when known.
+ */
+export interface PdfObservedTransparencyGroup {
+  /** Whether the transparency group is isolated. */
+  readonly isolated: boolean;
+  /** Whether the transparency group is knockout. */
+  readonly knockout: boolean;
+  /** Group color space when the current implementation can recover it. */
+  readonly colorSpace?: PdfObservedColorSpace;
+}
+
+/**
  * Base fields shared by every observed page mark.
  */
 export interface PdfObservedMarkBase {
@@ -927,6 +1036,10 @@ export interface PdfObservedPathMark extends PdfObservedMarkBase {
   readonly paintOperator: PdfObservedPathPaintOperator;
   /** Normalized paint-state facts active when this path was painted. */
   readonly paintState: PdfObservedPaintState;
+  /** Normalized fill and stroke color facts active when this path was painted. */
+  readonly colorState: PdfObservedColorState;
+  /** Normalized transparency facts active when this path was painted. */
+  readonly transparencyState: PdfObservedTransparencyState;
   /** Number of path points considered when recovering the bounding box. */
   readonly pointCount: number;
   /** Whether the recovered path was explicitly closed. */
@@ -945,6 +1058,8 @@ export interface PdfObservedXObjectMark extends PdfObservedMarkBase {
   readonly xObjectRef?: PdfObjectRef;
   /** XObject subtype name when the current implementation can recover it. */
   readonly subtypeName?: string;
+  /** Transparency-group evidence when the XObject declares one. */
+  readonly transparencyGroup?: PdfObservedTransparencyGroup;
 }
 
 /**
@@ -1312,6 +1427,10 @@ export interface PdfDisplayPathCommand extends PdfDisplayCommandBase {
   readonly paintOperator: PdfObservedPathPaintOperator;
   /** Normalized paint-state facts active when this path was painted. */
   readonly paintState: PdfObservedPaintState;
+  /** Normalized fill and stroke color facts active when this path was painted. */
+  readonly colorState: PdfObservedColorState;
+  /** Normalized transparency facts active when this path was painted. */
+  readonly transparencyState: PdfObservedTransparencyState;
   /** Number of points considered while recovering the path. */
   readonly pointCount: number;
   /** Whether the path was explicitly closed. */
@@ -1330,6 +1449,8 @@ export interface PdfDisplayXObjectCommand extends PdfDisplayCommandBase {
   readonly xObjectRef?: PdfObjectRef;
   /** XObject subtype when known. */
   readonly subtypeName?: string;
+  /** Transparency-group evidence when the XObject declares one. */
+  readonly transparencyGroup?: PdfObservedTransparencyGroup;
 }
 
 /**

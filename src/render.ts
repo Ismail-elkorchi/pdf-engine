@@ -96,6 +96,8 @@ function toDisplayCommand(mark: PdfObservedMark): PdfDisplayCommand {
         contentOrder: mark.contentOrder,
         paintOperator: mark.paintOperator,
         paintState: mark.paintState,
+        colorState: mark.colorState,
+        transparencyState: mark.transparencyState,
         pointCount: mark.pointCount,
         closed: mark.closed,
         ...(mark.objectRef !== undefined ? { objectRef: mark.objectRef } : {}),
@@ -132,6 +134,7 @@ function toDisplayCommand(mark: PdfObservedMark): PdfDisplayCommand {
         ...(mark.visibilityState !== undefined ? { visibilityState: mark.visibilityState } : {}),
         ...(mark.xObjectRef !== undefined ? { xObjectRef: mark.xObjectRef } : {}),
         ...(mark.subtypeName !== undefined ? { subtypeName: mark.subtypeName } : {}),
+        ...(mark.transparencyGroup !== undefined ? { transparencyGroup: mark.transparencyGroup } : {}),
       };
     case "clip":
       return {
