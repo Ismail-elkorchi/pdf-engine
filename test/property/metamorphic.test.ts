@@ -5,6 +5,7 @@ import { createPdfEngine } from "../../src/index.ts";
 import {
   appendTrailingComment,
   buildPdfWithPageContents,
+  buildPdfWithRenderImagery,
   buildPdfWithPageSpecs,
   buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
@@ -255,5 +256,48 @@ test("unused resource ordering does not change render resource payloads or rende
   });
 
   assert.deepEqual(baseResult.render.value?.resourcePayloads, reorderedResult.render.value?.resourcePayloads);
+  assert.equal(baseResult.render.value?.renderHash.hex, reorderedResult.render.value?.renderHash.hex);
+});
+
+test("resource ordering does not change page imagery or render hash", async () => {
+  const engine = createPdfEngine();
+  const baseBytes = buildPdfWithRenderImagery({
+    reorderResourceEntries: false,
+  });
+  const reorderedBytes = buildPdfWithRenderImagery({
+    reorderResourceEntries: true,
+  });
+
+  const baseResult = await engine.run({
+    source: {
+      bytes: baseBytes,
+      fileName: "render-imagery-base.pdf",
+    },
+  });
+  const reorderedResult = await engine.run({
+    source: {
+      bytes: reorderedBytes,
+      fileName: "render-imagery-reordered.pdf",
+    },
+  });
+
+  const baseImagery = baseResult.render.value?.pages[0]?.imagery;
+  const reorderedImagery = reorderedResult.render.value?.pages[0]?.imagery;
+  assert.ok(baseImagery?.svg);
+  assert.ok(baseImagery?.raster);
+  assert.ok(reorderedImagery?.svg);
+  assert.ok(reorderedImagery?.raster);
+  if (!baseImagery?.svg || !baseImagery.raster || !reorderedImagery?.svg || !reorderedImagery.raster) {
+    return;
+  }
+  assert.deepEqual(baseResult.render.value?.pages[0]?.pageBox, reorderedResult.render.value?.pages[0]?.pageBox);
+  assert.equal(
+    baseImagery.svg.markup,
+    reorderedImagery.svg.markup,
+  );
+  assert.deepEqual(
+    baseImagery.raster.bytes,
+    reorderedImagery.raster.bytes,
+  );
   assert.equal(baseResult.render.value?.renderHash.hex, reorderedResult.render.value?.renderHash.hex);
 });

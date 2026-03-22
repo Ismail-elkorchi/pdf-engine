@@ -1058,18 +1058,14 @@ function createKnowledgeDiagnostics(
 function createRenderDiagnostics(render: PdfRenderDocument): PdfDiagnostic[] {
   const diagnostics: PdfDiagnostic[] = [];
 
-  diagnostics.push({
-    code: "render-display-list-only",
-    stage: "render",
-    level: "medium",
-    message: "The current render stage emits deterministic display lists but does not paint pixels yet.",
-  });
-  diagnostics.push({
-    code: "render-raster-not-implemented",
-    stage: "render",
-    level: "medium",
-    message: "The current render stage does not emit raster output yet.",
-  });
+  if (render.knownLimits.includes("render-imagery-partial")) {
+    diagnostics.push({
+      code: "render-imagery-partial",
+      stage: "render",
+      level: "medium",
+      message: "The current render stage emits deterministic imagery, but some pages still rely on approximated text styling or omit unsupported drawing details.",
+    });
+  }
   if (render.knownLimits.includes("render-resource-payloads-partial")) {
     diagnostics.push({
       code: "render-resource-payloads-partial",

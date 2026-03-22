@@ -98,6 +98,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
       const encryptedStandardTextAes256FixtureBytes = decodeFixturePdfBytes(
         encryptedStandardTextAes256Fixture.bytesBase64
       );
+      const renderImageryFixtureBytes = new Uint8Array(
+        await (await fetch("/test/fixtures/render-imagery-raster.pdf")).arrayBuffer(),
+      );
 
       const encodeText = (value) => new TextEncoder().encode(value);
       const decodeHex = (value) => {
@@ -504,6 +507,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: encodeText(plainPdf)
           }
         });
+        const renderImageryResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: renderImageryFixtureBytes,
+          },
+        });
         const flateResult = await engine.run({
           source: {
             kind: "bytes",
@@ -805,10 +814,14 @@ async function runBrowserSmoke(baseUrl, browserName) {
             plainResult.render.value?.pages[0]?.renderHash.algorithm === "sha-256" &&
             plainResult.render.value?.pages[0]?.renderHash.hex.length === 64,
           renderCommand: plainResult.render.value?.pages[0]?.displayList.commands[0]?.kind === "text",
-          renderDisplayLimit:
-            plainResult.render.value?.knownLimits.includes("render-display-list-only") === true,
-          renderRasterLimit:
-            plainResult.render.value?.knownLimits.includes("render-raster-not-implemented") === true,
+          renderImageryLimit:
+            plainResult.render.value?.knownLimits.includes("render-imagery-partial") === true,
+          renderImageryDiagnostic:
+            plainResult.render.diagnostics.some((diagnostic) => diagnostic.code === "render-imagery-partial") === true,
+          renderSvgPresent:
+            renderImageryResult.render.value?.pages[0]?.imagery?.svg?.mimeType === "image/svg+xml",
+          renderRasterPresent:
+            renderImageryResult.render.value?.pages[0]?.imagery?.raster?.mimeType === "image/png",
           plainText: plainResult.observation.value?.extractedText === "Browser Hello",
           flateText: flateResult.observation.value?.extractedText === "Hello Flate",
           asciiHexText: asciiHexResult.observation.value?.extractedText === "Browser ASCIIHEX",

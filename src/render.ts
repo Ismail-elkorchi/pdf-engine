@@ -1,9 +1,11 @@
+import { buildRenderPageImagery } from "./render-imagery.ts";
 import {
   keyOfObjectRef,
   readNameValue,
   readObjectRefValue,
   readObjectRefsValue,
   type ParsedIndirectObject,
+  type ParsedPageEntry,
   type PdfShellAnalysis,
 } from "./shell-parse.ts";
 
@@ -57,13 +59,26 @@ export async function buildRenderDocument(
   analysis?: PdfShellAnalysis,
 ): Promise<PdfRenderDocument> {
   const payloadCatalog = buildRenderResourcePayloadCatalog(observation, analysis);
+  const pageEntryByPageNumber = new Map<number, ParsedPageEntry>(
+    (analysis?.pageEntries ?? []).map((pageEntry) => [pageEntry.pageNumber, pageEntry] as const),
+  );
   const resourcePayloadKnownLimits: PdfRenderDocument["knownLimits"] = payloadCatalog.hasUnavailablePayloads
     ? ["render-resource-payloads-partial"]
     : [];
   const pages = await Promise.all(
     observation.pages.map((page) =>
-      buildRenderPage(page.pageNumber, page.resolutionMethod, page.pageRef, page.marks, payloadCatalog)
+      buildRenderPage(
+        page.pageNumber,
+        page.resolutionMethod,
+        page.pageRef,
+        page.marks,
+        payloadCatalog,
+        pageEntryByPageNumber.get(page.pageNumber),
+      )
     ),
+  );
+  const imageryKnownLimits = dedupeKnownLimits(
+    pages.flatMap((page) => page.knownLimits),
   );
   const renderHash = await buildRenderHash({
     strategy: "observed-display-list",
@@ -72,9 +87,11 @@ export async function buildRenderDocument(
       pageNumber: page.pageNumber,
       resolutionMethod: page.resolutionMethod,
       ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
+      ...(page.pageBox !== undefined ? { pageBox: page.pageBox } : {}),
       displayList: page.displayList,
       textIndex: page.textIndex,
       selectionModel: page.selectionModel,
+      ...(page.imagery !== undefined ? { imagery: page.imagery } : {}),
       renderHash: page.renderHash,
     })),
   });
@@ -82,14 +99,13 @@ export async function buildRenderDocument(
   return {
     kind: "pdf-render",
     strategy: "observed-display-list",
-    pages,
+    pages: pages.map(stripInternalKnownLimits),
     resourcePayloads: payloadCatalog.resourcePayloads,
     renderHash,
     knownLimits: dedupeKnownLimits([
       ...observation.knownLimits,
-      "render-display-list-only",
-      "render-raster-not-implemented",
       ...resourcePayloadKnownLimits,
+      ...imageryKnownLimits,
     ]),
   };
 }
@@ -100,20 +116,28 @@ async function buildRenderPage(
   pageRef: PdfRenderPage["pageRef"],
   marks: readonly PdfObservedMark[],
   payloadCatalog: RenderResourcePayloadCatalog,
-): Promise<PdfRenderPage> {
+  pageEntry: ParsedPageEntry | undefined,
+): Promise<PdfRenderPage & { readonly knownLimits: readonly PdfRenderDocument["knownLimits"][number][] }> {
   const displayList: PdfDisplayList = {
     commands: marks.map((mark) => toDisplayCommand(mark, payloadCatalog)),
   };
   const textIndex = buildRenderTextIndex(pageNumber, displayList.commands);
   const selectionModel = buildRenderSelectionModel(pageNumber, textIndex);
   const pageResourcePayloads = payloadCatalog.resourcePayloads.filter((payload) => payload.pageNumbers.includes(pageNumber));
+  const imageryResult = buildRenderPageImagery({
+    displayList,
+    ...(pageEntry?.pageBox !== undefined ? { pageBox: pageEntry.pageBox } : {}),
+    resourcePayloads: pageResourcePayloads,
+  });
   const renderHash = await buildRenderHash({
     pageNumber,
     resolutionMethod,
     ...(pageRef !== undefined ? { pageRef } : {}),
+    ...(imageryResult.pageBox !== undefined ? { pageBox: imageryResult.pageBox } : {}),
     displayList,
     textIndex,
     selectionModel,
+    ...(imageryResult.imagery !== undefined ? { imagery: imageryResult.imagery } : {}),
     resourcePayloads: pageResourcePayloads,
   });
 
@@ -121,10 +145,13 @@ async function buildRenderPage(
     pageNumber,
     resolutionMethod,
     ...(pageRef !== undefined ? { pageRef } : {}),
+    ...(imageryResult.pageBox !== undefined ? { pageBox: imageryResult.pageBox } : {}),
     displayList,
     textIndex,
     selectionModel,
+    ...(imageryResult.imagery !== undefined ? { imagery: imageryResult.imagery } : {}),
     renderHash,
+    knownLimits: imageryResult.knownLimits,
   };
 }
 
@@ -307,6 +334,14 @@ function toDisplayCommand(mark: PdfObservedMark, payloadCatalog: RenderResourceP
 
 function dedupeKnownLimits(knownLimits: readonly PdfRenderDocument["knownLimits"][number][]): readonly PdfRenderDocument["knownLimits"][number][] {
   return [...new Set(knownLimits)];
+}
+
+function stripInternalKnownLimits(
+  page: PdfRenderPage & { readonly knownLimits: readonly PdfRenderDocument["knownLimits"][number][] },
+): PdfRenderPage {
+  const { knownLimits, ...publicPage } = page;
+  void knownLimits;
+  return publicPage;
 }
 
 function buildRenderResourcePayloadCatalog(

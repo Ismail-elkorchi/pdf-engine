@@ -80,6 +80,23 @@ async function readSmokeAssetText(assetUrl) {
   throw new Error("Unable to read smoke assets in the current runtime.");
 }
 
+async function readSmokeAssetBytes(assetUrl) {
+  if (typeof Deno !== "undefined") {
+    return await Deno.readFile(assetUrl);
+  }
+
+  if (typeof Bun !== "undefined") {
+    return new Uint8Array(await Bun.file(assetUrl).arrayBuffer());
+  }
+
+  if (typeof process !== "undefined") {
+    const { readFile } = await import("node:fs/promises");
+    return new Uint8Array(await readFile(assetUrl));
+  }
+
+  throw new Error("Unable to read smoke assets in the current runtime.");
+}
+
 function joinBytes(parts) {
   const totalLength = parts.reduce((sum, part) => sum + part.byteLength, 0);
   const joined = new Uint8Array(totalLength);
@@ -2186,10 +2203,20 @@ const lzwDecodeResult = await streamDecodeModuleNamespace.decodePdfStreamBytes(
   toUnicodeCMapLzwBytes,
   "/LZWDecode",
 );
+const renderImageryFixtureBytes = await readSmokeAssetBytes(
+  new URL("../../test/fixtures/render-imagery-raster.pdf", import.meta.url),
+);
 const result = await engine.run({
   source: {
     bytes: encodeText(syntheticPdf),
     fileName: "synthetic.pdf",
+    mediaType: "application/pdf",
+  },
+});
+const renderImageryResult = await engine.run({
+  source: {
+    bytes: renderImageryFixtureBytes,
+    fileName: "render-imagery-raster.pdf",
     mediaType: "application/pdf",
   },
 });
@@ -2876,20 +2903,20 @@ assert(result.render.value?.pages[0]?.displayList.commands[0]?.kind === "text", 
 assert(result.render.value?.pages[0]?.renderHash.algorithm === "sha-256", `Render page hash algorithm was ${result.render.value?.pages[0]?.renderHash.algorithm ?? "missing"}.`);
 assert((result.render.value?.pages[0]?.renderHash.hex.length ?? 0) === 64, `Render page hash length was ${result.render.value?.pages[0]?.renderHash.hex.length ?? 0}.`);
 assert(
-  result.render.value?.knownLimits.includes("render-display-list-only"),
-  "Render known limits did not include render-display-list-only.",
+  result.render.value?.knownLimits.includes("render-imagery-partial"),
+  "Render known limits did not include render-imagery-partial.",
 );
 assert(
-  result.render.value?.knownLimits.includes("render-raster-not-implemented"),
-  "Render known limits did not include render-raster-not-implemented.",
+  renderImageryResult.render.value?.pages[0]?.imagery?.svg?.mimeType === "image/svg+xml",
+  "Render page imagery did not expose SVG output.",
 );
 assert(
-  result.render.diagnostics.some((diagnostic) => diagnostic.code === "render-display-list-only"),
-  "Render diagnostics did not include render-display-list-only.",
+  renderImageryResult.render.value?.pages[0]?.imagery?.raster?.mimeType === "image/png",
+  "Render page imagery did not expose PNG raster output.",
 );
 assert(
-  result.render.diagnostics.some((diagnostic) => diagnostic.code === "render-raster-not-implemented"),
-  "Render diagnostics did not include render-raster-not-implemented.",
+  result.render.diagnostics.some((diagnostic) => diagnostic.code === "render-imagery-partial"),
+  "Render diagnostics did not include render-imagery-partial.",
 );
 assert(repeatedBoundaryRenderResult.status === "partial", `Direct render status was ${repeatedBoundaryRenderResult.status}.`);
 assert(repeatedBoundaryRenderResult.value?.kind === "pdf-render", `Direct render kind was ${repeatedBoundaryRenderResult.value?.kind ?? "missing"}.`);
