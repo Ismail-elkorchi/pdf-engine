@@ -33,6 +33,8 @@ export interface ParsedPageEntry {
   readonly contentStreamRefs: readonly PdfObjectRef[];
   readonly annotationRefs: readonly PdfObjectRef[];
   readonly fontBindings: readonly ParsedFontResourceBinding[];
+  readonly colorSpaceBindings: readonly ParsedColorSpaceResourceBinding[];
+  readonly graphicsStateBindings: readonly ParsedGraphicsStateResourceBinding[];
   readonly propertyBindings: readonly ParsedPropertyResourceBinding[];
   readonly xObjectBindings: readonly ParsedXObjectResourceBinding[];
   readonly resourceRef?: PdfObjectRef;
@@ -45,9 +47,27 @@ export interface ParsedFontResourceBinding {
   readonly fontRef: PdfObjectRef;
 }
 
+export interface ParsedColorSpaceResourceBinding {
+  readonly resourceName: string;
+  readonly rawValue: string;
+  readonly objectRef?: PdfObjectRef;
+}
+
+export interface ParsedGraphicsStateResourceBinding {
+  readonly resourceName: string;
+  readonly rawValue: string;
+  readonly objectRef?: PdfObjectRef;
+}
+
 export interface ParsedPropertyResourceBinding {
   readonly resourceName: string;
   readonly objectRef: PdfObjectRef;
+}
+
+export interface ParsedTransparencyGroupBinding {
+  readonly isolated: boolean;
+  readonly knockout: boolean;
+  readonly colorSpaceValue?: string;
 }
 
 export interface ParsedXObjectResourceBinding {
@@ -56,6 +76,7 @@ export interface ParsedXObjectResourceBinding {
   readonly subtypeName?: string;
   readonly width?: number;
   readonly height?: number;
+  readonly transparencyGroup?: ParsedTransparencyGroupBinding;
 }
 
 type ParsedTextArrayOperand =
@@ -1273,6 +1294,8 @@ function toPageEntry(
       ? "inherited"
       : undefined;
   const fontBindings = resourceValue ? readFontResourceBindings(resourceValue.rawValue, objectIndex) : [];
+  const colorSpaceBindings = resourceValue ? readColorSpaceResourceBindings(resourceValue.rawValue, objectIndex) : [];
+  const graphicsStateBindings = resourceValue ? readGraphicsStateResourceBindings(resourceValue.rawValue, objectIndex) : [];
   const propertyBindings = resourceValue ? readPropertyResourceBindings(resourceValue.rawValue, objectIndex) : [];
   const xObjectBindings = resourceValue ? readXObjectResourceBindings(resourceValue.rawValue, objectIndex) : [];
 
@@ -1282,6 +1305,8 @@ function toPageEntry(
     contentStreamRefs,
     annotationRefs,
     fontBindings,
+    colorSpaceBindings,
+    graphicsStateBindings,
     propertyBindings,
     xObjectBindings,
     ...(resourceValue?.ref !== undefined ? { resourceRef: resourceValue.ref } : {}),
@@ -1324,6 +1349,76 @@ function readFontResourceBindings(
   }
 
   return fontBindings;
+}
+
+function readColorSpaceResourceBindings(
+  resourceValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): ParsedColorSpaceResourceBinding[] {
+  const resolvedResourceDictionary = resolveDictionaryValue(resourceValue, objectIndex);
+  if (!resolvedResourceDictionary) {
+    return [];
+  }
+
+  const resourceEntries = parseDictionaryEntries(resolvedResourceDictionary);
+  const colorSpaceValue = resourceEntries.get("ColorSpace");
+  if (!colorSpaceValue) {
+    return [];
+  }
+
+  const resolvedColorSpaceDictionary = resolveDictionaryValue(colorSpaceValue, objectIndex);
+  if (!resolvedColorSpaceDictionary) {
+    return [];
+  }
+
+  const colorSpaceEntries = parseDictionaryEntries(resolvedColorSpaceDictionary);
+  const colorSpaceBindings: ParsedColorSpaceResourceBinding[] = [];
+
+  for (const [resourceName, colorSpaceValueToken] of colorSpaceEntries.entries()) {
+    const objectRef = readObjectRefValue(colorSpaceValueToken);
+    colorSpaceBindings.push({
+      resourceName,
+      rawValue: colorSpaceValueToken,
+      ...(objectRef !== undefined ? { objectRef } : {}),
+    });
+  }
+
+  return colorSpaceBindings;
+}
+
+function readGraphicsStateResourceBindings(
+  resourceValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): ParsedGraphicsStateResourceBinding[] {
+  const resolvedResourceDictionary = resolveDictionaryValue(resourceValue, objectIndex);
+  if (!resolvedResourceDictionary) {
+    return [];
+  }
+
+  const resourceEntries = parseDictionaryEntries(resolvedResourceDictionary);
+  const graphicsStateValue = resourceEntries.get("ExtGState");
+  if (!graphicsStateValue) {
+    return [];
+  }
+
+  const resolvedGraphicsStateDictionary = resolveDictionaryValue(graphicsStateValue, objectIndex);
+  if (!resolvedGraphicsStateDictionary) {
+    return [];
+  }
+
+  const graphicsStateEntries = parseDictionaryEntries(resolvedGraphicsStateDictionary);
+  const graphicsStateBindings: ParsedGraphicsStateResourceBinding[] = [];
+
+  for (const [resourceName, graphicsStateValueToken] of graphicsStateEntries.entries()) {
+    const objectRef = readObjectRefValue(graphicsStateValueToken);
+    graphicsStateBindings.push({
+      resourceName,
+      rawValue: graphicsStateValueToken,
+      ...(objectRef !== undefined ? { objectRef } : {}),
+    });
+  }
+
+  return graphicsStateBindings;
 }
 
 function readPropertyResourceBindings(
@@ -1395,16 +1490,43 @@ function readXObjectResourceBindings(
     const subtypeName = objectShell?.dictionaryEntries.get("Subtype")?.trim();
     const width = readNumericTokenValue(objectShell?.dictionaryEntries.get("Width") ?? "");
     const height = readNumericTokenValue(objectShell?.dictionaryEntries.get("Height") ?? "");
+    const transparencyGroup = readTransparencyGroupBinding(
+      objectShell?.dictionaryEntries.get("Group"),
+      objectIndex,
+    );
     xObjectBindings.push({
       resourceName,
       objectRef,
       ...(subtypeName !== undefined ? { subtypeName } : {}),
       ...(width !== undefined ? { width } : {}),
       ...(height !== undefined ? { height } : {}),
+      ...(transparencyGroup !== undefined ? { transparencyGroup } : {}),
     });
   }
 
   return xObjectBindings;
+}
+
+function readTransparencyGroupBinding(
+  groupValue: string | undefined,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): ParsedTransparencyGroupBinding | undefined {
+  const resolvedGroupDictionary = groupValue ? resolveDictionaryValue(groupValue, objectIndex) : undefined;
+  if (!resolvedGroupDictionary) {
+    return undefined;
+  }
+
+  const groupEntries = parseDictionaryEntries(resolvedGroupDictionary);
+  if (groupEntries.get("S")?.trim() !== "/Transparency") {
+    return undefined;
+  }
+
+  const colorSpaceValue = groupEntries.get("CS");
+  return {
+    isolated: readBooleanTokenValue(groupEntries.get("I")) ?? false,
+    knockout: readBooleanTokenValue(groupEntries.get("K")) ?? false,
+    ...(colorSpaceValue !== undefined ? { colorSpaceValue } : {}),
+  };
 }
 
 function resolveDictionaryValue(
@@ -1515,17 +1637,19 @@ function readPdfValueToken(
     return nameToken ? { token: nameToken.raw, nextIndex: nameToken.nextIndex } : undefined;
   }
 
-  const firstNumber = readUnsignedInteger(text, startIndex);
+  const firstNumber = readPdfNumericToken(text, startIndex);
   if (firstNumber) {
-    const secondStart = skipPdfWhitespaceAndComments(text, firstNumber.nextIndex);
-    const secondNumber = readUnsignedInteger(text, secondStart);
-    if (secondNumber) {
-      const refMarkerStart = skipPdfWhitespaceAndComments(text, secondNumber.nextIndex);
-      if (matchesPdfKeyword(text, refMarkerStart, "R")) {
-        return {
-          token: text.slice(startIndex, refMarkerStart + 1),
-          nextIndex: refMarkerStart + 1,
-        };
+    if (isPdfIntegerToken(firstNumber.token)) {
+      const secondStart = skipPdfWhitespaceAndComments(text, firstNumber.nextIndex);
+      const secondNumber = readUnsignedInteger(text, secondStart);
+      if (secondNumber) {
+        const refMarkerStart = skipPdfWhitespaceAndComments(text, secondNumber.nextIndex);
+        if (matchesPdfKeyword(text, refMarkerStart, "R")) {
+          return {
+            token: text.slice(startIndex, refMarkerStart + 1),
+            nextIndex: refMarkerStart + 1,
+          };
+        }
       }
     }
 
@@ -1544,6 +1668,28 @@ function readPdfValueToken(
     token: text.slice(startIndex, keywordEnd),
     nextIndex: keywordEnd,
   };
+}
+
+function readPdfNumericToken(
+  text: string,
+  startIndex: number,
+): { token: string; nextIndex: number } | undefined {
+  const endIndex = readUntilDelimiter(text, startIndex);
+  if (endIndex <= startIndex) {
+    return undefined;
+  }
+
+  const token = text.slice(startIndex, endIndex);
+  return /^[+-]?(?:\d+\.\d+|\d+\.|\d+|\.\d+)$/u.test(token)
+    ? {
+      token,
+      nextIndex: endIndex,
+    }
+    : undefined;
+}
+
+function isPdfIntegerToken(token: string): boolean {
+  return /^[+-]?\d+$/u.test(token);
 }
 
 function readPdfDictionaryToken(
@@ -1856,6 +2002,22 @@ export function readNameValue(value: string | undefined): string | undefined {
 function readNumericTokenValue(token: string): number | undefined {
   const value = Number(token);
   return Number.isFinite(value) ? value : undefined;
+}
+
+function readBooleanTokenValue(token: string | undefined): boolean | undefined {
+  if (token === undefined) {
+    return undefined;
+  }
+
+  const trimmedToken = token.trim();
+  if (trimmedToken === "true") {
+    return true;
+  }
+  if (trimmedToken === "false") {
+    return false;
+  }
+
+  return undefined;
 }
 
 function isContentStreamOperatorToken(token: string): boolean {

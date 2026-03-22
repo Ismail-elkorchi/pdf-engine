@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { createPdfEngine } from "../../src/index.ts";
 import { loadNamedPdfFixture } from "../shared/load-fixture.ts";
-import { buildPdfWithPageContents } from "../shared/pdf-builders.ts";
+import { buildPdfWithPageSpecs } from "../shared/pdf-builders.ts";
 
 test("public pipeline contracts expose staged artifacts with current kinds", async () => {
   const engine = createPdfEngine();
@@ -37,18 +37,38 @@ test("public pipeline contracts expose staged artifacts with current kinds", asy
 
 test("public observation and render contracts expose path paint state", async () => {
   const engine = createPdfEngine();
-  const bytes = buildPdfWithPageContents([
+  const bytes = buildPdfWithPageSpecs(
     [
-      "2 w",
-      "1 J",
-      "2 j",
-      "5 M",
-      "[3 1] 2 d",
-      "0 0 m",
-      "10 10 l",
-      "S",
-    ].join("\n"),
-  ]);
+      {
+        resourcesBody: "<< /Font << /F1 3 0 R >> /ColorSpace << /CS1 /DeviceRGB >> /ExtGState << /GS1 10 0 R >> >>",
+        content: [
+          "2 w",
+          "1 J",
+          "2 j",
+          "5 M",
+          "[3 1] 2 d",
+          "/CS1 CS",
+          "0.1 0.2 0.3 SC",
+          "/CS1 cs",
+          "0.4 0.5 0.6 sc",
+          "/GS1 gs",
+          "0 0 m",
+          "10 10 l",
+          "S",
+        ].join("\n"),
+      },
+    ],
+    [
+      {
+        objectNumber: 10,
+        body: "<< /Type /ExtGState /CA 0.5 /ca 0.25 /BM /Multiply /SMask 11 0 R >>",
+      },
+      {
+        objectNumber: 11,
+        body: "<< /Type /Mask >>",
+      },
+    ],
+  );
 
   const result = await engine.run({
     source: {
@@ -77,4 +97,32 @@ test("public observation and render contracts expose path paint state", async ()
     },
   });
   assert.deepEqual(pathCommand.paintState, pathMark.paintState);
+  assert.deepEqual(pathMark.colorState, {
+    strokeColorSpace: {
+      kind: "device-rgb",
+    },
+    fillColorSpace: {
+      kind: "device-rgb",
+    },
+    strokeColor: {
+      colorSpace: {
+        kind: "device-rgb",
+      },
+      components: [0.1, 0.2, 0.3],
+    },
+    fillColor: {
+      colorSpace: {
+        kind: "device-rgb",
+      },
+      components: [0.4, 0.5, 0.6],
+    },
+  });
+  assert.deepEqual(pathMark.transparencyState, {
+    strokeAlpha: 0.5,
+    fillAlpha: 0.25,
+    blendMode: "multiply",
+    softMask: "present",
+  });
+  assert.deepEqual(pathCommand.colorState, pathMark.colorState);
+  assert.deepEqual(pathCommand.transparencyState, pathMark.transparencyState);
 });
