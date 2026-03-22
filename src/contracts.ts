@@ -965,6 +965,74 @@ export interface PdfObservedTransparencyGroup {
 }
 
 /**
+ * One normalized move-to segment recovered from a PDF path.
+ */
+export interface PdfObservedPathMoveToSegment {
+  /** Segment discriminator. */
+  readonly kind: "move-to";
+  /** Destination point in local path space. */
+  readonly to: PdfPoint;
+}
+
+/**
+ * One normalized line-to segment recovered from a PDF path.
+ */
+export interface PdfObservedPathLineToSegment {
+  /** Segment discriminator. */
+  readonly kind: "line-to";
+  /** Destination point in local path space. */
+  readonly to: PdfPoint;
+}
+
+/**
+ * One normalized cubic-curve segment recovered from a PDF path.
+ */
+export interface PdfObservedPathCurveToSegment {
+  /** Segment discriminator. */
+  readonly kind: "curve-to";
+  /** First control point in local path space. */
+  readonly control1: PdfPoint;
+  /** Second control point in local path space. */
+  readonly control2: PdfPoint;
+  /** Destination point in local path space. */
+  readonly to: PdfPoint;
+}
+
+/**
+ * One normalized close-path segment recovered from a PDF path.
+ */
+export interface PdfObservedPathClosePathSegment {
+  /** Segment discriminator. */
+  readonly kind: "close-path";
+}
+
+/**
+ * One normalized rectangle segment recovered from a PDF path.
+ */
+export interface PdfObservedPathRectangleSegment {
+  /** Segment discriminator. */
+  readonly kind: "rectangle";
+  /** Rectangle left coordinate in local path space. */
+  readonly x: number;
+  /** Rectangle top or origin-relative vertical coordinate in local path space. */
+  readonly y: number;
+  /** Rectangle width in local path space. */
+  readonly width: number;
+  /** Rectangle height in local path space. */
+  readonly height: number;
+}
+
+/**
+ * One normalized path segment recovered from a PDF path.
+ */
+export type PdfObservedPathSegment =
+  | PdfObservedPathMoveToSegment
+  | PdfObservedPathLineToSegment
+  | PdfObservedPathCurveToSegment
+  | PdfObservedPathClosePathSegment
+  | PdfObservedPathRectangleSegment;
+
+/**
  * Base fields shared by every observed page mark.
  */
 export interface PdfObservedMarkBase {
@@ -1040,6 +1108,8 @@ export interface PdfObservedPathMark extends PdfObservedMarkBase {
   readonly colorState: PdfObservedColorState;
   /** Normalized transparency facts active when this path was painted. */
   readonly transparencyState: PdfObservedTransparencyState;
+  /** Normalized path segments in local path space. */
+  readonly segments: readonly PdfObservedPathSegment[];
   /** Number of path points considered when recovering the bounding box. */
   readonly pointCount: number;
   /** Whether the recovered path was explicitly closed. */
@@ -1431,6 +1501,8 @@ export interface PdfDisplayPathCommand extends PdfDisplayCommandBase {
   readonly colorState: PdfObservedColorState;
   /** Normalized transparency facts active when this path was painted. */
   readonly transparencyState: PdfObservedTransparencyState;
+  /** Normalized path segments in local path space. */
+  readonly segments: readonly PdfObservedPathSegment[];
   /** Number of points considered while recovering the path. */
   readonly pointCount: number;
   /** Whether the path was explicitly closed. */
