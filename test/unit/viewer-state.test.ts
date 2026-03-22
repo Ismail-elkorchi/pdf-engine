@@ -12,9 +12,11 @@ import {
   clampPageNumber,
   collectOutlineItems,
   collectPageNumbers,
+  collectRenderSelectionMatches,
   collectSearchResults,
   createViewerState,
   findChunkById,
+  findRenderPageByNumber,
   resolveViewerOptions,
 } from "../../src/viewer-state.ts";
 
@@ -204,7 +206,128 @@ function createPipelineResultFixture(): PdfPipelineResult {
       value: {
         kind: "pdf-render",
         strategy: "observed-display-list",
-        pages: [],
+        pages: [
+          {
+            pageNumber: 1,
+            resolutionMethod: "page-tree",
+            pageBox: {
+              x: 0,
+              y: 0,
+              width: 200,
+              height: 300,
+            },
+            displayList: {
+              commands: [],
+            },
+            textIndex: {
+              text: "Heading block",
+              spans: [
+                {
+                  id: "render-span-1",
+                  contentOrder: 0,
+                  text: "Heading block",
+                  glyphIds: ["glyph-1"],
+                  anchor: {
+                    x: 40,
+                    y: 260,
+                  },
+                },
+              ],
+            },
+            selectionModel: {
+              units: [
+                {
+                  id: "selection-1",
+                  textSpanId: "render-span-1",
+                  text: "Heading block",
+                  glyphIds: ["glyph-1"],
+                  anchor: {
+                    x: 40,
+                    y: 260,
+                  },
+                },
+              ],
+            },
+            imagery: {
+              svg: {
+                mimeType: "image/svg+xml",
+                markup: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 300\"></svg>",
+                width: 200,
+                height: 300,
+              },
+              raster: {
+                mimeType: "image/png",
+                bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+                width: 200,
+                height: 300,
+              },
+            },
+            renderHash: {
+              algorithm: "sha-256",
+              hex: "1".repeat(64),
+            },
+          },
+          {
+            pageNumber: 2,
+            resolutionMethod: "page-tree",
+            pageBox: {
+              x: 0,
+              y: 0,
+              width: 200,
+              height: 300,
+            },
+            displayList: {
+              commands: [],
+            },
+            textIndex: {
+              text: "Second page detail",
+              spans: [
+                {
+                  id: "render-span-2",
+                  contentOrder: 0,
+                  text: "Second page detail",
+                  glyphIds: ["glyph-2"],
+                  anchor: {
+                    x: 40,
+                    y: 220,
+                  },
+                },
+              ],
+            },
+            selectionModel: {
+              units: [
+                {
+                  id: "selection-2",
+                  textSpanId: "render-span-2",
+                  text: "Second page detail",
+                  glyphIds: ["glyph-2"],
+                  anchor: {
+                    x: 40,
+                    y: 220,
+                  },
+                },
+              ],
+            },
+            imagery: {
+              svg: {
+                mimeType: "image/svg+xml",
+                markup: "<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 200 300\"></svg>",
+                width: 200,
+                height: 300,
+              },
+              raster: {
+                mimeType: "image/png",
+                bytes: new Uint8Array([137, 80, 78, 71, 13, 10, 26, 10]),
+                width: 200,
+                height: 300,
+              },
+            },
+            renderHash: {
+              algorithm: "sha-256",
+              hex: "2".repeat(64),
+            },
+          },
+        ],
         resourcePayloads: [],
         renderHash: {
           algorithm: "sha-256",
@@ -263,7 +386,7 @@ test("createViewerState clamps pages and keeps prior state defaults when request
   assert.equal(state.options.showTables, false);
 });
 
-test("viewer-state helpers collect outlines, search results, and chunk lookups from layout and knowledge", () => {
+test("viewer-state helpers collect outlines, render-backed search results, and chunk lookups", () => {
   const pipelineResult = createPipelineResultFixture();
 
   assert.deepEqual(collectPageNumbers(pipelineResult), [1, 2]);
@@ -280,14 +403,45 @@ test("viewer-state helpers collect outlines, search results, and chunk lookups f
   ]);
 
   const searchResults = collectSearchResults(pipelineResult, "second");
-  assert.equal(searchResults.length, 3);
+  assert.equal(searchResults.length, 4);
   assert.deepEqual(
     searchResults.map((result) => result.kind),
-    ["block", "chunk", "table"],
+    ["render-text", "block", "chunk", "table"],
   );
+  assert.equal(searchResults[0]?.renderSelectionUnitId, "selection-2");
   assert.equal(searchResults[0]?.pageNumber, 2);
-  assert.equal(searchResults[1]?.chunkId, "chunk-2");
+  assert.equal(searchResults[2]?.chunkId, "chunk-2");
+  assert.equal(findRenderPageByNumber(pipelineResult, 2)?.pageNumber, 2);
+  assert.deepEqual(
+    collectRenderSelectionMatches(pipelineResult, 2, "second").map((unit) => unit.id),
+    ["selection-2"],
+  );
   assert.equal(findChunkById(pipelineResult, "chunk-2")?.text, "Chunk two with Second page detail");
   assert.equal(findChunkById(pipelineResult, "missing"), undefined);
   assert.deepEqual(collectSearchResults(pipelineResult, "   "), []);
+});
+
+test("collectPageNumbers includes render-only pages when layout and knowledge are absent", () => {
+  const pipelineResult = createPipelineResultFixture();
+  const { value: _layoutValue, ...layoutWithoutValue } = pipelineResult.layout;
+  const { value: _knowledgeValue, ...knowledgeWithoutValue } = pipelineResult.knowledge;
+  const renderOnlyResult: PdfPipelineResult = {
+    ...pipelineResult,
+    layout: layoutWithoutValue,
+    knowledge: knowledgeWithoutValue,
+    render: {
+      ...pipelineResult.render,
+      value: {
+        ...pipelineResult.render.value!,
+        pages: [
+          {
+            ...pipelineResult.render.value!.pages[0]!,
+            pageNumber: 3,
+          },
+        ],
+      },
+    },
+  };
+
+  assert.deepEqual(collectPageNumbers(renderOnlyResult), [3]);
 });

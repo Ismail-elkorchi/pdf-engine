@@ -1,4 +1,9 @@
-import type { PdfKnowledgeChunk, PdfPipelineResult } from "./contracts.ts";
+import type {
+  PdfKnowledgeChunk,
+  PdfPipelineResult,
+  PdfRenderPage,
+  PdfRenderSelectionUnit,
+} from "./contracts.ts";
 
 export type PdfViewerView = "page" | "reader";
 
@@ -39,10 +44,11 @@ export interface PdfViewerOutlineItem {
 export interface PdfViewerSearchResult {
   readonly id: string;
   readonly pageNumber: number;
-  readonly kind: "block" | "chunk" | "table";
+  readonly kind: "render-text" | "block" | "chunk" | "table";
   readonly label: string;
   readonly text: string;
   readonly chunkId?: string;
+  readonly renderSelectionUnitId?: string;
 }
 
 export interface PdfViewerStateDefaults {
@@ -103,6 +109,10 @@ export function createViewerState(
 export function collectPageNumbers(pipelineResult: PdfPipelineResult): readonly number[] {
   const pageNumbers = new Set<number>();
 
+  for (const page of pipelineResult.render.value?.pages ?? []) {
+    pageNumbers.add(page.pageNumber);
+  }
+
   for (const page of pipelineResult.layout.value?.pages ?? []) {
     pageNumbers.add(page.pageNumber);
   }
@@ -150,6 +160,31 @@ export function collectOutlineItems(
   );
 }
 
+export function findRenderPageByNumber(
+  pipelineResult: PdfPipelineResult,
+  pageNumber: number,
+): PdfRenderPage | undefined {
+  return (pipelineResult.render.value?.pages ?? []).find((page) => page.pageNumber === pageNumber);
+}
+
+export function collectRenderSelectionMatches(
+  pipelineResult: PdfPipelineResult,
+  pageNumber: number,
+  query: string,
+): readonly PdfRenderSelectionUnit[] {
+  const normalizedQuery = normalizeSearchQuery(query);
+  if (normalizedQuery.length === 0) {
+    return [];
+  }
+
+  const renderPage = findRenderPageByNumber(pipelineResult, pageNumber);
+  if (!renderPage) {
+    return [];
+  }
+
+  return renderPage.selectionModel.units.filter((unit) => matchesSearch(unit.text, normalizedQuery));
+}
+
 export function collectSearchResults(
   pipelineResult: PdfPipelineResult,
   query: string,
@@ -160,6 +195,21 @@ export function collectSearchResults(
   }
 
   const results: PdfViewerSearchResult[] = [];
+
+  for (const page of pipelineResult.render.value?.pages ?? []) {
+    for (const unit of page.selectionModel.units) {
+      if (matchesSearch(unit.text, normalizedQuery)) {
+        results.push({
+          id: `render-text:${page.pageNumber}:${unit.id}`,
+          pageNumber: page.pageNumber,
+          kind: "render-text",
+          label: `Page ${String(page.pageNumber)} • render text`,
+          text: unit.text,
+          renderSelectionUnitId: unit.id,
+        });
+      }
+    }
+  }
 
   for (const page of pipelineResult.layout.value?.pages ?? []) {
     for (const block of page.blocks) {
