@@ -175,3 +175,48 @@ test("explicit default transparency state does not change observed path evidence
     explicitDefaultResult.render.value?.renderHash.hex,
   );
 });
+
+test("v and y shortcuts produce equivalent normalized segments and render hash as explicit c curves", async () => {
+  const engine = createPdfEngine();
+  const shortcutCurveBytes = buildPdfWithPageContents([
+    [
+      "0 0 m",
+      "5 5 10 10 v",
+      "15 15 20 20 y",
+      "S",
+    ].join("\n"),
+  ]);
+  const explicitCurveBytes = buildPdfWithPageContents([
+    [
+      "0 0 m",
+      "0 0 5 5 10 10 c",
+      "15 15 20 20 20 20 c",
+      "S",
+    ].join("\n"),
+  ]);
+
+  const shortcutCurveResult = await engine.run({
+    source: {
+      bytes: shortcutCurveBytes,
+      fileName: "shortcut-curves.pdf",
+    },
+  });
+  const explicitCurveResult = await engine.run({
+    source: {
+      bytes: explicitCurveBytes,
+      fileName: "explicit-curves.pdf",
+    },
+  });
+
+  const shortcutPathMark = shortcutCurveResult.observation.value?.pages[0]?.marks.find((mark) => mark.kind === "path");
+  const explicitPathMark = explicitCurveResult.observation.value?.pages[0]?.marks.find((mark) => mark.kind === "path");
+  if (shortcutPathMark?.kind !== "path" || explicitPathMark?.kind !== "path") {
+    assert.fail("Expected both PDFs to emit one observed path mark.");
+  }
+
+  assert.deepEqual(shortcutPathMark.segments, explicitPathMark.segments);
+  assert.equal(
+    shortcutCurveResult.render.value?.renderHash.hex,
+    explicitCurveResult.render.value?.renderHash.hex,
+  );
+});

@@ -1,5 +1,5 @@
 export interface PdfTestFixtureDefinition {
-  readonly id: "simple-text" | "multi-page-navigation" | "javascript-action";
+  readonly id: "simple-text" | "multi-page-navigation" | "javascript-action" | "observed-path-geometry";
   readonly fileName: string;
   readonly relativePath: string;
   readonly expectedText?: string;
@@ -12,6 +12,7 @@ export const pdfTestFixtures: {
   readonly simpleText: PdfTestFixtureDefinition;
   readonly multiPageNavigation: PdfTestFixtureDefinition;
   readonly javascriptAction: PdfTestFixtureDefinition;
+  readonly observedPathGeometry: PdfTestFixtureDefinition;
 } = {
   simpleText: {
     id: "simple-text",
@@ -33,6 +34,12 @@ export const pdfTestFixtures: {
     relativePath: "../fixtures/javascript-action.pdf",
     expectedPolicyDecision: "rejected",
     expectedFeatureKinds: ["javascript-actions"],
+  },
+  observedPathGeometry: {
+    id: "observed-path-geometry",
+    fileName: "observed-path-geometry.pdf",
+    relativePath: "../fixtures/observed-path-geometry.pdf",
+    expectedPageCount: 1,
   },
 } as const;
 

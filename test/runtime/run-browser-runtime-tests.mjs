@@ -52,6 +52,9 @@ try {
     const multiPageBytes = await readBytes(
       "/test/fixtures/multi-page-navigation.pdf",
     );
+    const geometryBytes = await readBytes(
+      "/test/fixtures/observed-path-geometry.pdf",
+    );
 
     const simpleResult = await engine.run({
       source: {
@@ -74,6 +77,26 @@ try {
         fileName: "multi-page-navigation.pdf",
       },
     });
+    const geometryResult = await engine.run({
+      source: {
+        bytes: geometryBytes,
+        fileName: "observed-path-geometry.pdf",
+      },
+    });
+    const geometryPathMark =
+      geometryResult.observation.value?.pages[0]?.marks.find((mark) =>
+        mark.kind === "path"
+      ) ?? null;
+    const geometryPathCommand =
+      geometryResult.render.value?.pages[0]?.displayList.commands.find((command) =>
+        command.kind === "path"
+      ) ?? null;
+    const geometryPathSignature = geometryPathMark?.kind === "path"
+      ? toGeometryPathSignature(geometryPathMark)
+      : null;
+    const geometryRenderPathSignature = geometryPathCommand?.kind === "path"
+      ? toGeometryPathSignature(geometryPathCommand)
+      : null;
 
     const browserDocument = globalThis.document;
     const viewerContainer = browserDocument.createElement("div");
@@ -105,6 +128,17 @@ try {
         ) === true,
       multiPageCount: multiPageResult.render.value?.pages.length === 2,
       viewerPageNavigation: activePageLabel?.includes("Page 2") === true,
+      geometryPathPresent: geometryPathSignature !== null,
+      geometryRenderPathPresent: geometryRenderPathSignature !== null,
+      geometrySegmentsPreserved:
+        geometryPathSignature !== null &&
+        geometryRenderPathSignature !== null &&
+        JSON.stringify(geometryPathSignature) ===
+          JSON.stringify(geometryRenderPathSignature),
+      geometryPointCount: geometryPathSignature?.pointCount === 15,
+      geometryClosed: geometryPathSignature?.closed === true,
+      geometryBlendMode:
+        geometryPathSignature?.transparencyState?.blendMode === "multiply",
     };
 
     const failedChecks = Object.entries(checks)
@@ -125,8 +159,24 @@ try {
         simpleRenderHash: simpleResult.render.value?.renderHash.hex ?? null,
         javascriptDecision: javascriptAdmission.value?.decision ?? null,
         multiPageCount: multiPageResult.render.value?.pages.length ?? null,
+        geometryPathSignature,
+        geometryRenderHash: geometryResult.render.value?.renderHash.hex ?? null,
       },
     };
+
+    function toGeometryPathSignature(pathLike) {
+      return {
+        paintOperator: pathLike.paintOperator,
+        paintState: pathLike.paintState,
+        colorState: pathLike.colorState,
+        transparencyState: pathLike.transparencyState,
+        segments: pathLike.segments,
+        pointCount: pathLike.pointCount,
+        closed: pathLike.closed,
+        bbox: pathLike.bbox ?? null,
+        transform: pathLike.transform ?? null,
+      };
+    }
   }, browserName);
 
   await mkdir(dirname(reportPath), { recursive: true });
