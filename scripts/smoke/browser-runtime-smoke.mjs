@@ -101,6 +101,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
       const renderImageryFixtureBytes = new Uint8Array(
         await (await fetch("/test/fixtures/render-imagery-raster.pdf")).arrayBuffer(),
       );
+      const renderTextSelectionFixtureBytes = new Uint8Array(
+        await (await fetch("/test/fixtures/render-text-selection.pdf")).arrayBuffer(),
+      );
 
       const encodeText = (value) => new TextEncoder().encode(value);
       const decodeHex = (value) => {
@@ -584,6 +587,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
             bytes: viewerNavigationPdf
           }
         });
+        const renderTextSelectionResult = await engine.run({
+          source: {
+            kind: "bytes",
+            bytes: renderTextSelectionFixtureBytes
+          }
+        });
         const gridTableResult = await engine.run({
           source: {
             kind: "bytes",
@@ -718,6 +727,18 @@ async function runBrowserSmoke(baseUrl, browserName) {
         );
         const readSearchHighlights = () =>
           Array.from(viewerContainer.querySelectorAll(".pdf-engine-viewer__highlight")).length;
+        const readViewerPageMode = (container = viewerContainer) =>
+          container.querySelector("[data-viewer-page-mode]")?.dataset.viewerPageMode ?? null;
+        const readViewerRenderSurface = (container = viewerContainer) =>
+          container.querySelector("[data-viewer-render-surface]")?.dataset.viewerRenderSurface ?? null;
+        const readViewerRenderFallback = (container = viewerContainer) =>
+          container.querySelector("[data-viewer-render-fallback='true']")?.textContent ?? null;
+        const readViewerRenderHighlightCount = (container = viewerContainer) =>
+          container.querySelector("[data-viewer-render-highlight-count]")?.dataset.viewerRenderHighlightCount ?? null;
+        const readViewerSearchKinds = (container = viewerContainer) => Array.from(
+          container.querySelectorAll("[data-viewer-search-result-kind]"),
+          (element) => element.dataset.viewerSearchResultKind ?? null,
+        );
 
         const viewerHandle = renderPdfViewer(viewerContainer, viewerNavigationResult, {
           initialPage: 2,
@@ -728,7 +749,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
         });
         const initialViewerLabel =
           viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
-        const initialViewerBlocks = readBlockTexts();
+        const initialViewerPageMode = readViewerPageMode(viewerContainer);
+        const initialViewerRenderSurface = readViewerRenderSurface(viewerContainer);
+        const initialViewerFallback = readViewerRenderFallback(viewerContainer);
         const initialPreviousDisabled = findButton("Previous")?.disabled ?? null;
         const initialNextDisabled = findButton("Next")?.disabled ?? null;
         const initialOutlineCount =
@@ -737,7 +760,9 @@ async function runBrowserSmoke(baseUrl, browserName) {
         viewerHandle.goToPage(1);
         const navigatedViewerLabel =
           viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
-        const navigatedViewerBlocks = readBlockTexts();
+        const navigatedViewerPageMode = readViewerPageMode(viewerContainer);
+        const navigatedViewerRenderSurface = readViewerRenderSurface(viewerContainer);
+        const navigatedViewerFallback = readViewerRenderFallback(viewerContainer);
         const navigatedPreviousDisabled = findButton("Previous")?.disabled ?? null;
         const navigatedNextDisabled = findButton("Next")?.disabled ?? null;
 
@@ -754,6 +779,7 @@ async function runBrowserSmoke(baseUrl, browserName) {
         const readerOutlineCount =
           viewerContainer.querySelector("[data-viewer-outline-count]")?.dataset.viewerOutlineCount ?? null;
         const readerSearchHighlights = readSearchHighlights();
+        const readerViewerBlocks = readBlockTexts();
         const firstPageChunkId = viewerNavigationResult.knowledge.value?.chunks.find((chunk) =>
           chunk.pageNumbers.includes(1)
         )?.id ?? null;
@@ -769,19 +795,54 @@ async function runBrowserSmoke(baseUrl, browserName) {
         viewerHandle.update(denseGridTableResult, { showTables: true, showSearch: true, showOutline: true });
         const updatedViewerLabel =
           viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
-        const updatedViewerBlocks = readBlockTexts();
+        const updatedViewerPageMode = readViewerPageMode(viewerContainer);
+        const updatedViewerRenderSurface = readViewerRenderSurface(viewerContainer);
         const updatedViewerTableCount =
           viewerContainer.querySelector("[data-viewer-table-count]")?.dataset.viewerTableCount ?? null;
         const updatedViewerChunkCount =
           viewerContainer.querySelector("[data-viewer-chunk-count]")?.dataset.viewerChunkCount ?? null;
-        const updatedViewerBlockCount =
-          viewerContainer.querySelector("[data-viewer-block-count]")?.dataset.viewerBlockCount ?? null;
         const updatedViewerHeaders = readTableHeaders();
         const updatedViewerCells = readTableCells();
         const updatedViewerOutlineCount =
           viewerContainer.querySelector("[data-viewer-outline-count]")?.dataset.viewerOutlineCount ?? null;
         const updatedViewerSearchCount =
           viewerContainer.querySelector("[data-viewer-search-count]")?.dataset.viewerSearchCount ?? null;
+
+        const renderSearchViewerContainer = globalThis.document.createElement("div");
+        globalThis.document.body.append(renderSearchViewerContainer);
+        const renderSearchViewerHandle = renderPdfViewer(renderSearchViewerContainer, renderTextSelectionResult, {
+          showSearch: true,
+        });
+        renderSearchViewerHandle.setView("page");
+        renderSearchViewerHandle.setSearchQuery("Selection");
+        const renderSearchPageMode = readViewerPageMode(renderSearchViewerContainer);
+        const renderSearchSurface = readViewerRenderSurface(renderSearchViewerContainer);
+        const renderSearchKinds = readViewerSearchKinds(renderSearchViewerContainer);
+        const renderSearchHighlightCount = readViewerRenderHighlightCount(renderSearchViewerContainer);
+        renderSearchViewerHandle.destroy();
+        renderSearchViewerContainer.remove();
+
+        const fallbackViewerResult = renderTextSelectionResult.render.value
+          ? {
+              ...renderTextSelectionResult,
+              render: {
+                ...renderTextSelectionResult.render,
+                value: {
+                  ...renderTextSelectionResult.render.value,
+                  pages: renderTextSelectionResult.render.value.pages.map((page) =>
+                    page.pageNumber === 1 ? { ...page, imagery: undefined } : page
+                  ),
+                },
+              },
+            }
+          : renderTextSelectionResult;
+        viewerHandle.update(fallbackViewerResult, { showSearch: true, showOutline: true });
+        viewerHandle.goToPage(1);
+        const fallbackViewerLabel =
+          viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
+        const fallbackViewerPageMode = readViewerPageMode(viewerContainer);
+        const fallbackViewerRenderSurface = readViewerRenderSurface(viewerContainer);
+        const fallbackViewerRenderFallback = readViewerRenderFallback(viewerContainer);
 
         viewerHandle.destroy();
         const viewerDestroyed = viewerContainer.childElementCount === 0;
@@ -958,29 +1019,48 @@ async function runBrowserSmoke(baseUrl, browserName) {
             browserAes256XrefStreamFinding?.evidenceSource === "object" &&
             browserAes256XrefStreamFinding.objectRef?.objectNumber === 23,
           viewerInitialPage: initialViewerLabel === "Page 2 of 2",
-          viewerInitialBlocks: initialViewerBlocks.some((text) => text.includes("Second Page Overview")),
+          viewerInitialFallbackMode: initialViewerPageMode === "layout-fallback",
+          viewerInitialFallbackSurface: initialViewerRenderSurface === null,
+          viewerInitialFallbackNotice:
+            initialViewerFallback?.includes("not render-backed yet") === true,
           viewerInitialButtons: initialPreviousDisabled === false && initialNextDisabled === true,
           viewerInitialOutline: initialOutlineCount === "2",
           viewerNavigatedPage: navigatedViewerLabel === "Page 1 of 2",
-          viewerNavigatedBlocks: navigatedViewerBlocks.some((text) => text.includes("First Page Summary")),
+          viewerNavigatedFallbackMode: navigatedViewerPageMode === "layout-fallback",
+          viewerNavigatedFallbackSurface: navigatedViewerRenderSurface === null,
+          viewerNavigatedFallbackNotice:
+            navigatedViewerFallback?.includes("not render-backed yet") === true,
           viewerNavigatedButtons: navigatedPreviousDisabled === true && navigatedNextDisabled === false,
           viewerReaderMode: readerViewerMode === "reader",
           viewerReaderLabel: readerViewerLabel === "Reader view • page 1 of 2",
           viewerReaderPages: readerViewerPageCount === "2",
-          viewerReaderSearch: Number(readerSearchCount ?? "0") >= 2 && readerSearchHighlights >= 2,
+          viewerReaderSearch:
+            Number(readerSearchCount ?? "0") >= 2 &&
+            readerSearchHighlights >= 2 &&
+            readerViewerBlocks.some((text) => text.includes("Second Page Overview")),
           viewerReaderOutline: readerOutlineCount === "2",
           viewerGoToChunk: readerChunkLabel === "Reader view • page 1 of 2" && activeChunkId === firstPageChunkId,
           viewerUpdatePreservedPage: updatedViewerLabel === "Page 1 of 1",
           viewerUpdatePreservedPanels:
             updatedViewerChunkCount !== null &&
-            updatedViewerBlockCount !== null &&
             updatedViewerOutlineCount !== null &&
             updatedViewerSearchCount !== null,
-          viewerUpdatedBlocks: updatedViewerBlocks.some((text) => text.includes("Code")) === true,
+          viewerUpdatedFallbackMode: updatedViewerPageMode === "layout-fallback",
+          viewerUpdatedFallbackSurface: updatedViewerRenderSurface === null,
           viewerTableCount: updatedViewerTableCount === "1",
           viewerTableHeaders: updatedViewerHeaders.join(",") === "Code,Label,Amount",
           viewerTableCells:
             updatedViewerCells.includes("Base Salary") && updatedViewerCells.includes("Hours 25%"),
+          viewerRenderTextSearch:
+            renderSearchPageMode === "render" &&
+            renderSearchSurface === "raster" &&
+            renderSearchKinds[0] === "render-text" &&
+            Number(renderSearchHighlightCount ?? "0") >= 1,
+          viewerPerPageFallback:
+            fallbackViewerLabel === "Page 1 of 1" &&
+            fallbackViewerPageMode === "layout-fallback" &&
+            fallbackViewerRenderSurface === null &&
+            fallbackViewerRenderFallback?.includes("not render-backed yet") === true,
           viewerDestroy: viewerDestroyed === true,
         };
         const stablePayload = {
@@ -1013,6 +1093,12 @@ async function runBrowserSmoke(baseUrl, browserName) {
           viewerNavigatedPage: navigatedViewerLabel,
           viewerReaderPage: readerViewerLabel,
           viewerUpdatedPage: updatedViewerLabel,
+          viewerFallbackPage: fallbackViewerLabel,
+          viewerInitialPageMode: initialViewerPageMode,
+          viewerNavigatedPageMode: navigatedViewerPageMode,
+          viewerUpdatedPageMode: updatedViewerPageMode,
+          viewerRenderSearchKinds: renderSearchKinds.join(","),
+          viewerRenderHighlightCount: renderSearchHighlightCount,
           viewerHeaders: updatedViewerHeaders.join(","),
         };
 

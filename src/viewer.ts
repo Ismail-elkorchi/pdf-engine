@@ -1,9 +1,11 @@
 import {
   clampPageNumber,
   collectOutlineItems,
+  collectRenderSelectionMatches,
   collectSearchResults,
   createViewerState,
   findChunkById,
+  findRenderPageByNumber,
   resolveViewerOptions,
   type PdfViewerOptions,
   type PdfViewerOutlineItem,
@@ -13,11 +15,14 @@ import {
 } from "./viewer-state.ts";
 
 import type {
+  PdfBoundingBox,
   PdfKnowledgeChunk,
   PdfKnowledgeTable,
   PdfLayoutBlock,
   PdfLayoutPage,
   PdfPipelineResult,
+  PdfRenderPage,
+  PdfRenderSelectionUnit,
 } from "./contracts.ts";
 
 export type { PdfViewerOptions, PdfViewerView } from "./viewer-state.ts";
@@ -132,6 +137,70 @@ const VIEWER_STYLE = `
   gap: 18px;
   min-height: 360px;
   padding: 20px;
+}
+
+.pdf-engine-viewer__render-stage {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.pdf-engine-viewer__render-meta {
+  color: #5d6c7a;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 0.84rem;
+  letter-spacing: 0.02em;
+  margin: 0;
+}
+
+.pdf-engine-viewer__render-surface {
+  background: #ffffff;
+  border: 1px solid #d6ded5;
+  border-radius: 16px;
+  overflow: hidden;
+  position: relative;
+}
+
+.pdf-engine-viewer__render-image {
+  display: block;
+  height: auto;
+  max-width: 100%;
+  width: 100%;
+}
+
+.pdf-engine-viewer__render-overlay {
+  inset: 0;
+  pointer-events: none;
+  position: absolute;
+}
+
+.pdf-engine-viewer__render-highlight {
+  background: rgba(246, 217, 110, 0.28);
+  border: 2px solid rgba(188, 164, 107, 0.92);
+  border-radius: 8px;
+  box-sizing: border-box;
+  position: absolute;
+}
+
+.pdf-engine-viewer__render-highlight[data-shape="point"] {
+  background: rgba(246, 217, 110, 0.92);
+  border-radius: 999px;
+  height: 12px;
+  transform: translate(-50%, -50%);
+  width: 12px;
+}
+
+.pdf-engine-viewer__render-fallback {
+  align-items: center;
+  background: #fff8e6;
+  border: 1px solid #ead9af;
+  border-radius: 12px;
+  color: #6a5631;
+  display: inline-flex;
+  font-family: "IBM Plex Sans", "Segoe UI", sans-serif;
+  font-size: 0.86rem;
+  gap: 8px;
+  padding: 10px 12px;
 }
 
 .pdf-engine-viewer__reader-page {
@@ -312,8 +381,10 @@ const VIEWER_STYLE = `
 /**
  * Renders a browser-only document viewer for a previously computed pipeline result.
  *
- * The viewer reuses staged layout and knowledge artifacts; it does not re-parse the
- * source document and it does not attempt pixel-accurate rendering.
+ * The viewer does not re-parse the source document. Page view prefers canonical
+ * render artifacts per page and falls back explicitly to staged layout only when a
+ * page is not render-backed yet. Reader view continues to reuse staged layout and
+ * knowledge artifacts.
  *
  * @param container Browser DOM element that will own the viewer subtree.
  * @param pipelineResult Existing staged pipeline result to visualize.
@@ -413,6 +484,12 @@ function buildViewerRoot(
   state: PdfViewerState,
   actions: PdfViewerActions,
 ): HTMLElement {
+  const currentRenderPage = findRenderPageByNumber(state.pipelineResult, state.currentPageNumber);
+  const currentRenderHighlights = collectRenderSelectionMatches(
+    state.pipelineResult,
+    state.currentPageNumber,
+    state.searchQuery,
+  );
   const currentLayoutPage = state.pipelineResult.layout.value?.pages.find(
     (page) => page.pageNumber === state.currentPageNumber,
   );
@@ -446,6 +523,8 @@ function buildViewerRoot(
     layout.append(
       createPagePanel(
         ownerDocument,
+        currentRenderPage,
+        currentRenderHighlights,
         currentLayoutPage,
         currentTables,
         state.options.showTables,
@@ -530,7 +609,7 @@ function createToolbar(
     searchInput.className = "pdf-engine-viewer__search-input";
     searchInput.type = "search";
     searchInput.value = state.searchQuery;
-    searchInput.placeholder = "Find text in blocks, chunks, and tables";
+    searchInput.placeholder = "Find text in render text, blocks, chunks, and tables";
     searchInput.dataset["viewerSearchInput"] = "true";
     searchInput.addEventListener("input", () => {
       actions.setSearchQuery(searchInput.value);
@@ -564,19 +643,197 @@ function formatPageLabel(state: PdfViewerState): string {
 
 function createPagePanel(
   ownerDocument: Document,
+  renderPage: PdfRenderPage | undefined,
+  matchingRenderUnits: readonly PdfRenderSelectionUnit[],
   layoutPage: PdfLayoutPage | undefined,
   tables: readonly PdfKnowledgeTable[],
   showTables: boolean,
   searchQuery: string,
 ): HTMLElement {
   const pagePanel = createElement(ownerDocument, "section", "pdf-engine-viewer__page");
-  pagePanel.append(createBlocksSection(ownerDocument, layoutPage, searchQuery, true));
+
+  const renderSurface = resolveRenderSurface(renderPage);
+  if (renderPage && renderSurface) {
+    pagePanel.dataset["viewerPageMode"] = "render";
+    pagePanel.append(
+      createRenderPageSection(ownerDocument, renderPage, renderSurface, matchingRenderUnits),
+    );
+  } else {
+    pagePanel.dataset["viewerPageMode"] = "layout-fallback";
+    pagePanel.append(createRenderFallbackNotice(ownerDocument));
+    pagePanel.append(createBlocksSection(ownerDocument, layoutPage, searchQuery, true));
+  }
 
   if (showTables) {
     pagePanel.append(createTablesSection(ownerDocument, tables, searchQuery, true));
   }
 
   return pagePanel;
+}
+
+interface PdfResolvedRenderSurface {
+  readonly kind: "raster" | "svg";
+  readonly source: string;
+  readonly width: number;
+  readonly height: number;
+}
+
+interface PdfViewerRenderHighlightBox {
+  readonly id: string;
+  readonly text: string;
+  readonly shape: "box" | "point";
+  readonly leftPercent: number;
+  readonly topPercent: number;
+  readonly widthPercent?: number;
+  readonly heightPercent?: number;
+}
+
+function createRenderPageSection(
+  ownerDocument: Document,
+  renderPage: PdfRenderPage,
+  surface: PdfResolvedRenderSurface,
+  matchingRenderUnits: readonly PdfRenderSelectionUnit[],
+): HTMLElement {
+  const section = createElement(ownerDocument, "section", "pdf-engine-viewer__section");
+  section.append(createSectionTitle(ownerDocument, "Rendered Page"));
+
+  const stage = createElement(ownerDocument, "div", "pdf-engine-viewer__render-stage");
+  const meta = createElement(ownerDocument, "p", "pdf-engine-viewer__render-meta");
+  meta.textContent =
+    matchingRenderUnits.length === 0
+      ? `Render-backed page • ${surface.kind}`
+      : `Render-backed page • ${surface.kind} • ${String(matchingRenderUnits.length)} search highlight${matchingRenderUnits.length === 1 ? "" : "s"}`;
+
+  const surfaceElement = createElement(ownerDocument, "div", "pdf-engine-viewer__render-surface");
+  surfaceElement.dataset["viewerRenderSurface"] = surface.kind;
+  surfaceElement.dataset["viewerRenderHighlightCount"] = String(matchingRenderUnits.length);
+
+  const image = ownerDocument.createElement("img");
+  image.className = "pdf-engine-viewer__render-image";
+  image.alt = `Rendered page ${String(renderPage.pageNumber)}`;
+  image.src = surface.source;
+  image.width = surface.width;
+  image.height = surface.height;
+  surfaceElement.append(image);
+
+  const highlights = resolveRenderHighlightBoxes(renderPage.pageBox, matchingRenderUnits);
+  if (highlights.length > 0) {
+    const overlay = createElement(ownerDocument, "div", "pdf-engine-viewer__render-overlay");
+    overlay.dataset["viewerRenderHighlightCount"] = String(highlights.length);
+    for (const highlightSpec of highlights) {
+      const highlight = createElement(ownerDocument, "div", "pdf-engine-viewer__render-highlight");
+      highlight.dataset["viewerRenderHighlight"] = highlightSpec.id;
+      highlight.dataset["viewerRenderHighlightShape"] = highlightSpec.shape;
+      highlight.dataset["shape"] = highlightSpec.shape;
+      highlight.title = highlightSpec.text;
+      highlight.style.left = `${formatPercent(highlightSpec.leftPercent)}%`;
+      highlight.style.top = `${formatPercent(highlightSpec.topPercent)}%`;
+      if (highlightSpec.shape === "box") {
+        highlight.style.width = `${formatPercent(highlightSpec.widthPercent ?? 0)}%`;
+        highlight.style.height = `${formatPercent(highlightSpec.heightPercent ?? 0)}%`;
+      }
+      overlay.append(highlight);
+    }
+    surfaceElement.append(overlay);
+  }
+
+  stage.append(meta, surfaceElement);
+  section.append(stage);
+  return section;
+}
+
+function createRenderFallbackNotice(ownerDocument: Document): HTMLElement {
+  const notice = createElement(ownerDocument, "p", "pdf-engine-viewer__render-fallback");
+  notice.dataset["viewerRenderFallback"] = "true";
+  notice.textContent = "This page is not render-backed yet. Showing the layout fallback instead.";
+  return notice;
+}
+
+function resolveRenderSurface(renderPage: PdfRenderPage | undefined): PdfResolvedRenderSurface | null {
+  if (!renderPage?.imagery) {
+    return null;
+  }
+
+  if (renderPage.imagery.raster) {
+    return {
+      kind: "raster",
+      source: createByteDataUrl(renderPage.imagery.raster.bytes, renderPage.imagery.raster.mimeType),
+      width: renderPage.imagery.raster.width,
+      height: renderPage.imagery.raster.height,
+    };
+  }
+
+  if (renderPage.imagery.svg) {
+    return {
+      kind: "svg",
+      source: createSvgDataUrl(renderPage.imagery.svg.markup),
+      width: renderPage.imagery.svg.width,
+      height: renderPage.imagery.svg.height,
+    };
+  }
+
+  return null;
+}
+
+function resolveRenderHighlightBoxes(
+  pageBox: PdfBoundingBox | undefined,
+  matchingRenderUnits: readonly PdfRenderSelectionUnit[],
+): readonly PdfViewerRenderHighlightBox[] {
+  if (!pageBox || pageBox.width <= 0 || pageBox.height <= 0) {
+    return [];
+  }
+
+  return matchingRenderUnits.flatMap((unit) => {
+    const box = unit.bbox ? toBoundingHighlightBox(unit, pageBox) : undefined;
+    if (box) {
+      return [box];
+    }
+
+    const anchorBox = unit.anchor ? toAnchorHighlightBox(unit, pageBox) : undefined;
+    return anchorBox ? [anchorBox] : [];
+  });
+}
+
+function toBoundingHighlightBox(
+  unit: PdfRenderSelectionUnit,
+  pageBox: PdfBoundingBox,
+): PdfViewerRenderHighlightBox | undefined {
+  const bbox = unit.bbox;
+  if (!bbox || bbox.width <= 0 || bbox.height <= 0) {
+    return undefined;
+  }
+
+  return {
+    id: unit.id,
+    text: unit.text,
+    shape: "box",
+    leftPercent: ((bbox.x - pageBox.x) / pageBox.width) * 100,
+    topPercent: ((pageBox.y + pageBox.height - (bbox.y + bbox.height)) / pageBox.height) * 100,
+    widthPercent: (bbox.width / pageBox.width) * 100,
+    heightPercent: (bbox.height / pageBox.height) * 100,
+  };
+}
+
+function toAnchorHighlightBox(
+  unit: PdfRenderSelectionUnit,
+  pageBox: PdfBoundingBox,
+): PdfViewerRenderHighlightBox | undefined {
+  const anchor = unit.anchor;
+  if (!anchor) {
+    return undefined;
+  }
+
+  return {
+    id: unit.id,
+    text: unit.text,
+    shape: "point",
+    leftPercent: ((anchor.x - pageBox.x) / pageBox.width) * 100,
+    topPercent: ((pageBox.y + pageBox.height - anchor.y) / pageBox.height) * 100,
+  };
+}
+
+function formatPercent(value: number): string {
+  return Number(value.toFixed(3)).toString();
 }
 
 function createReaderPanel(
@@ -724,12 +981,12 @@ function createSearchPanel(
 
   const query = state.searchQuery.trim();
   if (query.length === 0) {
-    panel.append(createEmptyText(ownerDocument, "Enter a query to search the staged reader output."));
+    panel.append(createEmptyText(ownerDocument, "Enter a query to search render text, blocks, chunks, and tables."));
     return panel;
   }
 
   if (searchResults.length === 0) {
-    panel.append(createEmptyText(ownerDocument, "No staged matches were found for the current query."));
+    panel.append(createEmptyText(ownerDocument, "No render or staged matches were found for the current query."));
     return panel;
   }
 
@@ -746,6 +1003,7 @@ function createSearchPanel(
       actions.goToPage(result.pageNumber);
     });
     button.dataset["viewerSearchResult"] = result.id;
+    button.dataset["viewerSearchResultKind"] = result.kind;
     appendHighlightedText(ownerDocument, button, result.text, state.searchQuery, "pdf-engine-viewer__action-text");
     item.append(label, button);
     list.append(item);
@@ -986,6 +1244,20 @@ function appendHighlightedText(
 
 function normalizeSearchQuery(query: string): string {
   return query.trim().toLowerCase();
+}
+
+function createSvgDataUrl(markup: string): string {
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(markup)}`;
+}
+
+function createByteDataUrl(bytes: Uint8Array, mimeType: string): string {
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let offset = 0; offset < bytes.length; offset += chunkSize) {
+    const chunk = bytes.subarray(offset, offset + chunkSize);
+    binary += String.fromCharCode(...chunk);
+  }
+  return `data:${mimeType};base64,${globalThis.btoa(binary)}`;
 }
 
 function createSectionTitle(ownerDocument: Document, text: string): HTMLElement {

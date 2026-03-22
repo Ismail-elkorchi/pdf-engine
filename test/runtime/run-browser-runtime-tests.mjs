@@ -136,6 +136,20 @@ try {
     );
 
     const browserDocument = globalThis.document;
+    const readViewerPageMode = (container) =>
+      container.querySelector("[data-viewer-page-mode]")?.dataset.viewerPageMode ?? null;
+    const readViewerRenderSurface = (container) =>
+      container.querySelector("[data-viewer-render-surface]")?.dataset.viewerRenderSurface ?? null;
+    const readViewerFallbackText = (container) =>
+      container.querySelector("[data-viewer-render-fallback='true']")?.textContent ?? null;
+    const readViewerSearchResultKinds = (container) =>
+      Array.from(
+        container.querySelectorAll("[data-viewer-search-result-kind]"),
+        (element) => element.dataset.viewerSearchResultKind ?? null,
+      );
+    const readViewerRenderHighlightCount = (container) =>
+      container.querySelector("[data-viewer-render-highlight-count]")?.dataset.viewerRenderHighlightCount ?? null;
+
     const viewerContainer = browserDocument.createElement("div");
     browserDocument.body.append(viewerContainer);
     const viewerHandle = renderPdfViewer(viewerContainer, multiPageResult, {
@@ -146,7 +160,55 @@ try {
     viewerHandle.goToPage(2);
     const activePageLabel =
       viewerContainer.querySelector("[data-viewer-page-label='true']")?.textContent ?? null;
+    const activePageMode = readViewerPageMode(viewerContainer);
+    const activeRenderSurface = readViewerRenderSurface(viewerContainer);
+    const activeFallbackText = readViewerFallbackText(viewerContainer);
     viewerHandle.destroy();
+    viewerContainer.remove();
+
+    const renderViewerContainer = browserDocument.createElement("div");
+    browserDocument.body.append(renderViewerContainer);
+    const renderViewerHandle = renderPdfViewer(renderViewerContainer, renderTextResult, {
+      showSearch: true,
+    });
+    renderViewerHandle.setView("page");
+    const renderPageMode = readViewerPageMode(renderViewerContainer);
+    const renderSurface = readViewerRenderSurface(renderViewerContainer);
+    const renderFallbackText = readViewerFallbackText(renderViewerContainer);
+    renderViewerHandle.setSearchQuery("Selection");
+    const renderSearchPageMode = readViewerPageMode(renderViewerContainer);
+    const renderSearchSurface = readViewerRenderSurface(renderViewerContainer);
+    const renderSearchResultKinds = readViewerSearchResultKinds(renderViewerContainer);
+    const renderSearchHighlightCount = readViewerRenderHighlightCount(renderViewerContainer);
+    renderViewerHandle.destroy();
+    renderViewerContainer.remove();
+
+    const fallbackViewerResult = renderTextResult.render.value
+      ? {
+          ...renderTextResult,
+          render: {
+            ...renderTextResult.render,
+            value: {
+              ...renderTextResult.render.value,
+              pages: renderTextResult.render.value.pages.map((page) =>
+                page.pageNumber === 1 ? { ...page, imagery: undefined } : page
+              ),
+            },
+          },
+        }
+      : renderTextResult;
+    const fallbackViewerContainer = browserDocument.createElement("div");
+    browserDocument.body.append(fallbackViewerContainer);
+    const fallbackViewerHandle = renderPdfViewer(fallbackViewerContainer, fallbackViewerResult, {
+      showSearch: true,
+    });
+    fallbackViewerHandle.setView("page");
+    fallbackViewerHandle.goToPage(1);
+    const fallbackPageMode = readViewerPageMode(fallbackViewerContainer);
+    const fallbackRenderSurface = readViewerRenderSurface(fallbackViewerContainer);
+    const fallbackText = readViewerFallbackText(fallbackViewerContainer);
+    fallbackViewerHandle.destroy();
+    fallbackViewerContainer.remove();
 
     const checks = {
       identityMode: engine.identity.mode === "core",
@@ -165,6 +227,21 @@ try {
         ) === true,
       multiPageCount: multiPageResult.render.value?.pages.length === 2,
       viewerPageNavigation: activePageLabel?.includes("Page 2") === true,
+      viewerPageFallbackMode: activePageMode === "layout-fallback",
+      viewerPageFallbackSurface: activeRenderSurface === null,
+      viewerPageFallbackNotice:
+        activeFallbackText?.includes("not render-backed yet") === true,
+      viewerRenderMode: renderPageMode === "render",
+      viewerRenderSurface: renderSurface === "raster",
+      viewerRenderNoFallback: renderFallbackText === null,
+      viewerRenderSearchMode: renderSearchPageMode === "render",
+      viewerRenderSearchSurface: renderSearchSurface === "raster",
+      viewerRenderSearchKind: renderSearchResultKinds[0] === "render-text",
+      viewerRenderHighlightCount: Number(renderSearchHighlightCount ?? "0") >= 1,
+      viewerPerPageFallback:
+        fallbackPageMode === "layout-fallback" &&
+        fallbackRenderSurface === null &&
+        fallbackText?.includes("not render-backed yet") === true,
       geometryPathPresent: geometryPathSignature !== null,
       geometryRenderPathPresent: geometryRenderPathSignature !== null,
       geometrySegmentsPreserved:
@@ -237,6 +314,13 @@ try {
         simpleRenderHash: simpleResult.render.value?.renderHash.hex ?? null,
         javascriptDecision: javascriptAdmission.value?.decision ?? null,
         multiPageCount: multiPageResult.render.value?.pages.length ?? null,
+        viewerPageMode: activePageMode,
+        viewerPageFallbackText: activeFallbackText,
+        viewerRenderPageMode: renderPageMode,
+        viewerRenderSurface: renderSurface,
+        viewerRenderSearchKinds: renderSearchResultKinds,
+        viewerRenderHighlightCount: renderSearchHighlightCount,
+        viewerFallbackMode: fallbackPageMode,
         geometryPathSignature,
         geometryRenderHash: geometryResult.render.value?.renderHash.hex ?? null,
         renderTextIndexText: renderTextResult.render.value?.pages[0]?.textIndex.text ?? null,
