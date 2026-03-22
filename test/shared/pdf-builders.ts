@@ -8,10 +8,16 @@ export interface SyntheticPdfObject {
 export interface SyntheticPdfPageSpec {
   readonly content: string;
   readonly resourcesBody?: string;
+  readonly mediaBox?: readonly [number, number, number, number];
+  readonly cropBox?: readonly [number, number, number, number];
 }
 
 export interface RenderResourcePayloadPdfOptions {
   readonly includeUnusedResources?: boolean;
+  readonly reorderResourceEntries?: boolean;
+}
+
+export interface RenderImageryPdfOptions {
   readonly reorderResourceEntries?: boolean;
 }
 
@@ -49,12 +55,14 @@ export function buildPdfWithPageSpecs(
     const contentStreamText = pageSpec.content;
     const contentByteLength = textEncoder.encode(contentStreamText).byteLength;
     const resourcesBody = pageSpec.resourcesBody ?? "<< /Font << /F1 3 0 R >> >>";
+    const mediaBox = formatPageBox(pageSpec.mediaBox ?? [0, 0, 612, 792]);
+    const cropBox = pageSpec.cropBox ? ` /CropBox ${formatPageBox(pageSpec.cropBox)}` : "";
 
     objects.push(
       {
         objectNumber: pageObjectNumber,
         body:
-          `<< /Type /Page /Parent 2 0 R /Resources ${resourcesBody} /MediaBox [0 0 612 792] /Contents ${String(contentObjectNumber)} 0 R >>`,
+          `<< /Type /Page /Parent 2 0 R /Resources ${resourcesBody} /MediaBox ${mediaBox}${cropBox} /Contents ${String(contentObjectNumber)} 0 R >>`,
       },
       {
         objectNumber: contentObjectNumber,
@@ -171,4 +179,67 @@ export function buildPdfWithRenderResourcePayloads(
         : []),
     ],
   );
+}
+
+export function buildPdfWithRenderImagery(
+  options: RenderImageryPdfOptions = {},
+): Uint8Array {
+  const reorderResourceEntries = options.reorderResourceEntries === true;
+  const fontEntries = ["/F1 10 0 R"];
+  const xObjectEntries = ["/Im1 20 0 R"];
+  const orderedFontEntries = reorderResourceEntries ? [...fontEntries].reverse() : fontEntries;
+  const orderedXObjectEntries = reorderResourceEntries ? [...xObjectEntries].reverse() : xObjectEntries;
+  const resourcesBody =
+    `<< /Font << ${orderedFontEntries.join(" ")} >> /XObject << ${orderedXObjectEntries.join(" ")} >> >>`;
+
+  return buildPdfWithPageSpecs(
+    [
+      {
+        resourcesBody,
+        mediaBox: [0, 0, 220, 220],
+        cropBox: [10, 20, 210, 180],
+        content: [
+          "BT",
+          "/F1 18 Tf",
+          "1 0 0 1 40 130 Tm",
+          "(Render View) Tj",
+          "ET",
+          "0 0 1 rg",
+          "0 0 1 RG",
+          "2 w",
+          "30 40 70 35 re",
+          "B",
+          "q",
+          "24 0 0 24 130 50 cm",
+          "/Im1 Do",
+          "Q",
+        ].join("\n"),
+      },
+    ],
+    [
+      {
+        objectNumber: 10,
+        body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FontDescriptor 11 0 R >>",
+      },
+      {
+        objectNumber: 11,
+        body: "<< /Type /FontDescriptor /FontName /Helvetica /FontFile 12 0 R >>",
+      },
+      {
+        objectNumber: 12,
+        body: "<< /Length 4 >>\nstream\nTEXT\nendstream",
+      },
+      {
+        objectNumber: 20,
+        body:
+          "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n" +
+          "ABCDEFGHIJKL" +
+          "\nendstream",
+      },
+    ],
+  );
+}
+
+function formatPageBox(box: readonly [number, number, number, number]): string {
+  return `[${box.map((value) => String(value)).join(" ")}]`;
 }

@@ -5,12 +5,19 @@ export interface PdfTestFixtureDefinition {
     | "javascript-action"
     | "observed-path-geometry"
     | "render-text-selection"
-    | "render-resource-payloads";
+    | "render-resource-payloads"
+    | "render-imagery-raster";
   readonly fileName: string;
   readonly relativePath: string;
   readonly expectedText?: string;
   readonly expectedPageCount?: number;
   readonly expectedRenderResourcePayloadCount?: number;
+  readonly expectedPageBox?: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
   readonly expectedPolicyDecision?: "rejected";
   readonly expectedFeatureKinds?: readonly string[];
 }
@@ -22,6 +29,7 @@ export const pdfTestFixtures: {
   readonly observedPathGeometry: PdfTestFixtureDefinition;
   readonly renderTextSelection: PdfTestFixtureDefinition;
   readonly renderResourcePayloads: PdfTestFixtureDefinition;
+  readonly renderImageryRaster: PdfTestFixtureDefinition;
 } = {
   simpleText: {
     id: "simple-text",
@@ -64,6 +72,19 @@ export const pdfTestFixtures: {
     expectedText: "Payload Render",
     expectedPageCount: 1,
     expectedRenderResourcePayloadCount: 2,
+  },
+  renderImageryRaster: {
+    id: "render-imagery-raster",
+    fileName: "render-imagery-raster.pdf",
+    relativePath: "../fixtures/render-imagery-raster.pdf",
+    expectedText: "Render View",
+    expectedPageCount: 1,
+    expectedPageBox: {
+      x: 10,
+      y: 20,
+      width: 200,
+      height: 160,
+    },
   },
 } as const;
 

@@ -61,6 +61,9 @@ try {
     const renderResourceBytes = await readBytes(
       "/test/fixtures/render-resource-payloads.pdf",
     );
+    const renderImageryBytes = await readBytes(
+      "/test/fixtures/render-imagery-raster.pdf",
+    );
 
     const simpleResult = await engine.run({
       source: {
@@ -101,6 +104,12 @@ try {
         fileName: "render-resource-payloads.pdf",
       },
     });
+    const renderImageryResult = await engine.run({
+      source: {
+        bytes: renderImageryBytes,
+        fileName: "render-imagery-raster.pdf",
+      },
+    });
     const geometryPathMark =
       geometryResult.observation.value?.pages[0]?.marks.find((mark) =>
         mark.kind === "path"
@@ -121,6 +130,9 @@ try {
     );
     const renderResourcePayloadSignature = toRenderResourcePayloadSignature(
       renderResourceResult.render.value,
+    );
+    const renderImagerySignature = await toRenderImagerySignature(
+      renderImageryResult.render.value?.pages[0],
     );
 
     const browserDocument = globalThis.document;
@@ -195,6 +207,16 @@ try {
         renderResourcePayloadSignature.imageCommandPayloadIds.every((value) =>
           value !== null
         ),
+      renderImageryPageBox:
+        JSON.stringify(renderImageryResult.render.value?.pages[0]?.pageBox ?? null) ===
+          JSON.stringify({ x: 10, y: 20, width: 200, height: 160 }),
+      renderImagerySvgPresent:
+        renderImageryResult.render.value?.pages[0]?.imagery?.svg.mimeType === "image/svg+xml",
+      renderImageryRasterPresent:
+        renderImageryResult.render.value?.pages[0]?.imagery?.raster.mimeType === "image/png",
+      renderImageryPngSignature:
+        JSON.stringify(Array.from(renderImageryResult.render.value?.pages[0]?.imagery?.raster.bytes.slice(0, 8) ?? [])) ===
+          JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
     };
 
     const failedChecks = Object.entries(checks)
@@ -222,6 +244,8 @@ try {
         renderTextSelectionHash: renderTextResult.render.value?.pages[0]?.renderHash.hex ?? null,
         renderResourcePayloadSignature,
         renderResourcePayloadHash: renderResourceResult.render.value?.renderHash.hex ?? null,
+        renderImagerySignature,
+        renderImageryHash: renderImageryResult.render.value?.pages[0]?.renderHash.hex ?? null,
       },
     };
 
@@ -299,6 +323,33 @@ try {
             .map((command) => command.imagePayloadId ?? null)
         ),
       };
+    }
+
+    async function toRenderImagerySignature(renderPage) {
+      const svg = renderPage?.imagery?.svg;
+      const raster = renderPage?.imagery?.raster;
+      if (!svg || !raster) {
+        return null;
+      }
+
+      return {
+        pageBox: renderPage?.pageBox ?? null,
+        svgMarkup: svg.markup,
+        svgWidth: svg.width,
+        svgHeight: svg.height,
+        rasterWidth: raster.width,
+        rasterHeight: raster.height,
+        rasterPngSignature: Array.from(raster.bytes.slice(0, 8)),
+        rasterByteLength: raster.bytes.byteLength,
+        rasterSha256: await sha256Hex(raster.bytes),
+      };
+    }
+
+    async function sha256Hex(bytes) {
+      const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+      return Array.from(new Uint8Array(digest))
+        .map((value) => value.toString(16).padStart(2, "0"))
+        .join("");
     }
   }, browserName);
 

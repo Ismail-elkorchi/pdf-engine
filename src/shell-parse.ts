@@ -2,6 +2,7 @@ import { PdfByteCursor } from "./pdf-byte-cursor.ts";
 import { decodePdfStreamBytes } from "./stream-decode.ts";
 
 import type {
+  PdfBoundingBox,
   PdfCrossReferenceKind,
   PdfCrossReferenceSection,
   PdfDocumentSource,
@@ -37,6 +38,10 @@ export interface ParsedPageEntry {
   readonly graphicsStateBindings: readonly ParsedGraphicsStateResourceBinding[];
   readonly propertyBindings: readonly ParsedPropertyResourceBinding[];
   readonly xObjectBindings: readonly ParsedXObjectResourceBinding[];
+  readonly mediaBox?: PdfBoundingBox;
+  readonly cropBox?: PdfBoundingBox;
+  readonly pageBox?: PdfBoundingBox;
+  readonly pageBoxSource?: "media-box" | "crop-box";
   readonly resourceRef?: PdfObjectRef;
   readonly resourceCount: number;
   readonly resourceOrigin?: PdfPageValueOrigin;
@@ -1287,12 +1292,20 @@ function toPageEntry(
   const contentStreamRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Contents"));
   const annotationRefs = readObjectRefsValue(objectShell.dictionaryEntries.get("Annots"));
   const directResourceValue = readInheritedPageValue(objectShell, "Resources");
+  const directMediaBoxValue = readInheritedPageValue(objectShell, "MediaBox");
+  const directCropBoxValue = readInheritedPageValue(objectShell, "CropBox");
   const resourceValue = directResourceValue ?? inheritedState.resources;
+  const mediaBoxValue = directMediaBoxValue ?? inheritedState.mediaBox;
+  const cropBoxValue = directCropBoxValue ?? inheritedState.cropBox;
   const resourceOrigin: PdfPageValueOrigin | undefined = directResourceValue
     ? "direct"
     : resourceValue
       ? "inherited"
       : undefined;
+  const mediaBox = mediaBoxValue ? resolvePageBoxValue(mediaBoxValue.rawValue, objectIndex) : undefined;
+  const cropBox = cropBoxValue ? resolvePageBoxValue(cropBoxValue.rawValue, objectIndex) : undefined;
+  const pageBox = cropBox ?? mediaBox;
+  const pageBoxSource = cropBox !== undefined ? "crop-box" : mediaBox !== undefined ? "media-box" : undefined;
   const fontBindings = resourceValue ? readFontResourceBindings(resourceValue.rawValue, objectIndex) : [];
   const colorSpaceBindings = resourceValue ? readColorSpaceResourceBindings(resourceValue.rawValue, objectIndex) : [];
   const graphicsStateBindings = resourceValue ? readGraphicsStateResourceBindings(resourceValue.rawValue, objectIndex) : [];
@@ -1309,6 +1322,10 @@ function toPageEntry(
     graphicsStateBindings,
     propertyBindings,
     xObjectBindings,
+    ...(mediaBox !== undefined ? { mediaBox } : {}),
+    ...(cropBox !== undefined ? { cropBox } : {}),
+    ...(pageBox !== undefined ? { pageBox } : {}),
+    ...(pageBoxSource !== undefined ? { pageBoxSource } : {}),
     ...(resourceValue?.ref !== undefined ? { resourceRef: resourceValue.ref } : {}),
     ...(resourceOrigin !== undefined ? { resourceOrigin } : {}),
     resourceCount: resourceValue ? 1 : 0,
@@ -1543,6 +1560,146 @@ function resolveDictionaryValue(
   }
 
   return findFirstDictionaryToken(objectIndex.get(keyOfObjectRef(objectRef))?.objectValueText ?? "");
+}
+
+function resolvePageBoxValue(
+  rawValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): PdfBoundingBox | undefined {
+  const arrayValue = resolveArrayValue(rawValue, objectIndex);
+  if (arrayValue === undefined) {
+    return undefined;
+  }
+
+  const coordinates = readNumericArrayValue(arrayValue);
+  if (coordinates.length < 4) {
+    return undefined;
+  }
+
+  const [left, bottom, right, top] = coordinates;
+  if (
+    left === undefined ||
+    bottom === undefined ||
+    right === undefined ||
+    top === undefined
+  ) {
+    return undefined;
+  }
+
+  const minX = Math.min(left, right);
+  const maxX = Math.max(left, right);
+  const minY = Math.min(bottom, top);
+  const maxY = Math.max(bottom, top);
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
+}
+
+function resolveArrayValue(
+  rawValue: string,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject> | undefined,
+): string | undefined {
+  const trimmedValue = rawValue.trim();
+  if (trimmedValue.startsWith("[") && trimmedValue.endsWith("]")) {
+    return trimmedValue;
+  }
+
+  const objectRef = readObjectRefValue(trimmedValue);
+  if (objectRef === undefined || objectIndex === undefined) {
+    return undefined;
+  }
+
+  return findFirstArrayToken(objectIndex.get(keyOfObjectRef(objectRef))?.objectValueText ?? "");
+}
+
+function findFirstArrayToken(text: string): string | undefined {
+  const startIndex = text.indexOf("[");
+  if (startIndex < 0) {
+    return undefined;
+  }
+
+  let arrayDepth = 0;
+  let inLiteral = false;
+  let literalDepth = 0;
+  let inHex = false;
+  let isEscaped = false;
+
+  for (let index = startIndex; index < text.length; index += 1) {
+    const character = text[index];
+    if (character === undefined) {
+      break;
+    }
+
+    if (inHex) {
+      if (character === ">") {
+        inHex = false;
+      }
+      continue;
+    }
+
+    if (inLiteral) {
+      if (isEscaped) {
+        isEscaped = false;
+        continue;
+      }
+      if (character === "\\") {
+        isEscaped = true;
+        continue;
+      }
+      if (character === "(") {
+        literalDepth += 1;
+        continue;
+      }
+      if (character === ")") {
+        if (literalDepth === 0) {
+          inLiteral = false;
+        } else {
+          literalDepth -= 1;
+        }
+      }
+      continue;
+    }
+
+    if (character === "<" && text[index + 1] !== "<") {
+      inHex = true;
+      continue;
+    }
+    if (character === "(") {
+      inLiteral = true;
+      literalDepth = 0;
+      continue;
+    }
+
+    if (character === "[") {
+      arrayDepth += 1;
+      continue;
+    }
+
+    if (character === "]") {
+      arrayDepth -= 1;
+      if (arrayDepth === 0) {
+        return text.slice(startIndex, index + 1);
+      }
+    }
+  }
+
+  return undefined;
+}
+
+function readNumericArrayValue(arrayValue: string): number[] {
+  const normalized = arrayValue.slice(1, -1).trim();
+  if (normalized.length === 0) {
+    return [];
+  }
+
+  return normalized
+    .split(/\s+/)
+    .map((token) => readNumericTokenValue(token))
+    .filter((value): value is number => value !== undefined);
 }
 
 function countPageObjects(indirectObjects: readonly ParsedIndirectObject[]): number | undefined {

@@ -6,6 +6,7 @@ import { loadNamedPdfFixture } from "../shared/load-fixture.ts";
 import {
   buildPdfWithPageContents,
   buildPdfWithPageSpecs,
+  buildPdfWithRenderImagery,
   buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
 
@@ -250,4 +251,41 @@ test("public render contracts expose resource payloads and payload-linked comman
 
   assert.equal(textCommand.fontPayloadId, fontPayload.id);
   assert.equal(imageCommand.imagePayloadId, imagePayload.id);
+});
+
+test("public render contracts expose page-box-aware imagery", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImagery();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-render-imagery-raster.pdf",
+    },
+  });
+
+  const renderPage = result.render.value?.pages[0];
+  assert.ok(renderPage);
+  assert.ok(renderPage?.imagery?.svg);
+  assert.ok(renderPage?.imagery?.raster);
+  if (!renderPage?.imagery?.svg || !renderPage.imagery.raster) {
+    return;
+  }
+  assert.deepEqual(renderPage?.pageBox, {
+    x: 10,
+    y: 20,
+    width: 200,
+    height: 160,
+  });
+  assert.equal(renderPage.imagery.svg.mimeType, "image/svg+xml");
+  assert.equal(renderPage.imagery.svg.width, 200);
+  assert.equal(renderPage.imagery.svg.height, 160);
+  assert.equal(renderPage.imagery.raster.mimeType, "image/png");
+  assert.equal(renderPage.imagery.raster.width, 200);
+  assert.equal(renderPage.imagery.raster.height, 160);
+  assert.deepEqual(
+    Array.from(renderPage.imagery.raster.bytes.subarray(0, 8)),
+    [137, 80, 78, 71, 13, 10, 26, 10],
+  );
+  assert.equal(result.render.value?.knownLimits.includes("render-imagery-partial"), true);
 });

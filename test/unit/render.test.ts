@@ -2,8 +2,11 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { buildRenderDocument } from "../../src/render.ts";
-import { buildPdfWithRenderResourcePayloads } from "../shared/pdf-builders.ts";
 import { createPdfEngine } from "../../src/index.ts";
+import {
+  buildPdfWithRenderImagery,
+  buildPdfWithRenderResourcePayloads,
+} from "../shared/pdf-builders.ts";
 
 test("buildRenderDocument lifts observed marks into a render document", async () => {
   const renderDocument = await buildRenderDocument({
@@ -245,8 +248,24 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
     },
   );
   assert.ok(renderDocument.knownLimits.includes("layout-block-heuristic"));
-  assert.ok(renderDocument.knownLimits.includes("render-display-list-only"));
-  assert.ok(renderDocument.knownLimits.includes("render-raster-not-implemented"));
+  assert.ok(renderDocument.knownLimits.includes("render-imagery-partial"));
+  assert.deepEqual(renderDocument.pages[0]?.pageBox, {
+    x: 10,
+    y: 20,
+    width: 80,
+    height: 12,
+  });
+  assert.ok(renderDocument.pages[0]?.imagery?.svg);
+  assert.ok(renderDocument.pages[0]?.imagery?.raster);
+  if (!renderDocument.pages[0]?.imagery?.svg || !renderDocument.pages[0].imagery.raster) {
+    return;
+  }
+  assert.equal(renderDocument.pages[0].imagery.svg.mimeType, "image/svg+xml");
+  assert.equal(renderDocument.pages[0].imagery.raster.mimeType, "image/png");
+  assert.deepEqual(
+    Array.from(renderDocument.pages[0].imagery.raster.bytes.subarray(0, 8)),
+    [137, 80, 78, 71, 13, 10, 26, 10],
+  );
   assert.deepEqual(renderDocument.resourcePayloads, []);
   assert.equal(renderDocument.renderHash.algorithm, "sha-256");
   assert.equal(renderDocument.renderHash.hex.length, 64);
@@ -291,4 +310,47 @@ test("buildRenderDocument exposes font and image resource payloads for later ima
 
   assert.equal(textCommand.fontPayloadId, fontPayload.id);
   assert.equal(imageCommand.imagePayloadId, imagePayload.id);
+});
+
+test("buildRenderDocument emits page-box-aware SVG and PNG imagery", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImagery();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "render-imagery-raster.pdf",
+    },
+  });
+
+  const renderDocument = result.render.value;
+  const renderPage = renderDocument?.pages[0];
+  assert.ok(renderDocument);
+  assert.ok(renderPage);
+  assert.ok(renderPage?.imagery?.svg);
+  assert.ok(renderPage?.imagery?.raster);
+  if (!renderPage?.imagery?.svg || !renderPage.imagery.raster) {
+    return;
+  }
+  assert.deepEqual(renderPage?.pageBox, {
+    x: 10,
+    y: 20,
+    width: 200,
+    height: 160,
+  });
+  assert.equal(renderPage.imagery.svg.mimeType, "image/svg+xml");
+  assert.equal(renderPage.imagery.svg.width, 200);
+  assert.equal(renderPage.imagery.svg.height, 160);
+  assert.ok(renderPage.imagery.svg.markup.includes("<svg"));
+  assert.ok(renderPage.imagery.svg.markup.includes("<text"));
+  assert.ok(renderPage.imagery.svg.markup.includes("<path"));
+  assert.ok(renderPage.imagery.svg.markup.includes("<image"));
+  assert.equal(renderPage.imagery.raster.mimeType, "image/png");
+  assert.equal(renderPage.imagery.raster.width, 200);
+  assert.equal(renderPage.imagery.raster.height, 160);
+  assert.deepEqual(
+    Array.from(renderPage.imagery.raster.bytes.subarray(0, 8)),
+    [137, 80, 78, 71, 13, 10, 26, 10],
+  );
+  assert.ok(renderDocument?.knownLimits.includes("render-imagery-partial"));
 });

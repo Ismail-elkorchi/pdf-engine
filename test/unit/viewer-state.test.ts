@@ -210,7 +210,7 @@ function createPipelineResultFixture(): PdfPipelineResult {
           algorithm: "sha-256",
           hex: "0".repeat(64),
         },
-        knownLimits: ["render-display-list-only", "render-raster-not-implemented"],
+        knownLimits: ["render-imagery-partial"],
       } satisfies PdfRenderDocument,
     },
     diagnostics: [],

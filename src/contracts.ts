@@ -127,8 +127,7 @@ export type PdfKnownLimitCode =
   | "knowledge-chunk-heuristic"
   | "table-projection-heuristic"
   | "table-projection-not-implemented"
-  | "render-display-list-only"
-  | "render-raster-not-implemented"
+  | "render-imagery-partial"
   | "render-resource-payloads-partial";
 
 /**
@@ -1779,6 +1778,44 @@ export interface PdfDisplayList {
 }
 
 /**
+ * Deterministic SVG page imagery emitted by the render stage.
+ */
+export interface PdfRenderPageImageSvg {
+  /** SVG mime type. */
+  readonly mimeType: "image/svg+xml";
+  /** Deterministic SVG markup for the page imagery. */
+  readonly markup: string;
+  /** Output width in page-imagery pixels. */
+  readonly width: number;
+  /** Output height in page-imagery pixels. */
+  readonly height: number;
+}
+
+/**
+ * Deterministic raster page imagery emitted by the render stage.
+ */
+export interface PdfRenderPageImageRaster {
+  /** Raster mime type. */
+  readonly mimeType: "image/png";
+  /** Deterministic PNG bytes for the page imagery. */
+  readonly bytes: Uint8Array;
+  /** Output width in pixels. */
+  readonly width: number;
+  /** Output height in pixels. */
+  readonly height: number;
+}
+
+/**
+ * Page imagery emitted by the render stage when available.
+ */
+export interface PdfRenderPageImagery {
+  /** Deterministic SVG page imagery when available. */
+  readonly svg?: PdfRenderPageImageSvg;
+  /** Deterministic raster page imagery when available. */
+  readonly raster?: PdfRenderPageImageRaster;
+}
+
+/**
  * One rendered page in the current render result.
  */
 export interface PdfRenderPage {
@@ -1788,12 +1825,16 @@ export interface PdfRenderPage {
   readonly resolutionMethod: PdfPageResolutionMethod;
   /** Page object reference when known. */
   readonly pageRef?: PdfObjectRef;
+  /** Page box used to scope render imagery when known. */
+  readonly pageBox?: PdfBoundingBox;
   /** Deterministic display-list artifact for the page. */
   readonly displayList: PdfDisplayList;
   /** Deterministic text index derived from render text commands. */
   readonly textIndex: PdfRenderTextIndex;
   /** Deterministic selection model derived from render text commands. */
   readonly selectionModel: PdfRenderSelectionModel;
+  /** Deterministic page imagery when the current implementation can emit it. */
+  readonly imagery?: PdfRenderPageImagery;
   /** Stable hash for the current page render artifact. */
   readonly renderHash: PdfRenderHash;
 }

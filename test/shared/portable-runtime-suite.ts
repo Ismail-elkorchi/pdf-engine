@@ -19,6 +19,8 @@ export interface PortableRuntimeSuiteResult {
     readonly renderTextSelectionHash: string | null;
     readonly renderResourcePayloadSignature: PortableRenderResourcePayloadSignature | null;
     readonly renderResourcePayloadHash: string | null;
+    readonly renderImagerySignature: PortableRenderImagerySignature | null;
+    readonly renderImageryHash: string | null;
   };
 }
 
@@ -76,6 +78,18 @@ interface PortableRenderResourcePayloadSignature {
   readonly imageCommandPayloadIds: readonly (string | null)[];
 }
 
+interface PortableRenderImagerySignature {
+  readonly pageBox: unknown;
+  readonly svgMarkup: string;
+  readonly svgWidth: number;
+  readonly svgHeight: number;
+  readonly rasterWidth: number;
+  readonly rasterHeight: number;
+  readonly rasterPngSignature: readonly number[];
+  readonly rasterByteLength: number;
+  readonly rasterSha256: string;
+}
+
 export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteResult> {
   const engine = createPdfEngine();
   const simpleTextFixture = await loadNamedPdfFixture("simpleText");
@@ -84,6 +98,7 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
   const geometryFixture = await loadNamedPdfFixture("observedPathGeometry");
   const renderTextFixture = await loadNamedPdfFixture("renderTextSelection");
   const renderResourceFixture = await loadNamedPdfFixture("renderResourcePayloads");
+  const renderImageryFixture = await loadNamedPdfFixture("renderImageryRaster");
 
   const simpleFirst = await engine.run({
     source: {
@@ -130,6 +145,12 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       fileName: renderResourceFixture.fixture.fileName,
     },
   });
+  const renderImageryResult = await engine.run({
+    source: {
+      bytes: renderImageryFixture.bytes,
+      fileName: renderImageryFixture.fixture.fileName,
+    },
+  });
 
   const javascriptFeatureKinds = javascriptAdmission.value?.featureFindings.map(
     (finding) => finding.kind,
@@ -148,6 +169,10 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
   );
   const renderResourcePayloadSignature = toPortableRenderResourcePayloadSignature(
     renderResourceResult.render.value,
+  );
+  const renderImageryPage = renderImageryResult.render.value?.pages[0];
+  const renderImagerySignature = await toPortableRenderImagerySignature(
+    renderImageryPage,
   );
   const checks = {
     identityMode: engine.identity.mode === "core",
@@ -208,6 +233,16 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
     renderImagePayloadLinked:
       renderResourcePayloadSignature !== null &&
       renderResourcePayloadSignature.imageCommandPayloadIds.every((value) => value !== null),
+    renderImageryPageBox:
+      JSON.stringify(renderImageryPage?.pageBox ?? null) ===
+      JSON.stringify(renderImageryFixture.fixture.expectedPageBox ?? null),
+    renderImagerySvgPresent:
+      renderImageryPage?.imagery?.svg?.mimeType === "image/svg+xml",
+    renderImageryRasterPresent:
+      renderImageryPage?.imagery?.raster?.mimeType === "image/png",
+    renderImageryPngSignature:
+      JSON.stringify(Array.from(renderImageryPage?.imagery?.raster?.bytes.slice(0, 8) ?? [])) ===
+      JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
   } as const;
 
   assertChecks(checks);
@@ -229,6 +264,8 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       renderTextSelectionHash: renderTextResult.render.value?.pages[0]?.renderHash.hex ?? null,
       renderResourcePayloadSignature,
       renderResourcePayloadHash: renderResourceResult.render.value?.renderHash.hex ?? null,
+      renderImagerySignature,
+      renderImageryHash: renderImageryPage?.renderHash.hex ?? null,
     },
   };
 }
@@ -380,6 +417,54 @@ function toPortableRenderResourcePayloadSignature(
         .map((command) => command.imagePayloadId ?? null)
     ),
   };
+}
+
+async function toPortableRenderImagerySignature(
+  renderPage:
+    | {
+        readonly pageBox?: unknown;
+        readonly imagery?: {
+          readonly svg?: {
+            readonly markup: string;
+            readonly width: number;
+            readonly height: number;
+          };
+          readonly raster?: {
+            readonly bytes: Uint8Array;
+            readonly width: number;
+            readonly height: number;
+          };
+        };
+      }
+    | undefined,
+): Promise<PortableRenderImagerySignature | null> {
+  const svg = renderPage?.imagery?.svg;
+  const raster = renderPage?.imagery?.raster;
+  if (svg === undefined || raster === undefined) {
+    return null;
+  }
+
+  return {
+    pageBox: renderPage?.pageBox ?? null,
+    svgMarkup: svg.markup,
+    svgWidth: svg.width,
+    svgHeight: svg.height,
+    rasterWidth: raster.width,
+    rasterHeight: raster.height,
+    rasterPngSignature: Array.from(raster.bytes.slice(0, 8)),
+    rasterByteLength: raster.bytes.byteLength,
+    rasterSha256: await sha256Hex(raster.bytes),
+  };
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digestInput = bytes.buffer instanceof ArrayBuffer
+    ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    : Uint8Array.from(bytes).buffer;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", digestInput);
+  return Array.from(new Uint8Array(digest))
+    .map((value) => value.toString(16).padStart(2, "0"))
+    .join("");
 }
 
 function assertChecks(checks: Readonly<Record<string, boolean>>): void {

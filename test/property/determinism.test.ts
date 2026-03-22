@@ -4,7 +4,11 @@ import { test } from "node:test";
 import fc from "fast-check";
 
 import { createPdfEngine } from "../../src/index.ts";
-import { buildPdfWithPageContents, buildPdfWithRenderResourcePayloads } from "../shared/pdf-builders.ts";
+import {
+  buildPdfWithPageContents,
+  buildPdfWithRenderImagery,
+  buildPdfWithRenderResourcePayloads,
+} from "../shared/pdf-builders.ts";
 
 test("engine.run is deterministic for repeated benign text PDFs", async () => {
   const engine = createPdfEngine();
@@ -85,4 +89,43 @@ test("engine.run is deterministic for repeated payload-bearing render PDFs", asy
   assert.deepEqual(first.render.value?.resourcePayloads, second.render.value?.resourcePayloads);
   assert.equal(first.render.value?.renderHash.hex, second.render.value?.renderHash.hex);
   assert.equal(first.render.value?.pages[0]?.renderHash.hex, second.render.value?.pages[0]?.renderHash.hex);
+});
+
+test("engine.run is deterministic for repeated imagery-bearing render PDFs", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImagery();
+
+  const first = await engine.run({
+    source: {
+      bytes,
+      fileName: "render-imagery-raster.pdf",
+    },
+  });
+  const second = await engine.run({
+    source: {
+      bytes,
+      fileName: "render-imagery-raster.pdf",
+    },
+  });
+
+  const firstImagery = first.render.value?.pages[0]?.imagery;
+  const secondImagery = second.render.value?.pages[0]?.imagery;
+  assert.ok(firstImagery?.svg);
+  assert.ok(firstImagery?.raster);
+  assert.ok(secondImagery?.svg);
+  assert.ok(secondImagery?.raster);
+  if (!firstImagery?.svg || !firstImagery.raster || !secondImagery?.svg || !secondImagery.raster) {
+    return;
+  }
+  assert.deepEqual(first.render.value?.pages[0]?.pageBox, second.render.value?.pages[0]?.pageBox);
+  assert.equal(
+    firstImagery.svg.markup,
+    secondImagery.svg.markup,
+  );
+  assert.deepEqual(
+    firstImagery.raster.bytes,
+    secondImagery.raster.bytes,
+  );
+  assert.equal(first.render.value?.pages[0]?.renderHash.hex, second.render.value?.pages[0]?.renderHash.hex);
+  assert.equal(first.render.value?.renderHash.hex, second.render.value?.renderHash.hex);
 });
