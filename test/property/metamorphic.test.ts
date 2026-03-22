@@ -38,6 +38,14 @@ test("trailing comments after EOF do not change semantic text or render hash", a
     baseResult.observation.value?.extractedText,
     mutatedResult.observation.value?.extractedText,
   );
+  assert.deepEqual(
+    baseResult.render.value?.pages.map((page) => page.textIndex),
+    mutatedResult.render.value?.pages.map((page) => page.textIndex),
+  );
+  assert.deepEqual(
+    baseResult.render.value?.pages.map((page) => page.selectionModel),
+    mutatedResult.render.value?.pages.map((page) => page.selectionModel),
+  );
   assert.equal(
     baseResult.render.value?.renderHash.hex,
     mutatedResult.render.value?.renderHash.hex,

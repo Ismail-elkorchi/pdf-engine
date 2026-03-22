@@ -1428,6 +1428,70 @@ export interface PdfRenderHash {
 }
 
 /**
+ * One text span indexed from the render display list.
+ */
+export interface PdfRenderTextSpan {
+  /** Stable text-span identifier within the render page. */
+  readonly id: string;
+  /** Zero-based content-order position for the source text command. */
+  readonly contentOrder: number;
+  /** Text payload for the span. */
+  readonly text: string;
+  /** Source glyph identifiers. */
+  readonly glyphIds: readonly string[];
+  /** Source run identifier when known. */
+  readonly runId?: string;
+  /** Bounding box when the current implementation can recover one. */
+  readonly bbox?: PdfBoundingBox;
+  /** Approximate anchor when the current implementation can recover one. */
+  readonly anchor?: PdfPoint;
+  /** Active transform when the current implementation can recover one. */
+  readonly transform?: PdfTransformMatrix;
+  /** Writing mode when known. */
+  readonly writingMode?: PdfWritingMode;
+  /** Whether this span starts on a new line. */
+  readonly startsNewLine?: boolean;
+}
+
+/**
+ * Deterministic text index for one rendered page.
+ */
+export interface PdfRenderTextIndex {
+  /** Flattened page text in render content order. */
+  readonly text: string;
+  /** Ordered text spans recovered from render text commands. */
+  readonly spans: readonly PdfRenderTextSpan[];
+}
+
+/**
+ * One selection-focused text unit for one rendered page.
+ */
+export interface PdfRenderSelectionUnit {
+  /** Stable selection-unit identifier within the render page. */
+  readonly id: string;
+  /** Linked render text-span identifier. */
+  readonly textSpanId: string;
+  /** Text payload for the selection unit. */
+  readonly text: string;
+  /** Source glyph identifiers. */
+  readonly glyphIds: readonly string[];
+  /** Bounding box when the current implementation can recover one. */
+  readonly bbox?: PdfBoundingBox;
+  /** Approximate anchor when the current implementation can recover one. */
+  readonly anchor?: PdfPoint;
+  /** Writing mode when known. */
+  readonly writingMode?: PdfWritingMode;
+}
+
+/**
+ * Deterministic selection model for one rendered page.
+ */
+export interface PdfRenderSelectionModel {
+  /** Ordered selection units for the page. */
+  readonly units: readonly PdfRenderSelectionUnit[];
+}
+
+/**
  * Base fields shared by every display-list command.
  */
 export interface PdfDisplayCommandBase {
@@ -1606,6 +1670,10 @@ export interface PdfRenderPage {
   readonly pageRef?: PdfObjectRef;
   /** Deterministic display-list artifact for the page. */
   readonly displayList: PdfDisplayList;
+  /** Deterministic text index derived from render text commands. */
+  readonly textIndex: PdfRenderTextIndex;
+  /** Deterministic selection model derived from render text commands. */
+  readonly selectionModel: PdfRenderSelectionModel;
   /** Stable hash for the current page render artifact. */
   readonly renderHash: PdfRenderHash;
 }

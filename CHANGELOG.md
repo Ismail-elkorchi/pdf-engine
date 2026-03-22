@@ -17,3 +17,4 @@ All notable changes are documented in this file.
 - Path observation and render commands now carry normalized local path segments for `m`, `l`, `c`, `v`, `y`, `h`, and `re`, while keeping page-space bounding boxes and derived `pointCount` and `closed` summaries.
 - Breaking pipeline contract update: `PdfPipelineResult` now includes a first `render` stage, and `PdfEngine` now exposes `toRender(...)` with deterministic display-list output and explicit render limits.
 - Render artifacts now include stable SHA-256 hashes for the document and each rendered page so cross-runtime determinism can be proven directly from the public stage output.
+- Breaking render contract update: rendered pages now expose deterministic `textIndex` and `selectionModel` artifacts derived from render text commands, and page or document render hashes now include those fields.

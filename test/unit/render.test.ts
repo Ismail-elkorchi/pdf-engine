@@ -25,6 +25,18 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
             glyphIds: ["glyph-1"],
             text: "Hello Render",
             origin: "native-text",
+            bbox: {
+              x: 10,
+              y: 20,
+              width: 80,
+              height: 12,
+            },
+            anchor: {
+              x: 10,
+              y: 20,
+            },
+            writingMode: "horizontal",
+            fontSize: 12,
           },
           {
             id: "path-1",
@@ -108,6 +120,46 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
   assert.equal(renderDocument.kind, "pdf-render");
   assert.equal(renderDocument.strategy, "observed-display-list");
   assert.equal(renderDocument.pages.length, 1);
+  assert.equal(renderDocument.pages[0]?.textIndex.text, "Hello Render");
+  assert.deepEqual(renderDocument.pages[0]?.textIndex.spans, [
+    {
+      id: "render-text-span-1-1",
+      contentOrder: 0,
+      text: "Hello Render",
+      glyphIds: ["glyph-1"],
+      runId: "run-1",
+      bbox: {
+        x: 10,
+        y: 20,
+        width: 80,
+        height: 12,
+      },
+      anchor: {
+        x: 10,
+        y: 20,
+      },
+      writingMode: "horizontal",
+    },
+  ]);
+  assert.deepEqual(renderDocument.pages[0]?.selectionModel.units, [
+    {
+      id: "render-selection-unit-1-1",
+      textSpanId: "render-text-span-1-1",
+      text: "Hello Render",
+      glyphIds: ["glyph-1"],
+      bbox: {
+        x: 10,
+        y: 20,
+        width: 80,
+        height: 12,
+      },
+      anchor: {
+        x: 10,
+        y: 20,
+      },
+      writingMode: "horizontal",
+    },
+  ]);
   assert.equal(renderDocument.pages[0]?.displayList.commands.length, 3);
   assert.equal(renderDocument.pages[0]?.displayList.commands[0]?.kind, "text");
   assert.equal(renderDocument.pages[0]?.displayList.commands[1]?.kind, "path");

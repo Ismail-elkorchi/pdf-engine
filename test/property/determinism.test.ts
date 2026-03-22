@@ -45,6 +45,14 @@ test("engine.run is deterministic for repeated benign text PDFs", async () => {
           second.render.value?.renderHash.hex,
         );
         assert.deepEqual(
+          first.render.value?.pages.map((page) => page.textIndex),
+          second.render.value?.pages.map((page) => page.textIndex),
+        );
+        assert.deepEqual(
+          first.render.value?.pages.map((page) => page.selectionModel),
+          second.render.value?.pages.map((page) => page.selectionModel),
+        );
+        assert.deepEqual(
           first.admission.value?.featureFindings,
           second.admission.value?.featureFindings,
         );
