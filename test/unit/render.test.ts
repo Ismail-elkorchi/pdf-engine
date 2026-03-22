@@ -2,6 +2,8 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { buildRenderDocument } from "../../src/render.ts";
+import { buildPdfWithRenderResourcePayloads } from "../shared/pdf-builders.ts";
+import { createPdfEngine } from "../../src/index.ts";
 
 test("buildRenderDocument lifts observed marks into a render document", async () => {
   const renderDocument = await buildRenderDocument({
@@ -245,6 +247,48 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
   assert.ok(renderDocument.knownLimits.includes("layout-block-heuristic"));
   assert.ok(renderDocument.knownLimits.includes("render-display-list-only"));
   assert.ok(renderDocument.knownLimits.includes("render-raster-not-implemented"));
+  assert.deepEqual(renderDocument.resourcePayloads, []);
   assert.equal(renderDocument.renderHash.algorithm, "sha-256");
   assert.equal(renderDocument.renderHash.hex.length, 64);
+});
+
+test("buildRenderDocument exposes font and image resource payloads for later imagery work", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderResourcePayloads();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "render-resource-payloads.pdf",
+    },
+  });
+
+  const renderDocument = result.render.value;
+  assert.ok(renderDocument);
+  assert.equal(renderDocument?.resourcePayloads.length, 2);
+  const fontPayload = renderDocument?.resourcePayloads.find((payload) => payload.kind === "font");
+  const imagePayload = renderDocument?.resourcePayloads.find((payload) => payload.kind === "image");
+  assert.ok(fontPayload);
+  assert.ok(imagePayload);
+  if (fontPayload?.kind !== "font" || imagePayload?.kind !== "image") {
+    return;
+  }
+
+  assert.equal(fontPayload.availability, "available");
+  assert.equal(fontPayload.fontProgramFormat, "type1");
+  assert.deepEqual(Array.from(fontPayload.bytes ?? []), [84, 69, 83, 84]);
+  assert.equal(imagePayload.availability, "available");
+  assert.deepEqual(Array.from(imagePayload.bytes ?? []), [65]);
+  assert.equal(imagePayload.width, 1);
+  assert.equal(imagePayload.height, 1);
+  const textCommand = renderDocument.pages[0]?.displayList.commands.find((command) => command.kind === "text");
+  const imageCommand = renderDocument.pages[0]?.displayList.commands.find((command) => command.kind === "image");
+  assert.equal(textCommand?.kind, "text");
+  assert.equal(imageCommand?.kind, "image");
+  if (textCommand?.kind !== "text" || imageCommand?.kind !== "image") {
+    return;
+  }
+
+  assert.equal(textCommand.fontPayloadId, fontPayload.id);
+  assert.equal(imageCommand.imagePayloadId, imagePayload.id);
 });

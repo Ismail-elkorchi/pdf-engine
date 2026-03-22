@@ -6,6 +6,7 @@ import {
   appendTrailingComment,
   buildPdfWithPageContents,
   buildPdfWithPageSpecs,
+  buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
 
 test("trailing comments after EOF do not change semantic text or render hash", async () => {
@@ -227,4 +228,32 @@ test("v and y shortcuts produce equivalent normalized segments and render hash a
     shortcutCurveResult.render.value?.renderHash.hex,
     explicitCurveResult.render.value?.renderHash.hex,
   );
+});
+
+test("unused resource ordering does not change render resource payloads or render hash", async () => {
+  const engine = createPdfEngine();
+  const baseBytes = buildPdfWithRenderResourcePayloads({
+    includeUnusedResources: true,
+    reorderResourceEntries: false,
+  });
+  const reorderedBytes = buildPdfWithRenderResourcePayloads({
+    includeUnusedResources: true,
+    reorderResourceEntries: true,
+  });
+
+  const baseResult = await engine.run({
+    source: {
+      bytes: baseBytes,
+      fileName: "render-resource-payloads-base.pdf",
+    },
+  });
+  const reorderedResult = await engine.run({
+    source: {
+      bytes: reorderedBytes,
+      fileName: "render-resource-payloads-reordered.pdf",
+    },
+  });
+
+  assert.deepEqual(baseResult.render.value?.resourcePayloads, reorderedResult.render.value?.resourcePayloads);
+  assert.equal(baseResult.render.value?.renderHash.hex, reorderedResult.render.value?.renderHash.hex);
 });

@@ -128,7 +128,8 @@ export type PdfKnownLimitCode =
   | "table-projection-heuristic"
   | "table-projection-not-implemented"
   | "render-display-list-only"
-  | "render-raster-not-implemented";
+  | "render-raster-not-implemented"
+  | "render-resource-payloads-partial";
 
 /**
  * Decode state for one recovered stream object.
@@ -1492,6 +1493,119 @@ export interface PdfRenderSelectionModel {
 }
 
 /**
+ * Availability state for one render resource payload.
+ */
+export type PdfRenderResourcePayloadAvailability = "available" | "unavailable";
+
+/**
+ * Byte-source kind for one render resource payload.
+ */
+export type PdfRenderResourcePayloadByteSource = "decoded-stream";
+
+/**
+ * Embedded font-program format when the current implementation can identify it.
+ */
+export type PdfRenderFontProgramFormat = "type1" | "truetype" | "cff" | "opentype" | "unknown";
+
+/**
+ * Truthful reason why a render resource payload is not available yet.
+ */
+export type PdfRenderResourcePayloadUnavailableReason =
+  | "missing-font-descriptor"
+  | "missing-embedded-font-program"
+  | "missing-decoded-font-program"
+  | "missing-image-stream"
+  | "missing-decoded-image-stream"
+  | "xobject-not-direct-rasterizable"
+  | "missing-decoded-xobject-stream";
+
+/**
+ * Base fields shared by every render resource payload.
+ */
+export interface PdfRenderResourcePayloadBase {
+  /** Stable payload identifier within the render document. */
+  readonly id: string;
+  /** Whether the current payload bytes are available. */
+  readonly availability: PdfRenderResourcePayloadAvailability;
+  /** One-based page numbers that reference this payload. */
+  readonly pageNumbers: readonly number[];
+  /** Resource names that pointed at this payload when known. */
+  readonly resourceNames: readonly string[];
+  /** Stream decode state for the payload-bearing object when known. */
+  readonly streamDecodeState?: PdfStreamDecodeState;
+  /** Declared stream filters for the payload-bearing object when known. */
+  readonly streamFilterNames?: readonly string[];
+  /** Byte source when payload bytes are available. */
+  readonly byteSource?: PdfRenderResourcePayloadByteSource;
+  /** Truthful unavailable reason when the payload bytes are not available. */
+  readonly unavailableReason?: PdfRenderResourcePayloadUnavailableReason;
+}
+
+/**
+ * One render payload for a referenced font resource.
+ */
+export interface PdfRenderFontPayload extends PdfRenderResourcePayloadBase {
+  /** Font payload kind. */
+  readonly kind: "font";
+  /** Font object reference used by render text commands. */
+  readonly fontRef: PdfObjectRef;
+  /** Font subtype when known. */
+  readonly fontSubtypeName?: string;
+  /** Base-font or descriptor font name when known. */
+  readonly baseFontName?: string;
+  /** Embedded font-program object reference when known. */
+  readonly fontProgramRef?: PdfObjectRef;
+  /** Embedded font-program format when known. */
+  readonly fontProgramFormat?: PdfRenderFontProgramFormat;
+  /** Embedded font-program bytes when available. */
+  readonly bytes?: Uint8Array;
+}
+
+/**
+ * One render payload for a referenced image XObject.
+ */
+export interface PdfRenderImagePayload extends PdfRenderResourcePayloadBase {
+  /** Image payload kind. */
+  readonly kind: "image";
+  /** Image XObject reference used by render image commands. */
+  readonly xObjectRef: PdfObjectRef;
+  /** Image width when known. */
+  readonly width?: number;
+  /** Image height when known. */
+  readonly height?: number;
+  /** Raw `ColorSpace` value when known. */
+  readonly colorSpaceValue?: string;
+  /** Raw `BitsPerComponent` value when known. */
+  readonly bitsPerComponent?: number;
+  /** Image stream bytes when available. */
+  readonly bytes?: Uint8Array;
+}
+
+/**
+ * One render payload for a directly rasterizable XObject.
+ */
+export interface PdfRenderXObjectPayload extends PdfRenderResourcePayloadBase {
+  /** XObject payload kind. */
+  readonly kind: "xobject";
+  /** XObject reference used by render XObject commands. */
+  readonly xObjectRef: PdfObjectRef;
+  /** XObject subtype when known. */
+  readonly subtypeName?: string;
+  /** Transparency-group evidence when the XObject declares one. */
+  readonly transparencyGroup?: PdfObservedTransparencyGroup;
+  /** XObject stream bytes when available. */
+  readonly bytes?: Uint8Array;
+}
+
+/**
+ * Canonical render resource-payload union.
+ */
+export type PdfRenderResourcePayload =
+  | PdfRenderFontPayload
+  | PdfRenderImagePayload
+  | PdfRenderXObjectPayload;
+
+/**
  * Base fields shared by every display-list command.
  */
 export interface PdfDisplayCommandBase {
@@ -1529,6 +1643,8 @@ export interface PdfDisplayTextCommand extends PdfDisplayCommandBase {
   readonly origin: PdfObservationOrigin;
   /** Font object reference when known. */
   readonly fontRef?: PdfObjectRef;
+  /** Linked render font-payload identifier when known. */
+  readonly fontPayloadId?: string;
   /** Encoding form used to decode the text when known. */
   readonly textEncodingKind?: PdfTextEncodingKind;
   /** Unicode mapping path when known. */
@@ -1583,6 +1699,8 @@ export interface PdfDisplayXObjectCommand extends PdfDisplayCommandBase {
   readonly resourceName: string;
   /** XObject reference when known. */
   readonly xObjectRef?: PdfObjectRef;
+  /** Linked render XObject-payload identifier when known. */
+  readonly xObjectPayloadId?: string;
   /** XObject subtype when known. */
   readonly subtypeName?: string;
   /** Transparency-group evidence when the XObject declares one. */
@@ -1599,6 +1717,8 @@ export interface PdfDisplayImageCommand extends PdfDisplayCommandBase {
   readonly resourceName: string;
   /** Image XObject reference when known. */
   readonly xObjectRef?: PdfObjectRef;
+  /** Linked render image-payload identifier when known. */
+  readonly imagePayloadId?: string;
   /** Image width when known. */
   readonly width?: number;
   /** Image height when known. */
@@ -1688,6 +1808,8 @@ export interface PdfRenderDocument {
   readonly strategy: PdfRenderStrategy;
   /** Rendered pages in source order. */
   readonly pages: readonly PdfRenderPage[];
+  /** Resource payloads needed for later render imagery or raster work. */
+  readonly resourcePayloads: readonly PdfRenderResourcePayload[];
   /** Stable hash for the current document render artifact. */
   readonly renderHash: PdfRenderHash;
   /** Known implementation limits that materially affect this render result. */

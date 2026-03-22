@@ -58,6 +58,9 @@ try {
     const renderTextBytes = await readBytes(
       "/test/fixtures/render-text-selection.pdf",
     );
+    const renderResourceBytes = await readBytes(
+      "/test/fixtures/render-resource-payloads.pdf",
+    );
 
     const simpleResult = await engine.run({
       source: {
@@ -92,6 +95,12 @@ try {
         fileName: "render-text-selection.pdf",
       },
     });
+    const renderResourceResult = await engine.run({
+      source: {
+        bytes: renderResourceBytes,
+        fileName: "render-resource-payloads.pdf",
+      },
+    });
     const geometryPathMark =
       geometryResult.observation.value?.pages[0]?.marks.find((mark) =>
         mark.kind === "path"
@@ -109,6 +118,9 @@ try {
     const renderTextSelectionSignature = toRenderTextSelectionSignature(
       renderTextResult.render.value?.pages[0]?.textIndex,
       renderTextResult.render.value?.pages[0]?.selectionModel,
+    );
+    const renderResourcePayloadSignature = toRenderResourcePayloadSignature(
+      renderResourceResult.render.value,
     );
 
     const browserDocument = globalThis.document;
@@ -161,6 +173,28 @@ try {
         renderTextSelectionSignature.spans.every((span, index) =>
           renderTextSelectionSignature.units[index]?.textSpanId === span.id
         ),
+      renderResourcePayloadsPresent:
+        renderResourceResult.render.value?.resourcePayloads.length === 2,
+      renderFontPayloadAvailable:
+        renderResourcePayloadSignature !== null &&
+        renderResourcePayloadSignature.payloads.some((payload) =>
+          payload.kind === "font" && payload.availability === "available"
+        ),
+      renderImagePayloadAvailable:
+        renderResourcePayloadSignature !== null &&
+        renderResourcePayloadSignature.payloads.some((payload) =>
+          payload.kind === "image" && payload.availability === "available"
+        ),
+      renderFontPayloadLinked:
+        renderResourcePayloadSignature !== null &&
+        renderResourcePayloadSignature.textCommandFontPayloadIds.every((value) =>
+          value !== null
+        ),
+      renderImagePayloadLinked:
+        renderResourcePayloadSignature !== null &&
+        renderResourcePayloadSignature.imageCommandPayloadIds.every((value) =>
+          value !== null
+        ),
     };
 
     const failedChecks = Object.entries(checks)
@@ -186,6 +220,8 @@ try {
         renderTextIndexText: renderTextResult.render.value?.pages[0]?.textIndex.text ?? null,
         renderTextSelectionSignature,
         renderTextSelectionHash: renderTextResult.render.value?.pages[0]?.renderHash.hex ?? null,
+        renderResourcePayloadSignature,
+        renderResourcePayloadHash: renderResourceResult.render.value?.renderHash.hex ?? null,
       },
     };
 
@@ -228,6 +264,40 @@ try {
           anchor: unit.anchor ?? null,
           writingMode: unit.writingMode ?? null,
         })),
+      };
+    }
+
+    function toRenderResourcePayloadSignature(renderDocument) {
+      if (!renderDocument) {
+        return null;
+      }
+
+      return {
+        payloads: renderDocument.resourcePayloads.map((payload) => ({
+          id: payload.id,
+          kind: payload.kind,
+          availability: payload.availability,
+          pageNumbers: payload.pageNumbers,
+          resourceNames: payload.resourceNames,
+          fontRef: "fontRef" in payload ? payload.fontRef : null,
+          xObjectRef: "xObjectRef" in payload ? payload.xObjectRef : null,
+          fontProgramFormat: "fontProgramFormat" in payload ? payload.fontProgramFormat ?? null : null,
+          width: "width" in payload ? payload.width ?? null : null,
+          height: "height" in payload ? payload.height ?? null : null,
+          colorSpaceValue: "colorSpaceValue" in payload ? payload.colorSpaceValue ?? null : null,
+          streamDecodeState: payload.streamDecodeState ?? null,
+          byteSignature: payload.bytes ? Array.from(payload.bytes) : null,
+        })),
+        textCommandFontPayloadIds: renderDocument.pages.flatMap((page) =>
+          page.displayList.commands
+            .filter((command) => command.kind === "text")
+            .map((command) => command.fontPayloadId ?? null)
+        ),
+        imageCommandPayloadIds: renderDocument.pages.flatMap((page) =>
+          page.displayList.commands
+            .filter((command) => command.kind === "image")
+            .map((command) => command.imagePayloadId ?? null)
+        ),
       };
     }
   }, browserName);

@@ -4,7 +4,7 @@ import { test } from "node:test";
 import fc from "fast-check";
 
 import { createPdfEngine } from "../../src/index.ts";
-import { buildPdfWithPageContents } from "../shared/pdf-builders.ts";
+import { buildPdfWithPageContents, buildPdfWithRenderResourcePayloads } from "../shared/pdf-builders.ts";
 
 test("engine.run is deterministic for repeated benign text PDFs", async () => {
   const engine = createPdfEngine();
@@ -63,4 +63,26 @@ test("engine.run is deterministic for repeated benign text PDFs", async () => {
       seed: 20260321,
     },
   );
+});
+
+test("engine.run is deterministic for repeated payload-bearing render PDFs", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderResourcePayloads();
+
+  const first = await engine.run({
+    source: {
+      bytes,
+      fileName: "render-resource-payloads.pdf",
+    },
+  });
+  const second = await engine.run({
+    source: {
+      bytes,
+      fileName: "render-resource-payloads.pdf",
+    },
+  });
+
+  assert.deepEqual(first.render.value?.resourcePayloads, second.render.value?.resourcePayloads);
+  assert.equal(first.render.value?.renderHash.hex, second.render.value?.renderHash.hex);
+  assert.equal(first.render.value?.pages[0]?.renderHash.hex, second.render.value?.pages[0]?.renderHash.hex);
 });

@@ -17,6 +17,8 @@ export interface PortableRuntimeSuiteResult {
     readonly renderTextIndexText: string | null;
     readonly renderTextSelectionSignature: PortableRenderTextSelectionSignature | null;
     readonly renderTextSelectionHash: string | null;
+    readonly renderResourcePayloadSignature: PortableRenderResourcePayloadSignature | null;
+    readonly renderResourcePayloadHash: string | null;
   };
 }
 
@@ -54,6 +56,26 @@ interface PortableRenderTextSelectionSignature {
   }[];
 }
 
+interface PortableRenderResourcePayloadSignature {
+  readonly payloads: readonly {
+    readonly id: string;
+    readonly kind: string;
+    readonly availability: string;
+    readonly pageNumbers: readonly number[];
+    readonly resourceNames: readonly string[];
+    readonly fontRef: unknown;
+    readonly xObjectRef: unknown;
+    readonly fontProgramFormat: string | null;
+    readonly width: number | null;
+    readonly height: number | null;
+    readonly colorSpaceValue: string | null;
+    readonly streamDecodeState: string | null;
+    readonly byteSignature: readonly number[] | null;
+  }[];
+  readonly textCommandFontPayloadIds: readonly (string | null)[];
+  readonly imageCommandPayloadIds: readonly (string | null)[];
+}
+
 export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteResult> {
   const engine = createPdfEngine();
   const simpleTextFixture = await loadNamedPdfFixture("simpleText");
@@ -61,6 +83,7 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
   const multiPageFixture = await loadNamedPdfFixture("multiPageNavigation");
   const geometryFixture = await loadNamedPdfFixture("observedPathGeometry");
   const renderTextFixture = await loadNamedPdfFixture("renderTextSelection");
+  const renderResourceFixture = await loadNamedPdfFixture("renderResourcePayloads");
 
   const simpleFirst = await engine.run({
     source: {
@@ -101,6 +124,12 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       fileName: renderTextFixture.fixture.fileName,
     },
   });
+  const renderResourceResult = await engine.run({
+    source: {
+      bytes: renderResourceFixture.bytes,
+      fileName: renderResourceFixture.fixture.fileName,
+    },
+  });
 
   const javascriptFeatureKinds = javascriptAdmission.value?.featureFindings.map(
     (finding) => finding.kind,
@@ -116,6 +145,9 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
   const renderTextSelectionSignature = toPortableRenderTextSelectionSignature(
     renderTextResult.render.value?.pages[0]?.textIndex,
     renderTextResult.render.value?.pages[0]?.selectionModel,
+  );
+  const renderResourcePayloadSignature = toPortableRenderResourcePayloadSignature(
+    renderResourceResult.render.value,
   );
   const checks = {
     identityMode: engine.identity.mode === "core",
@@ -162,6 +194,20 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       renderTextSelectionSignature.spans.every((span, index) =>
         renderTextSelectionSignature.units[index]?.textSpanId === span.id
       ),
+    renderResourcePayloadsPresent:
+      renderResourceResult.render.value?.resourcePayloads.length === renderResourceFixture.fixture.expectedRenderResourcePayloadCount,
+    renderFontPayloadAvailable:
+      renderResourcePayloadSignature !== null &&
+      renderResourcePayloadSignature.payloads.some((payload) => payload.kind === "font" && payload.availability === "available"),
+    renderImagePayloadAvailable:
+      renderResourcePayloadSignature !== null &&
+      renderResourcePayloadSignature.payloads.some((payload) => payload.kind === "image" && payload.availability === "available"),
+    renderFontPayloadLinked:
+      renderResourcePayloadSignature !== null &&
+      renderResourcePayloadSignature.textCommandFontPayloadIds.every((value) => value !== null),
+    renderImagePayloadLinked:
+      renderResourcePayloadSignature !== null &&
+      renderResourcePayloadSignature.imageCommandPayloadIds.every((value) => value !== null),
   } as const;
 
   assertChecks(checks);
@@ -181,6 +227,8 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       renderTextIndexText: renderTextResult.render.value?.pages[0]?.textIndex.text ?? null,
       renderTextSelectionSignature,
       renderTextSelectionHash: renderTextResult.render.value?.pages[0]?.renderHash.hex ?? null,
+      renderResourcePayloadSignature,
+      renderResourcePayloadHash: renderResourceResult.render.value?.renderHash.hex ?? null,
     },
   };
 }
@@ -268,6 +316,69 @@ function toPortableRenderTextSelectionSignature(
       anchor: unit.anchor ?? null,
       writingMode: unit.writingMode ?? null,
     })),
+  };
+}
+
+function toPortableRenderResourcePayloadSignature(
+  renderDocument:
+    | {
+        readonly resourcePayloads: readonly {
+          readonly id: string;
+          readonly kind: string;
+          readonly availability: string;
+          readonly pageNumbers: readonly number[];
+          readonly resourceNames: readonly string[];
+          readonly fontRef?: unknown;
+          readonly xObjectRef?: unknown;
+          readonly fontProgramFormat?: string;
+          readonly width?: number;
+          readonly height?: number;
+          readonly colorSpaceValue?: string;
+          readonly streamDecodeState?: string;
+          readonly bytes?: Uint8Array;
+        }[];
+        readonly pages: readonly {
+          readonly displayList: {
+            readonly commands: readonly {
+              readonly kind: string;
+              readonly fontPayloadId?: string;
+              readonly imagePayloadId?: string;
+            }[];
+          };
+        }[];
+      }
+    | undefined,
+): PortableRenderResourcePayloadSignature | null {
+  if (renderDocument === undefined) {
+    return null;
+  }
+
+  return {
+    payloads: renderDocument.resourcePayloads.map((payload) => ({
+      id: payload.id,
+      kind: payload.kind,
+      availability: payload.availability,
+      pageNumbers: payload.pageNumbers,
+      resourceNames: payload.resourceNames,
+      fontRef: "fontRef" in payload ? payload.fontRef : null,
+      xObjectRef: "xObjectRef" in payload ? payload.xObjectRef : null,
+      fontProgramFormat: "fontProgramFormat" in payload ? payload.fontProgramFormat ?? null : null,
+      width: "width" in payload ? payload.width ?? null : null,
+      height: "height" in payload ? payload.height ?? null : null,
+      colorSpaceValue: "colorSpaceValue" in payload ? payload.colorSpaceValue ?? null : null,
+      streamDecodeState: payload.streamDecodeState ?? null,
+      byteSignature: payload.bytes ? Array.from(payload.bytes) : null,
+    })),
+    textCommandFontPayloadIds: renderDocument.pages.flatMap((page) =>
+      page.displayList.commands
+        .filter((command) => command.kind === "text")
+        .map((command) => command.fontPayloadId ?? null)
+    ),
+    imageCommandPayloadIds: renderDocument.pages.flatMap((page) =>
+      page.displayList.commands
+        .filter((command) => command.kind === "image")
+        .map((command) => command.imagePayloadId ?? null)
+    ),
   };
 }
 
