@@ -18,3 +18,4 @@ All notable changes are documented in this file.
 - Breaking pipeline contract update: `PdfPipelineResult` now includes a first `render` stage, and `PdfEngine` now exposes `toRender(...)` with deterministic display-list output and explicit render limits.
 - Render artifacts now include stable SHA-256 hashes for the document and each rendered page so cross-runtime determinism can be proven directly from the public stage output.
 - Breaking render contract update: rendered pages now expose deterministic `textIndex` and `selectionModel` artifacts derived from render text commands, and page or document render hashes now include those fields.
+- Breaking render contract update: render documents now expose deterministic `resourcePayloads`, and text or image display commands now carry payload links that preserve font and image bytes when the current PDF exposes usable embedded streams.

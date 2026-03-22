@@ -1,9 +1,16 @@
 export interface PdfTestFixtureDefinition {
-  readonly id: "simple-text" | "multi-page-navigation" | "javascript-action" | "observed-path-geometry" | "render-text-selection";
+  readonly id:
+    | "simple-text"
+    | "multi-page-navigation"
+    | "javascript-action"
+    | "observed-path-geometry"
+    | "render-text-selection"
+    | "render-resource-payloads";
   readonly fileName: string;
   readonly relativePath: string;
   readonly expectedText?: string;
   readonly expectedPageCount?: number;
+  readonly expectedRenderResourcePayloadCount?: number;
   readonly expectedPolicyDecision?: "rejected";
   readonly expectedFeatureKinds?: readonly string[];
 }
@@ -14,6 +21,7 @@ export const pdfTestFixtures: {
   readonly javascriptAction: PdfTestFixtureDefinition;
   readonly observedPathGeometry: PdfTestFixtureDefinition;
   readonly renderTextSelection: PdfTestFixtureDefinition;
+  readonly renderResourcePayloads: PdfTestFixtureDefinition;
 } = {
   simpleText: {
     id: "simple-text",
@@ -48,6 +56,14 @@ export const pdfTestFixtures: {
     relativePath: "../fixtures/render-text-selection.pdf",
     expectedText: "Heading Layer\nSelection Detail",
     expectedPageCount: 1,
+  },
+  renderResourcePayloads: {
+    id: "render-resource-payloads",
+    fileName: "render-resource-payloads.pdf",
+    relativePath: "../fixtures/render-resource-payloads.pdf",
+    expectedText: "Payload Render",
+    expectedPageCount: 1,
+    expectedRenderResourcePayloadCount: 2,
   },
 } as const;
 

@@ -46,7 +46,7 @@ The published surface is still early, but it is no longer contracts-only. This r
 - typed feature findings for risky and structural document features, including parsed-object evidence for actions, links, attachments, annotations, forms, outlines, signatures, and optional-content membership
 - inherited page-resource state, content-stream provenance for observed text, run-level anchor and font-size hints, and operator-ready stream bodies for unfiltered, `ASCIIHexDecode`, `ASCII85Decode`, `RunLengthDecode`, `FlateDecode` plus predictors, `LZWDecode`, and `CCITTFaxDecode` streams
 - content-stream-interpreter observation with page marks for text, paths, images, XObjects, clipping, and first marked-content plus visibility evidence, including normalized path paint-state facts, fill and stroke color-space evidence, fill and stroke color values, transparency evidence, form-XObject transparency-group evidence, and normalized local path segments with page-space bounding boxes
-- a first render stage that emits deterministic page display lists, page text indexes, selection models, and stable SHA-256 render hashes from observed page marks while surfacing explicit render limits for raster output
+- a first render stage that emits deterministic page display lists, page text indexes, selection models, render resource payloads for later imagery work, and stable SHA-256 render hashes from observed page marks while surfacing explicit render limits for raster output
 - a first heuristic table projection that stays citation-backed and emits no table when layout evidence is too weak
 - a browser-only `./viewer` subpath that renders page and reader views from staged layout blocks, cited knowledge chunks, projected tables, heading outlines, and staged-text search over existing pipeline results
 - runtime support claims and a no-op disposal contract for future worker or WASM backends
@@ -55,4 +55,4 @@ The published surface is still early, but it is no longer contracts-only. This r
 - a layered public verification surface with narrow unit, contract, property, Node lower-layer coverage reporting, runtime-parity, integration, and hostile-input fuzz tests
 - JSR/npm publication scaffolding and public GitHub automation
 
-It does not yet ship a finished parser, a mature layout engine, mature structured knowledge projections, a pixel-accurate renderer, or benchmark-backed superiority claims. The current render stage now exposes deterministic text indexing and selection geometry, but it is still display-list-only and does not emit raster output yet.
+It does not yet ship a finished parser, a mature layout engine, mature structured knowledge projections, a pixel-accurate renderer, or benchmark-backed superiority claims. The current render stage now exposes deterministic text indexing, selection geometry, and resource payload references for later imagery work, but it is still display-list-only and does not emit raster output yet.

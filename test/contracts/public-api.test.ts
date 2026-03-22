@@ -3,7 +3,11 @@ import { test } from "node:test";
 
 import { createPdfEngine } from "../../src/index.ts";
 import { loadNamedPdfFixture } from "../shared/load-fixture.ts";
-import { buildPdfWithPageContents, buildPdfWithPageSpecs } from "../shared/pdf-builders.ts";
+import {
+  buildPdfWithPageContents,
+  buildPdfWithPageSpecs,
+  buildPdfWithRenderResourcePayloads,
+} from "../shared/pdf-builders.ts";
 
 test("public pipeline contracts expose staged artifacts with current kinds", async () => {
   const engine = createPdfEngine();
@@ -207,4 +211,43 @@ test("public render contracts expose text index and selection model", async () =
       },
     ],
   );
+});
+
+test("public render contracts expose resource payloads and payload-linked commands", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderResourcePayloads();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-render-resource-payloads.pdf",
+    },
+  });
+
+  const renderDocument = result.render.value;
+  assert.ok(renderDocument);
+  assert.ok(Array.isArray(renderDocument?.resourcePayloads));
+  assert.equal(renderDocument?.resourcePayloads.length, 2);
+  const fontPayload = renderDocument?.resourcePayloads.find((payload) => payload.kind === "font");
+  const imagePayload = renderDocument?.resourcePayloads.find((payload) => payload.kind === "image");
+  assert.ok(fontPayload);
+  assert.ok(imagePayload);
+  if (fontPayload?.kind !== "font" || imagePayload?.kind !== "image") {
+    return;
+  }
+
+  assert.equal(fontPayload.availability, "available");
+  assert.equal(imagePayload.availability, "available");
+  assert.equal(fontPayload.byteSource, "decoded-stream");
+  assert.equal(imagePayload.byteSource, "decoded-stream");
+  const textCommand = renderDocument.pages[0]?.displayList.commands.find((command) => command.kind === "text");
+  const imageCommand = renderDocument.pages[0]?.displayList.commands.find((command) => command.kind === "image");
+  assert.equal(textCommand?.kind, "text");
+  assert.equal(imageCommand?.kind, "image");
+  if (textCommand?.kind !== "text" || imageCommand?.kind !== "image") {
+    return;
+  }
+
+  assert.equal(textCommand.fontPayloadId, fontPayload.id);
+  assert.equal(imageCommand.imagePayloadId, imagePayload.id);
 });

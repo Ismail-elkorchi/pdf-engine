@@ -10,6 +10,11 @@ export interface SyntheticPdfPageSpec {
   readonly resourcesBody?: string;
 }
 
+export interface RenderResourcePayloadPdfOptions {
+  readonly includeUnusedResources?: boolean;
+  readonly reorderResourceEntries?: boolean;
+}
+
 export function buildPdfWithPageContents(
   pageContents: readonly string[],
 ): Uint8Array {
@@ -100,4 +105,70 @@ export function appendTrailingComment(
 
 export function decodeUtf8(bytes: Uint8Array): string {
   return new TextDecoder().decode(bytes);
+}
+
+export function buildPdfWithRenderResourcePayloads(
+  options: RenderResourcePayloadPdfOptions = {},
+): Uint8Array {
+  const includeUnusedResources = options.includeUnusedResources === true;
+  const reorderResourceEntries = options.reorderResourceEntries === true;
+  const fontEntries = [
+    "/F1 10 0 R",
+    ...(includeUnusedResources ? ["/FUnused 3 0 R"] : []),
+  ];
+  const xObjectEntries = [
+    "/Im1 20 0 R",
+    ...(includeUnusedResources ? ["/UnusedIm 21 0 R"] : []),
+  ];
+  const orderedFontEntries = reorderResourceEntries ? [...fontEntries].reverse() : fontEntries;
+  const orderedXObjectEntries = reorderResourceEntries ? [...xObjectEntries].reverse() : xObjectEntries;
+  const resourcesBody =
+    `<< /Font << ${orderedFontEntries.join(" ")} >> /XObject << ${orderedXObjectEntries.join(" ")} >> >>`;
+
+  return buildPdfWithPageSpecs(
+    [
+      {
+        resourcesBody,
+        content: [
+          "BT",
+          "/F1 16 Tf",
+          "1 0 0 1 72 720 Tm",
+          "(Payload Render) Tj",
+          "ET",
+          "q",
+          "1 0 0 1 144 600 cm",
+          "/Im1 Do",
+          "Q",
+        ].join("\n"),
+      },
+    ],
+    [
+      {
+        objectNumber: 10,
+        body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /FontDescriptor 11 0 R >>",
+      },
+      {
+        objectNumber: 11,
+        body: "<< /Type /FontDescriptor /FontName /Helvetica /FontFile 12 0 R >>",
+      },
+      {
+        objectNumber: 12,
+        body: "<< /Length 4 >>\nstream\nTEST\nendstream",
+      },
+      {
+        objectNumber: 20,
+        body:
+          "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\nA\nendstream",
+      },
+      ...(includeUnusedResources
+        ? [
+            {
+              objectNumber: 21,
+              body:
+                "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length 1 >>\nstream\nB\nendstream",
+            },
+          ]
+        : []),
+    ],
+  );
 }

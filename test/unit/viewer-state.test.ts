@@ -205,6 +205,7 @@ function createPipelineResultFixture(): PdfPipelineResult {
         kind: "pdf-render",
         strategy: "observed-display-list",
         pages: [],
+        resourcePayloads: [],
         renderHash: {
           algorithm: "sha-256",
           hex: "0".repeat(64),
