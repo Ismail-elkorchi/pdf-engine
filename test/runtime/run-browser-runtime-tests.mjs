@@ -55,6 +55,9 @@ try {
     const geometryBytes = await readBytes(
       "/test/fixtures/observed-path-geometry.pdf",
     );
+    const renderTextBytes = await readBytes(
+      "/test/fixtures/render-text-selection.pdf",
+    );
 
     const simpleResult = await engine.run({
       source: {
@@ -83,6 +86,12 @@ try {
         fileName: "observed-path-geometry.pdf",
       },
     });
+    const renderTextResult = await engine.run({
+      source: {
+        bytes: renderTextBytes,
+        fileName: "render-text-selection.pdf",
+      },
+    });
     const geometryPathMark =
       geometryResult.observation.value?.pages[0]?.marks.find((mark) =>
         mark.kind === "path"
@@ -97,6 +106,10 @@ try {
     const geometryRenderPathSignature = geometryPathCommand?.kind === "path"
       ? toGeometryPathSignature(geometryPathCommand)
       : null;
+    const renderTextSelectionSignature = toRenderTextSelectionSignature(
+      renderTextResult.render.value?.pages[0]?.textIndex,
+      renderTextResult.render.value?.pages[0]?.selectionModel,
+    );
 
     const browserDocument = globalThis.document;
     const viewerContainer = browserDocument.createElement("div");
@@ -139,6 +152,15 @@ try {
       geometryClosed: geometryPathSignature?.closed === true,
       geometryBlendMode:
         geometryPathSignature?.transparencyState?.blendMode === "multiply",
+      renderTextIndexPresent: renderTextResult.render.value?.pages[0]?.textIndex.spans.length === 2,
+      renderTextIndexText:
+        renderTextResult.render.value?.pages[0]?.textIndex.text === "Heading Layer\nSelection Detail",
+      renderSelectionUnitsPresent: renderTextResult.render.value?.pages[0]?.selectionModel.units.length === 2,
+      renderSelectionMatchesSpans:
+        renderTextSelectionSignature !== null &&
+        renderTextSelectionSignature.spans.every((span, index) =>
+          renderTextSelectionSignature.units[index]?.textSpanId === span.id
+        ),
     };
 
     const failedChecks = Object.entries(checks)
@@ -161,6 +183,9 @@ try {
         multiPageCount: multiPageResult.render.value?.pages.length ?? null,
         geometryPathSignature,
         geometryRenderHash: geometryResult.render.value?.renderHash.hex ?? null,
+        renderTextIndexText: renderTextResult.render.value?.pages[0]?.textIndex.text ?? null,
+        renderTextSelectionSignature,
+        renderTextSelectionHash: renderTextResult.render.value?.pages[0]?.renderHash.hex ?? null,
       },
     };
 
@@ -175,6 +200,34 @@ try {
         closed: pathLike.closed,
         bbox: pathLike.bbox ?? null,
         transform: pathLike.transform ?? null,
+      };
+    }
+
+    function toRenderTextSelectionSignature(textIndex, selectionModel) {
+      if (!textIndex || !selectionModel) {
+        return null;
+      }
+
+      return {
+        spans: textIndex.spans.map((span) => ({
+          id: span.id,
+          contentOrder: span.contentOrder,
+          text: span.text,
+          glyphIds: span.glyphIds,
+          bbox: span.bbox ?? null,
+          anchor: span.anchor ?? null,
+          writingMode: span.writingMode ?? null,
+          startsNewLine: span.startsNewLine === true,
+        })),
+        units: selectionModel.units.map((unit) => ({
+          id: unit.id,
+          textSpanId: unit.textSpanId,
+          text: unit.text,
+          glyphIds: unit.glyphIds,
+          bbox: unit.bbox ?? null,
+          anchor: unit.anchor ?? null,
+          writingMode: unit.writingMode ?? null,
+        })),
       };
     }
   }, browserName);

@@ -3,7 +3,7 @@ import { test } from "node:test";
 
 import { createPdfEngine } from "../../src/index.ts";
 import { loadNamedPdfFixture } from "../shared/load-fixture.ts";
-import { buildPdfWithPageSpecs } from "../shared/pdf-builders.ts";
+import { buildPdfWithPageContents, buildPdfWithPageSpecs } from "../shared/pdf-builders.ts";
 
 test("public pipeline contracts expose staged artifacts with current kinds", async () => {
   const engine = createPdfEngine();
@@ -29,6 +29,9 @@ test("public pipeline contracts expose staged artifacts with current kinds", asy
   assert.equal(result.layout.value?.kind, "pdf-layout");
   assert.equal(result.knowledge.value?.kind, "pdf-knowledge");
   assert.equal(result.render.value?.kind, "pdf-render");
+  assert.equal(typeof result.render.value?.pages[0]?.textIndex.text, "string");
+  assert.ok(Array.isArray(result.render.value?.pages[0]?.textIndex.spans));
+  assert.ok(Array.isArray(result.render.value?.pages[0]?.selectionModel.units));
   assert.ok(Array.isArray(result.admission.value?.featureFindings));
   assert.equal("featureSignals" in (result.admission.value ?? {}), false);
   assert.equal(result.render.value?.renderHash.algorithm, "sha-256");
@@ -136,4 +139,72 @@ test("public observation and render contracts expose path paint state", async ()
   assert.deepEqual(pathCommand.colorState, pathMark.colorState);
   assert.deepEqual(pathCommand.transparencyState, pathMark.transparencyState);
   assert.deepEqual(pathCommand.segments, pathMark.segments);
+});
+
+test("public render contracts expose text index and selection model", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageContents([
+    [
+      "BT",
+      "/F1 16 Tf",
+      "1 0 0 1 72 720 Tm",
+      "(Heading Layer) Tj",
+      "0 -24 Td",
+      "(Selection Detail) Tj",
+      "ET",
+    ].join("\n"),
+  ]);
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-render-text-selection.pdf",
+    },
+  });
+
+  const renderPage = result.render.value?.pages[0];
+  assert.ok(renderPage);
+  assert.equal(renderPage?.textIndex.text, "Heading Layer\nSelection Detail");
+  assert.equal(renderPage?.textIndex.spans.length, 2);
+  assert.deepEqual(
+    renderPage?.textIndex.spans.map((span) => ({
+      id: span.id,
+      contentOrder: span.contentOrder,
+      text: span.text,
+      startsNewLine: span.startsNewLine === true,
+    })),
+    [
+      {
+        id: "render-text-span-1-1",
+        contentOrder: 0,
+        text: "Heading Layer",
+        startsNewLine: false,
+      },
+      {
+        id: "render-text-span-1-2",
+        contentOrder: 1,
+        text: "Selection Detail",
+        startsNewLine: true,
+      },
+    ],
+  );
+  assert.deepEqual(
+    renderPage?.selectionModel.units.map((unit) => ({
+      id: unit.id,
+      textSpanId: unit.textSpanId,
+      text: unit.text,
+    })),
+    [
+      {
+        id: "render-selection-unit-1-1",
+        textSpanId: "render-text-span-1-1",
+        text: "Heading Layer",
+      },
+      {
+        id: "render-selection-unit-1-2",
+        textSpanId: "render-text-span-1-2",
+        text: "Selection Detail",
+      },
+    ],
+  );
 });

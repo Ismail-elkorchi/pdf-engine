@@ -1,5 +1,5 @@
 export interface PdfTestFixtureDefinition {
-  readonly id: "simple-text" | "multi-page-navigation" | "javascript-action" | "observed-path-geometry";
+  readonly id: "simple-text" | "multi-page-navigation" | "javascript-action" | "observed-path-geometry" | "render-text-selection";
   readonly fileName: string;
   readonly relativePath: string;
   readonly expectedText?: string;
@@ -13,6 +13,7 @@ export const pdfTestFixtures: {
   readonly multiPageNavigation: PdfTestFixtureDefinition;
   readonly javascriptAction: PdfTestFixtureDefinition;
   readonly observedPathGeometry: PdfTestFixtureDefinition;
+  readonly renderTextSelection: PdfTestFixtureDefinition;
 } = {
   simpleText: {
     id: "simple-text",
@@ -39,6 +40,13 @@ export const pdfTestFixtures: {
     id: "observed-path-geometry",
     fileName: "observed-path-geometry.pdf",
     relativePath: "../fixtures/observed-path-geometry.pdf",
+    expectedPageCount: 1,
+  },
+  renderTextSelection: {
+    id: "render-text-selection",
+    fileName: "render-text-selection.pdf",
+    relativePath: "../fixtures/render-text-selection.pdf",
+    expectedText: "Heading Layer\nSelection Detail",
     expectedPageCount: 1,
   },
 } as const;

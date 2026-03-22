@@ -6,6 +6,10 @@ import type {
   PdfRenderHash,
   PdfRenderDocument,
   PdfRenderPage,
+  PdfRenderSelectionModel,
+  PdfRenderSelectionUnit,
+  PdfRenderTextIndex,
+  PdfRenderTextSpan,
 } from "./contracts.ts";
 
 export async function buildRenderDocument(observation: PdfObservedDocument): Promise<PdfRenderDocument> {
@@ -18,8 +22,10 @@ export async function buildRenderDocument(observation: PdfObservedDocument): Pro
       pageNumber: page.pageNumber,
       resolutionMethod: page.resolutionMethod,
       ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
-      renderHash: page.renderHash,
       displayList: page.displayList,
+      textIndex: page.textIndex,
+      selectionModel: page.selectionModel,
+      renderHash: page.renderHash,
     })),
   });
 
@@ -45,11 +51,15 @@ async function buildRenderPage(
   const displayList: PdfDisplayList = {
     commands: marks.map((mark) => toDisplayCommand(mark)),
   };
+  const textIndex = buildRenderTextIndex(pageNumber, displayList.commands);
+  const selectionModel = buildRenderSelectionModel(pageNumber, textIndex);
   const renderHash = await buildRenderHash({
     pageNumber,
     resolutionMethod,
     ...(pageRef !== undefined ? { pageRef } : {}),
     displayList,
+    textIndex,
+    selectionModel,
   });
 
   return {
@@ -57,8 +67,68 @@ async function buildRenderPage(
     resolutionMethod,
     ...(pageRef !== undefined ? { pageRef } : {}),
     displayList,
+    textIndex,
+    selectionModel,
     renderHash,
   };
+}
+
+function buildRenderTextIndex(pageNumber: number, commands: readonly PdfDisplayCommand[]): PdfRenderTextIndex {
+  const spans: PdfRenderTextSpan[] = [];
+
+  for (const command of commands) {
+    if (command.kind !== "text") {
+      continue;
+    }
+
+    spans.push({
+      id: `render-text-span-${pageNumber}-${spans.length + 1}`,
+      contentOrder: command.contentOrder,
+      text: command.text,
+      glyphIds: command.glyphIds,
+      runId: command.runId,
+      ...(command.bbox !== undefined ? { bbox: command.bbox } : {}),
+      ...(command.anchor !== undefined ? { anchor: command.anchor } : {}),
+      ...(command.transform !== undefined ? { transform: command.transform } : {}),
+      ...(command.writingMode !== undefined ? { writingMode: command.writingMode } : {}),
+      ...(spans.length > 0 && command.startsNewLine ? { startsNewLine: true } : {}),
+    });
+  }
+
+  return {
+    text: flattenRenderText(spans),
+    spans,
+  };
+}
+
+function buildRenderSelectionModel(pageNumber: number, textIndex: PdfRenderTextIndex): PdfRenderSelectionModel {
+  const units: PdfRenderSelectionUnit[] = textIndex.spans.map((span, index) => ({
+    id: `render-selection-unit-${pageNumber}-${index + 1}`,
+    textSpanId: span.id,
+    text: span.text,
+    glyphIds: span.glyphIds,
+    ...(span.bbox !== undefined ? { bbox: span.bbox } : {}),
+    ...(span.anchor !== undefined ? { anchor: span.anchor } : {}),
+    ...(span.writingMode !== undefined ? { writingMode: span.writingMode } : {}),
+  }));
+
+  return {
+    units,
+  };
+}
+
+function flattenRenderText(spans: readonly PdfRenderTextSpan[]): string {
+  let text = "";
+
+  for (const [index, span] of spans.entries()) {
+    if (index > 0 && span.startsNewLine) {
+      text += "\n";
+    }
+
+    text += span.text;
+  }
+
+  return text;
 }
 
 function toDisplayCommand(mark: PdfObservedMark): PdfDisplayCommand {

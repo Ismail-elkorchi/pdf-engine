@@ -14,6 +14,9 @@ export interface PortableRuntimeSuiteResult {
     readonly renderPageCount: number | null;
     readonly geometryPathSignature: PortableGeometryPathSignature | null;
     readonly geometryRenderHash: string | null;
+    readonly renderTextIndexText: string | null;
+    readonly renderTextSelectionSignature: PortableRenderTextSelectionSignature | null;
+    readonly renderTextSelectionHash: string | null;
   };
 }
 
@@ -29,12 +32,35 @@ interface PortableGeometryPathSignature {
   readonly transform: unknown;
 }
 
+interface PortableRenderTextSelectionSignature {
+  readonly spans: readonly {
+    readonly id: string;
+    readonly contentOrder: number;
+    readonly text: string;
+    readonly glyphIds: readonly string[];
+    readonly bbox: unknown;
+    readonly anchor: unknown;
+    readonly writingMode: unknown;
+    readonly startsNewLine: boolean;
+  }[];
+  readonly units: readonly {
+    readonly id: string;
+    readonly textSpanId: string;
+    readonly text: string;
+    readonly glyphIds: readonly string[];
+    readonly bbox: unknown;
+    readonly anchor: unknown;
+    readonly writingMode: unknown;
+  }[];
+}
+
 export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteResult> {
   const engine = createPdfEngine();
   const simpleTextFixture = await loadNamedPdfFixture("simpleText");
   const javascriptActionFixture = await loadNamedPdfFixture("javascriptAction");
   const multiPageFixture = await loadNamedPdfFixture("multiPageNavigation");
   const geometryFixture = await loadNamedPdfFixture("observedPathGeometry");
+  const renderTextFixture = await loadNamedPdfFixture("renderTextSelection");
 
   const simpleFirst = await engine.run({
     source: {
@@ -69,6 +95,12 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       fileName: geometryFixture.fixture.fileName,
     },
   });
+  const renderTextResult = await engine.run({
+    source: {
+      bytes: renderTextFixture.bytes,
+      fileName: renderTextFixture.fixture.fileName,
+    },
+  });
 
   const javascriptFeatureKinds = javascriptAdmission.value?.featureFindings.map(
     (finding) => finding.kind,
@@ -81,6 +113,10 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
   const geometryRenderPathSignature = geometryPathCommand?.kind === "path"
     ? toPortableGeometryPathSignature(geometryPathCommand)
     : null;
+  const renderTextSelectionSignature = toPortableRenderTextSelectionSignature(
+    renderTextResult.render.value?.pages[0]?.textIndex,
+    renderTextResult.render.value?.pages[0]?.selectionModel,
+  );
   const checks = {
     identityMode: engine.identity.mode === "core",
     renderSupported: engine.identity.supportedStages.includes("render"),
@@ -117,6 +153,15 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
     geometryBlendMode:
       geometryPathSignature !== null &&
       hasPortableBlendMode(geometryPathSignature.transparencyState, "multiply"),
+    renderTextIndexPresent: renderTextResult.render.value?.pages[0]?.textIndex.spans.length === 2,
+    renderTextIndexText:
+      renderTextResult.render.value?.pages[0]?.textIndex.text === renderTextFixture.fixture.expectedText,
+    renderSelectionUnitsPresent: renderTextResult.render.value?.pages[0]?.selectionModel.units.length === 2,
+    renderSelectionMatchesSpans:
+      renderTextSelectionSignature !== null &&
+      renderTextSelectionSignature.spans.every((span, index) =>
+        renderTextSelectionSignature.units[index]?.textSpanId === span.id
+      ),
   } as const;
 
   assertChecks(checks);
@@ -133,6 +178,9 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       renderPageCount: multiPageResult.render.value?.pages.length ?? null,
       geometryPathSignature,
       geometryRenderHash: geometryResult.render.value?.renderHash.hex ?? null,
+      renderTextIndexText: renderTextResult.render.value?.pages[0]?.textIndex.text ?? null,
+      renderTextSelectionSignature,
+      renderTextSelectionHash: renderTextResult.render.value?.pages[0]?.renderHash.hex ?? null,
     },
   };
 }
@@ -169,6 +217,58 @@ function hasPortableBlendMode(transparencyState: unknown, expectedBlendMode: str
   }
 
   return "blendMode" in transparencyState && transparencyState.blendMode === expectedBlendMode;
+}
+
+function toPortableRenderTextSelectionSignature(
+  textIndex: {
+    readonly spans: readonly {
+      readonly id: string;
+      readonly contentOrder: number;
+      readonly text: string;
+      readonly glyphIds: readonly string[];
+      readonly bbox?: unknown;
+      readonly anchor?: unknown;
+      readonly writingMode?: unknown;
+      readonly startsNewLine?: boolean;
+    }[];
+  } | undefined,
+  selectionModel: {
+    readonly units: readonly {
+      readonly id: string;
+      readonly textSpanId: string;
+      readonly text: string;
+      readonly glyphIds: readonly string[];
+      readonly bbox?: unknown;
+      readonly anchor?: unknown;
+      readonly writingMode?: unknown;
+    }[];
+  } | undefined,
+): PortableRenderTextSelectionSignature | null {
+  if (textIndex === undefined || selectionModel === undefined) {
+    return null;
+  }
+
+  return {
+    spans: textIndex.spans.map((span) => ({
+      id: span.id,
+      contentOrder: span.contentOrder,
+      text: span.text,
+      glyphIds: span.glyphIds,
+      bbox: span.bbox ?? null,
+      anchor: span.anchor ?? null,
+      writingMode: span.writingMode ?? null,
+      startsNewLine: span.startsNewLine === true,
+    })),
+    units: selectionModel.units.map((unit) => ({
+      id: unit.id,
+      textSpanId: unit.textSpanId,
+      text: unit.text,
+      glyphIds: unit.glyphIds,
+      bbox: unit.bbox ?? null,
+      anchor: unit.anchor ?? null,
+      writingMode: unit.writingMode ?? null,
+    })),
+  };
 }
 
 function assertChecks(checks: Readonly<Record<string, boolean>>): void {
