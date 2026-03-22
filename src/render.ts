@@ -716,7 +716,7 @@ function readNumericValue(value: string | undefined): number | undefined {
 }
 
 async function buildRenderHash(value: unknown): Promise<PdfRenderHash> {
-  const json = canonicalizeJson(value);
+  const json = await canonicalizeRenderHashValue(value);
   const digest = await globalThis.crypto.subtle.digest("SHA-256", new TextEncoder().encode(json));
   const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 
@@ -726,7 +726,7 @@ async function buildRenderHash(value: unknown): Promise<PdfRenderHash> {
   };
 }
 
-function canonicalizeJson(value: unknown): string {
+export async function canonicalizeRenderHashValue(value: unknown): Promise<string> {
   if (value === null) {
     return "null";
   }
@@ -736,11 +736,20 @@ function canonicalizeJson(value: unknown): string {
   }
 
   if (value instanceof Uint8Array) {
-    return `[${Array.from(value, (entry) => canonicalizeJson(entry)).join(",")}]`;
+    const bytesSha256 = await sha256Hex(value);
+    return `{${[
+      `"$$type":"Uint8Array"`,
+      `"byteLength":${String(value.byteLength)}`,
+      `"sha256":${JSON.stringify(bytesSha256)}`,
+    ].join(",")}}`;
   }
 
   if (Array.isArray(value)) {
-    return `[${value.map((entry) => canonicalizeJson(entry)).join(",")}]`;
+    const entries: string[] = [];
+    for (const entry of value) {
+      entries.push(await canonicalizeRenderHashValue(entry));
+    }
+    return `[${entries.join(",")}]`;
   }
 
   if (typeof value === "object") {
@@ -748,8 +757,21 @@ function canonicalizeJson(value: unknown): string {
       left.localeCompare(right)
     );
 
-    return `{${entries.map(([key, entry]) => `${JSON.stringify(key)}:${canonicalizeJson(entry)}`).join(",")}}`;
+    const canonicalEntries: string[] = [];
+    for (const [key, entry] of entries) {
+      canonicalEntries.push(`${JSON.stringify(key)}:${await canonicalizeRenderHashValue(entry)}`);
+    }
+
+    return `{${canonicalEntries.join(",")}}`;
   }
 
   throw new Error(`Render hashing does not support values of type ${typeof value}.`);
+}
+
+async function sha256Hex(bytes: Uint8Array): Promise<string> {
+  const digestInput = bytes.buffer instanceof ArrayBuffer
+    ? bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength)
+    : Uint8Array.from(bytes).buffer;
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", digestInput);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
 }

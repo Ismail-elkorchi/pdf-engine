@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { buildRenderDocument } from "../../src/render.ts";
+import { buildRenderDocument, canonicalizeRenderHashValue } from "../../src/render.ts";
 import { createPdfEngine } from "../../src/index.ts";
 import {
   buildPdfWithRenderImagery,
@@ -353,4 +353,26 @@ test("buildRenderDocument emits page-box-aware SVG and PNG imagery", async () =>
     [137, 80, 78, 71, 13, 10, 26, 10],
   );
   assert.ok(renderDocument?.knownLimits.includes("render-imagery-partial"));
+});
+
+test("canonicalizeRenderHashValue compacts large byte arrays into deterministic digests", async () => {
+  const largeBytes = new Uint8Array(4096);
+  for (let index = 0; index < largeBytes.length; index += 1) {
+    largeBytes[index] = index % 251;
+  }
+
+  const first = await canonicalizeRenderHashValue({
+    kind: "raster",
+    bytes: largeBytes,
+  });
+  const second = await canonicalizeRenderHashValue({
+    kind: "raster",
+    bytes: largeBytes,
+  });
+
+  assert.equal(first, second);
+  assert.ok(first.includes(`"byteLength":${String(largeBytes.byteLength)}`));
+  assert.ok(first.includes(`"$$type":"Uint8Array"`));
+  assert.equal(first.includes(`"bytes":[`), false);
+  assert.ok(first.length < largeBytes.byteLength);
 });
