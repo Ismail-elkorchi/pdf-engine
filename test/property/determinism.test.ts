@@ -5,6 +5,7 @@ import fc from "fast-check";
 
 import { createPdfEngine } from "../../src/index.ts";
 import {
+  buildPdfWithDenseVectorImagery,
   buildPdfWithPageContents,
   buildPdfWithRenderImagery,
   buildPdfWithRenderResourcePayloads,
@@ -127,5 +128,41 @@ test("engine.run is deterministic for repeated imagery-bearing render PDFs", asy
     secondImagery.raster.bytes,
   );
   assert.equal(first.render.value?.pages[0]?.renderHash.hex, second.render.value?.pages[0]?.renderHash.hex);
+  assert.equal(first.render.value?.renderHash.hex, second.render.value?.renderHash.hex);
+});
+
+test("engine.run is deterministic for repeated dense-vector render PDFs", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithDenseVectorImagery();
+
+  const first = await engine.run({
+    source: {
+      bytes,
+      fileName: "dense-vector-render.pdf",
+    },
+  });
+  const second = await engine.run({
+    source: {
+      bytes,
+      fileName: "dense-vector-render.pdf",
+    },
+  });
+
+  const firstPages = first.render.value?.pages ?? [];
+  const secondPages = second.render.value?.pages ?? [];
+  assert.equal(firstPages.length, secondPages.length);
+  for (const [pageIndex, firstPage] of firstPages.entries()) {
+    const secondPage = secondPages[pageIndex];
+    assert.ok(firstPage?.imagery?.svg);
+    assert.ok(firstPage?.imagery?.raster);
+    assert.ok(secondPage?.imagery?.svg);
+    assert.ok(secondPage?.imagery?.raster);
+    if (!firstPage?.imagery?.svg || !firstPage.imagery.raster || !secondPage?.imagery?.svg || !secondPage.imagery.raster) {
+      continue;
+    }
+    assert.equal(firstPage.imagery.svg.markup, secondPage.imagery.svg.markup);
+    assert.deepEqual(firstPage.imagery.raster.bytes, secondPage.imagery.raster.bytes);
+    assert.equal(firstPage.renderHash.hex, secondPage.renderHash.hex);
+  }
   assert.equal(first.render.value?.renderHash.hex, second.render.value?.renderHash.hex);
 });

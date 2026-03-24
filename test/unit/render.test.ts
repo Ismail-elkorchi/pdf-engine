@@ -4,6 +4,8 @@ import { test } from "node:test";
 import { buildRenderDocument, canonicalizeRenderHashValue } from "../../src/render.ts";
 import { createPdfEngine } from "../../src/index.ts";
 import {
+  buildPdfWithDenseVectorImagery,
+  buildPdfWithOverscaledImageImagery,
   buildPdfWithRenderImagery,
   buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
@@ -355,6 +357,101 @@ test("buildRenderDocument emits page-box-aware SVG and PNG imagery", async () =>
   assert.ok(renderDocument?.knownLimits.includes("render-imagery-partial"));
 });
 
+test("buildRenderDocument emits imagery for dense vector-heavy PDFs", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithDenseVectorImagery();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "dense-vector-render.pdf",
+    },
+  });
+
+  const renderDocument = result.render.value;
+  assert.ok(renderDocument);
+  assert.equal(renderDocument?.pages.length, 3);
+  for (const page of renderDocument?.pages ?? []) {
+    assert.ok(page.imagery?.svg);
+    assert.ok(page.imagery?.raster);
+    if (!page.imagery?.svg || !page.imagery.raster) {
+      continue;
+    }
+    assert.equal(page.imagery.svg.mimeType, "image/svg+xml");
+    assert.equal(page.imagery.raster.mimeType, "image/png");
+    assert.deepEqual(
+      Array.from(page.imagery.raster.bytes.subarray(0, 8)),
+      [137, 80, 78, 71, 13, 10, 26, 10],
+    );
+  }
+});
+
+test("buildRenderDocument keeps dense rectangle imagery deterministic", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithDenseVectorImagery({
+    ruleCount: 64,
+    rectangleCount: 96,
+  });
+
+  const first = await engine.run({
+    source: {
+      bytes,
+      fileName: "dense-rectangles.pdf",
+    },
+  });
+  const second = await engine.run({
+    source: {
+      bytes,
+      fileName: "dense-rectangles.pdf",
+    },
+  });
+
+  const firstPages = first.render.value?.pages ?? [];
+  const secondPages = second.render.value?.pages ?? [];
+  assert.equal(firstPages.length, secondPages.length);
+  for (const [pageIndex, firstPage] of firstPages.entries()) {
+    const secondPage = secondPages[pageIndex];
+    assert.ok(firstPage?.imagery?.raster);
+    assert.ok(secondPage?.imagery?.raster);
+    if (!firstPage?.imagery?.raster || !secondPage?.imagery?.raster) {
+      continue;
+    }
+    assert.deepEqual(firstPage.imagery.raster.bytes, secondPage.imagery.raster.bytes);
+    assert.equal(firstPage.renderHash.hex, secondPage.renderHash.hex);
+  }
+});
+
+test("buildRenderDocument clips overscaled image raster work to the visible page box", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithOverscaledImageImagery();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "overscaled-image-render.pdf",
+    },
+  });
+
+  const renderPage = result.render.value?.pages[0];
+  assert.ok(renderPage?.imagery?.svg);
+  assert.ok(renderPage?.imagery?.raster);
+  if (!renderPage?.imagery?.svg || !renderPage.imagery.raster) {
+    return;
+  }
+  assert.deepEqual(renderPage.pageBox, {
+    x: 10,
+    y: 20,
+    width: 200,
+    height: 160,
+  });
+  assert.equal(renderPage.imagery.raster.width, 200);
+  assert.equal(renderPage.imagery.raster.height, 160);
+  assert.deepEqual(
+    Array.from(renderPage.imagery.raster.bytes.subarray(0, 8)),
+    [137, 80, 78, 71, 13, 10, 26, 10],
+  );
+});
+
 test("canonicalizeRenderHashValue compacts large byte arrays into deterministic digests", async () => {
   const largeBytes = new Uint8Array(4096);
   for (let index = 0; index < largeBytes.length; index += 1) {
@@ -375,4 +472,16 @@ test("canonicalizeRenderHashValue compacts large byte arrays into deterministic 
   assert.ok(first.includes(`"$$type":"Uint8Array"`));
   assert.equal(first.includes(`"bytes":[`), false);
   assert.ok(first.length < largeBytes.byteLength);
+});
+
+test("canonicalizeRenderHashValue compacts large strings into deterministic digests", async () => {
+  const largeString = "Dense render hash content ".repeat(512);
+
+  const first = await canonicalizeRenderHashValue(largeString);
+  const second = await canonicalizeRenderHashValue(largeString);
+
+  assert.equal(first, second);
+  assert.ok(first.includes(`"$$type":"LargeString"`));
+  assert.ok(first.includes(`"byteLength":${String(new TextEncoder().encode(largeString).byteLength)}`));
+  assert.equal(first.includes(largeString.slice(0, 24)), false);
 });
