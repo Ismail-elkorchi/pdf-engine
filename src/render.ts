@@ -1,4 +1,4 @@
-import { buildRenderPageImagery } from "./render-imagery.ts";
+import { buildRenderPageImagery, type CachedImageData } from "./render-imagery.ts";
 import {
   keyOfObjectRef,
   readNameValue,
@@ -65,18 +65,21 @@ export async function buildRenderDocument(
   const resourcePayloadKnownLimits: PdfRenderDocument["knownLimits"] = payloadCatalog.hasUnavailablePayloads
     ? ["render-resource-payloads-partial"]
     : [];
-  const pages = await Promise.all(
-    observation.pages.map((page) =>
-      buildRenderPage(
+  const cachedImageDataByPayloadId = new Map<string, CachedImageData>();
+  const pages: Awaited<ReturnType<typeof buildRenderPage>>[] = [];
+  for (const page of observation.pages) {
+    pages.push(
+      await buildRenderPage(
         page.pageNumber,
         page.resolutionMethod,
         page.pageRef,
         page.marks,
         payloadCatalog,
         pageEntryByPageNumber.get(page.pageNumber),
-      )
-    ),
-  );
+        cachedImageDataByPayloadId,
+      ),
+    );
+  }
   const imageryKnownLimits = dedupeKnownLimits(
     pages.flatMap((page) => page.knownLimits),
   );
@@ -117,6 +120,7 @@ async function buildRenderPage(
   marks: readonly PdfObservedMark[],
   payloadCatalog: RenderResourcePayloadCatalog,
   pageEntry: ParsedPageEntry | undefined,
+  cachedImageDataByPayloadId: Map<string, CachedImageData>,
 ): Promise<PdfRenderPage & { readonly knownLimits: readonly PdfRenderDocument["knownLimits"][number][] }> {
   const displayList: PdfDisplayList = {
     commands: marks.map((mark) => toDisplayCommand(mark, payloadCatalog)),
@@ -128,6 +132,7 @@ async function buildRenderPage(
     displayList,
     ...(pageEntry?.pageBox !== undefined ? { pageBox: pageEntry.pageBox } : {}),
     resourcePayloads: pageResourcePayloads,
+    cachedImageDataByPayloadId,
   });
   const renderHash = await buildRenderHash({
     pageNumber,
@@ -731,7 +736,20 @@ export async function canonicalizeRenderHashValue(value: unknown): Promise<strin
     return "null";
   }
 
-  if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") {
+  if (typeof value === "string") {
+    if (value.length > 4096) {
+      const encoded = new TextEncoder().encode(value);
+      const stringSha256 = await sha256Hex(encoded);
+      return `{${[
+        `"$$type":"LargeString"`,
+        `"byteLength":${String(encoded.byteLength)}`,
+        `"sha256":${JSON.stringify(stringSha256)}`,
+      ].join(",")}}`;
+    }
+    return JSON.stringify(value);
+  }
+
+  if (typeof value === "number" || typeof value === "boolean") {
     return JSON.stringify(value);
   }
 

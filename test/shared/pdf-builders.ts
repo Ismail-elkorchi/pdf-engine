@@ -21,6 +21,11 @@ export interface RenderImageryPdfOptions {
   readonly reorderResourceEntries?: boolean;
 }
 
+export interface DenseVectorRenderPdfOptions {
+  readonly ruleCount?: number;
+  readonly rectangleCount?: number;
+}
+
 export function buildPdfWithPageContents(
   pageContents: readonly string[],
 ): Uint8Array {
@@ -240,6 +245,117 @@ export function buildPdfWithRenderImagery(
   );
 }
 
+export function buildPdfWithDenseVectorImagery(
+  options: DenseVectorRenderPdfOptions = {},
+): Uint8Array {
+  const ruleCount = options.ruleCount ?? 120;
+  const rectangleCount = options.rectangleCount ?? 72;
+  const pageOneRules = buildDenseRulePage(ruleCount);
+  const pageTwoRectangles = buildDenseRectanglePage(rectangleCount);
+  const pageThreeMixed = buildMixedDensePage(Math.max(24, Math.floor(ruleCount / 2)));
+
+  return buildPdfWithPageSpecs([
+    {
+      mediaBox: [0, 0, 612, 792],
+      content: pageOneRules,
+    },
+    {
+      mediaBox: [0, 0, 612, 792],
+      content: pageTwoRectangles,
+    },
+    {
+      mediaBox: [0, 0, 612, 792],
+      content: pageThreeMixed,
+    },
+  ]);
+}
+
+export function buildPdfWithOverscaledImageImagery(): Uint8Array {
+  return buildPdfWithPageSpecs(
+    [
+      {
+        mediaBox: [0, 0, 220, 220],
+        cropBox: [10, 20, 210, 180],
+        resourcesBody: "<< /XObject << /Im1 20 0 R >> >>",
+        content: [
+          "q",
+          "1800 0 0 1800 -120 -140 cm",
+          "/Im1 Do",
+          "Q",
+        ].join("\n"),
+      },
+    ],
+    [
+      {
+        objectNumber: 20,
+        body:
+          "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n" +
+          "ABCDEFGHIJKL" +
+          "\nendstream",
+      },
+    ],
+  );
+}
+
 function formatPageBox(box: readonly [number, number, number, number]): string {
   return `[${box.map((value) => String(value)).join(" ")}]`;
+}
+
+function buildDenseRulePage(ruleCount: number): string {
+  const commands: string[] = ["0 G", "0.5 w"];
+  const usableRuleCount = Math.max(12, ruleCount);
+
+  for (let index = 0; index < usableRuleCount; index += 1) {
+    const y = 760 - index * 5;
+    commands.push(`${String(48)} ${String(y)} m ${String(564)} ${String(y)} l S`);
+  }
+
+  for (let index = 0; index < usableRuleCount; index += 1) {
+    const x = 48 + index * 4;
+    commands.push(`${String(x)} ${String(96)} m ${String(x)} ${String(760)} l S`);
+  }
+
+  return commands.join("\n");
+}
+
+function buildDenseRectanglePage(rectangleCount: number): string {
+  const commands: string[] = ["0 0 0 rg", "0 0 0 RG", "0.75 w"];
+  const usableRectangleCount = Math.max(24, rectangleCount);
+
+  for (let index = 0; index < usableRectangleCount; index += 1) {
+    const column = index % 8;
+    const row = Math.floor(index / 8);
+    const x = 48 + column * 62;
+    const y = 710 - row * 48;
+    const width = 44 + (index % 3) * 6;
+    const height = 18 + (index % 4) * 4;
+    commands.push(`${String(x)} ${String(y)} ${String(width)} ${String(height)} re B`);
+  }
+
+  return commands.join("\n");
+}
+
+function buildMixedDensePage(ruleCount: number): string {
+  const commands: string[] = [
+    "BT",
+    "/F1 14 Tf",
+    "1 0 0 1 72 744 Tm",
+    "(Dense technical layout) Tj",
+    "ET",
+    "0 G",
+    "0.5 w",
+  ];
+
+  const usableRuleCount = Math.max(24, ruleCount);
+  for (let index = 0; index < usableRuleCount; index += 1) {
+    const y = 708 - index * 12;
+    commands.push(`${String(72)} ${String(y)} m ${String(540)} ${String(y)} l S`);
+    commands.push("BT");
+    commands.push("/F1 10 Tf");
+    commands.push(`1 0 0 1 84 ${String(y + 3)} Tm`);
+    commands.push(`(Section ${String(index + 1).padStart(2, "0")} text line) Tj`);
+    commands.push("ET");
+  }
+
+  return commands.join("\n");
 }

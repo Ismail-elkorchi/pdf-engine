@@ -21,6 +21,7 @@ interface RenderPageImageryBuildInput {
   readonly displayList: PdfDisplayList;
   readonly pageBox?: PdfBoundingBox;
   readonly resourcePayloads: readonly PdfRenderResourcePayload[];
+  readonly cachedImageDataByPayloadId?: Map<string, CachedImageData>;
 }
 
 export interface RenderPageImageryBuildResult {
@@ -45,6 +46,11 @@ interface DecodedImagePixels {
   readonly width: number;
   readonly height: number;
   readonly rgbaBytes: Uint8Array;
+}
+
+export interface CachedImageData {
+  readonly image: DecodedImagePixels;
+  readonly dataUri: string;
 }
 
 interface TextPrimitive {
@@ -86,6 +92,7 @@ type RenderPrimitive = TextPrimitive | PathPrimitive | ImagePrimitive;
 interface RasterSubpath {
   readonly points: readonly NormalizedPoint[];
   readonly closed: boolean;
+  readonly axisAlignedRectangle?: PdfBoundingBox;
 }
 
 const IDENTITY_TRANSFORM: PdfTransformMatrix = {
@@ -182,7 +189,12 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
         break;
       }
       case "image": {
-        const primitive = buildImagePrimitive(command, pageBox, resourcePayloadById);
+        const primitive = buildImagePrimitive(
+          command,
+          pageBox,
+          resourcePayloadById,
+          input.cachedImageDataByPayloadId,
+        );
         if (primitive !== undefined) {
           primitives.push(primitive);
         } else {
@@ -295,6 +307,7 @@ function buildImagePrimitive(
   command: PdfDisplayImageCommand,
   pageBox: PdfBoundingBox,
   resourcePayloadById: ReadonlyMap<string, PdfRenderResourcePayload>,
+  cachedImageDataByPayloadId: Map<string, CachedImageData> | undefined,
 ): ImagePrimitive | undefined {
   if (command.imagePayloadId === undefined) {
     return undefined;
@@ -310,15 +323,31 @@ function buildImagePrimitive(
     return undefined;
   }
 
+  const cachedImageData = cachedImageDataByPayloadId?.get(command.imagePayloadId);
+  const imageData = cachedImageData ?? buildCachedImageData(payload);
+  if (imageData === undefined) {
+    return undefined;
+  }
+  cachedImageDataByPayloadId?.set(command.imagePayloadId, imageData);
+
+  return {
+    kind: "image",
+    contentOrder: command.contentOrder,
+    bbox,
+    image: imageData.image,
+    dataUri: imageData.dataUri,
+  };
+}
+
+function buildCachedImageData(
+  payload: Extract<PdfRenderResourcePayload, { readonly kind: "image" }>,
+): CachedImageData | undefined {
   const image = decodeImagePayload(payload);
   if (image === undefined) {
     return undefined;
   }
 
   return {
-    kind: "image",
-    contentOrder: command.contentOrder,
-    bbox,
     image,
     dataUri: `data:image/png;base64,${encodeBase64(encodePngRgba(image.width, image.height, image.rgbaBytes))}`,
   };
@@ -466,6 +495,9 @@ function normalizePathSegments(
         rasterSubpaths.push({
           points: [...points, points[0]!],
           closed: true,
+          ...(detectAxisAlignedRectangle(points) !== undefined
+            ? { axisAlignedRectangle: detectAxisAlignedRectangle(points)! }
+            : {}),
         });
         currentPoints = [];
         currentPoint = undefined;
@@ -497,6 +529,33 @@ function rectanglePoints(
   ] as const;
 
   return corners.map((point) => normalizePoint(pageBox, transformPoint(transform, point)));
+}
+
+function detectAxisAlignedRectangle(points: readonly NormalizedPoint[]): PdfBoundingBox | undefined {
+  if (points.length !== 4) {
+    return undefined;
+  }
+
+  const xs = Array.from(new Set(points.map((point) => formatNumber(point.x))));
+  const ys = Array.from(new Set(points.map((point) => formatNumber(point.y))));
+  if (xs.length !== 2 || ys.length !== 2) {
+    return undefined;
+  }
+
+  const minX = Math.min(...points.map((point) => point.x));
+  const maxX = Math.max(...points.map((point) => point.x));
+  const minY = Math.min(...points.map((point) => point.y));
+  const maxY = Math.max(...points.map((point) => point.y));
+  if (maxX <= minX || maxY <= minY) {
+    return undefined;
+  }
+
+  return {
+    x: minX,
+    y: minY,
+    width: maxX - minX,
+    height: maxY - minY,
+  };
 }
 
 function normalizePoint(pageBox: PdfBoundingBox, point: PdfPoint): NormalizedPoint {
@@ -657,6 +716,17 @@ function rasterizePathPrimitive(
 ): void {
   if (primitive.fillColor !== undefined) {
     for (const subpath of primitive.rasterSubpaths) {
+      if (subpath.axisAlignedRectangle !== undefined) {
+        fillRectangle(
+          rgbaBytes,
+          width,
+          height,
+          subpath.axisAlignedRectangle,
+          primitive.fillColor,
+          primitive.blendMode,
+        );
+        continue;
+      }
       if (subpath.closed && subpath.points.length >= 3) {
         fillPolygon(rgbaBytes, width, height, subpath.points, primitive.fillColor, primitive.blendMode);
       }
@@ -668,6 +738,18 @@ function rasterizePathPrimitive(
       ? applyDashPattern(primitive.rasterSubpaths, primitive.dashPattern, primitive.dashPhase)
       : primitive.rasterSubpaths;
     for (const subpath of dashedStroke) {
+      if (subpath.axisAlignedRectangle !== undefined && primitive.dashPattern.length === 0) {
+        strokeRectangle(
+          rgbaBytes,
+          width,
+          height,
+          subpath.axisAlignedRectangle,
+          primitive.strokeWidth,
+          primitive.strokeColor,
+          primitive.blendMode,
+        );
+        continue;
+      }
       strokePolyline(
         rgbaBytes,
         width,
@@ -732,23 +814,28 @@ function rasterizeImagePrimitive(
   const targetHeight = Math.max(1, Math.round(primitive.bbox.height));
   const startX = Math.round(primitive.bbox.x);
   const startY = Math.round(primitive.bbox.y);
+  const visibleStartX = Math.max(0, startX);
+  const visibleStartY = Math.max(0, startY);
+  const visibleEndX = Math.min(width, startX + targetWidth);
+  const visibleEndY = Math.min(height, startY + targetHeight);
 
-  for (let y = 0; y < targetHeight; y += 1) {
-    for (let x = 0; x < targetWidth; x += 1) {
+  if (visibleStartX >= visibleEndX || visibleStartY >= visibleEndY) {
+    return;
+  }
+
+  for (let destinationY = visibleStartY; destinationY < visibleEndY; destinationY += 1) {
+    const localY = destinationY - startY;
+    for (let destinationX = visibleStartX; destinationX < visibleEndX; destinationX += 1) {
+      const localX = destinationX - startX;
       const sourceX = Math.min(
         primitive.image.width - 1,
-        Math.max(0, Math.floor((x / targetWidth) * primitive.image.width)),
+        Math.max(0, Math.floor((localX / targetWidth) * primitive.image.width)),
       );
       const sourceY = Math.min(
         primitive.image.height - 1,
-        Math.max(0, Math.floor((y / targetHeight) * primitive.image.height)),
+        Math.max(0, Math.floor((localY / targetHeight) * primitive.image.height)),
       );
       const sourceIndex = (sourceY * primitive.image.width + sourceX) * 4;
-      const destinationX = startX + x;
-      const destinationY = startY + y;
-      if (destinationX < 0 || destinationY < 0 || destinationX >= width || destinationY >= height) {
-        continue;
-      }
       const color: RgbaColor = {
         r: primitive.image.rgbaBytes[sourceIndex] ?? 0,
         g: primitive.image.rgbaBytes[sourceIndex + 1] ?? 0,
@@ -774,9 +861,7 @@ function fillRectangle(
   const endY = Math.min(height, Math.ceil(rectangle.y + rectangle.height));
 
   for (let y = startY; y < endY; y += 1) {
-    for (let x = startX; x < endX; x += 1) {
-      blendPixel(rgbaBytes, width, x, y, color, blendMode);
-    }
+    fillHorizontalSpan(rgbaBytes, width, y, startX, endX - 1, color, blendMode);
   }
 }
 
@@ -811,10 +896,39 @@ function fillPolygon(
     for (let index = 0; index + 1 < intersections.length; index += 2) {
       const startX = Math.max(0, Math.floor(intersections[index] ?? 0));
       const endX = Math.min(width - 1, Math.ceil(intersections[index + 1] ?? 0));
-      for (let x = startX; x <= endX; x += 1) {
-        blendPixel(rgbaBytes, width, x, y, color, blendMode);
-      }
+      fillHorizontalSpan(rgbaBytes, width, y, startX, endX, color, blendMode);
     }
+  }
+}
+
+function fillHorizontalSpan(
+  rgbaBytes: Uint8Array,
+  width: number,
+  y: number,
+  startX: number,
+  endX: number,
+  color: RgbaColor,
+  blendMode: PdfObservedBlendMode,
+): void {
+  if (endX < startX) {
+    return;
+  }
+
+  if (blendMode === "normal" && color.a >= 0.999) {
+    const alphaByte = clampByte(color.a * 255);
+    let offset = (y * width + startX) * 4;
+    for (let x = startX; x <= endX; x += 1) {
+      rgbaBytes[offset] = color.r;
+      rgbaBytes[offset + 1] = color.g;
+      rgbaBytes[offset + 2] = color.b;
+      rgbaBytes[offset + 3] = alphaByte;
+      offset += 4;
+    }
+    return;
+  }
+
+  for (let x = startX; x <= endX; x += 1) {
+    blendPixel(rgbaBytes, width, x, y, color, blendMode);
   }
 }
 
@@ -837,18 +951,117 @@ function strokePolyline(
     if (start === undefined || end === undefined) {
       continue;
     }
+    strokeSegment(rgbaBytes, width, height, start, end, strokeWidth, color, blendMode);
+  }
+}
 
-    const minX = Math.max(0, Math.floor(Math.min(start.x, end.x) - strokeWidth));
-    const maxX = Math.min(width - 1, Math.ceil(Math.max(start.x, end.x) + strokeWidth));
-    const minY = Math.max(0, Math.floor(Math.min(start.y, end.y) - strokeWidth));
-    const maxY = Math.min(height - 1, Math.ceil(Math.max(start.y, end.y) + strokeWidth));
+function strokeRectangle(
+  rgbaBytes: Uint8Array,
+  width: number,
+  height: number,
+  rectangle: PdfBoundingBox,
+  strokeWidth: number,
+  color: RgbaColor,
+  blendMode: PdfObservedBlendMode,
+): void {
+  const topLeft = { x: rectangle.x, y: rectangle.y };
+  const topRight = { x: rectangle.x + rectangle.width, y: rectangle.y };
+  const bottomRight = { x: rectangle.x + rectangle.width, y: rectangle.y + rectangle.height };
+  const bottomLeft = { x: rectangle.x, y: rectangle.y + rectangle.height };
 
-    for (let y = minY; y <= maxY; y += 1) {
-      for (let x = minX; x <= maxX; x += 1) {
-        const distance = distanceToSegment(x + 0.5, y + 0.5, start, end);
-        if (distance <= strokeWidth / 2) {
-          blendPixel(rgbaBytes, width, x, y, color, blendMode);
-        }
+  strokeSegment(rgbaBytes, width, height, topLeft, topRight, strokeWidth, color, blendMode);
+  strokeSegment(rgbaBytes, width, height, topRight, bottomRight, strokeWidth, color, blendMode);
+  strokeSegment(rgbaBytes, width, height, bottomRight, bottomLeft, strokeWidth, color, blendMode);
+  strokeSegment(rgbaBytes, width, height, bottomLeft, topLeft, strokeWidth, color, blendMode);
+}
+
+function strokeSegment(
+  rgbaBytes: Uint8Array,
+  width: number,
+  height: number,
+  start: NormalizedPoint,
+  end: NormalizedPoint,
+  strokeWidth: number,
+  color: RgbaColor,
+  blendMode: PdfObservedBlendMode,
+): void {
+  const dx = end.x - start.x;
+  const dy = end.y - start.y;
+  const dominantAxisLength = Math.max(Math.abs(dx), Math.abs(dy));
+  const radius = Math.max(strokeWidth / 2, 0.5);
+
+  if (dominantAxisLength <= 0.0001) {
+    blendStrokeKernel(rgbaBytes, width, height, start.x, start.y, radius, color, blendMode);
+    return;
+  }
+
+  const visitedPixels = new Set<number>();
+  const steps = Math.max(1, Math.ceil(dominantAxisLength * 2));
+
+  for (let step = 0; step <= steps; step += 1) {
+    const ratio = step / steps;
+    const x = start.x + dx * ratio;
+    const y = start.y + dy * ratio;
+    collectStrokeKernelPixels(visitedPixels, width, height, x, y, radius);
+  }
+
+  for (const pixelIndex of visitedPixels) {
+    const pixelX = pixelIndex % width;
+    const pixelY = Math.floor(pixelIndex / width);
+    blendPixel(rgbaBytes, width, pixelX, pixelY, color, blendMode);
+  }
+}
+
+function blendStrokeKernel(
+  rgbaBytes: Uint8Array,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  radius: number,
+  color: RgbaColor,
+  blendMode: PdfObservedBlendMode,
+): void {
+  const pixels = new Set<number>();
+  collectStrokeKernelPixels(pixels, width, height, x, y, radius);
+  for (const pixelIndex of pixels) {
+    const pixelX = pixelIndex % width;
+    const pixelY = Math.floor(pixelIndex / width);
+    blendPixel(rgbaBytes, width, pixelX, pixelY, color, blendMode);
+  }
+}
+
+function collectStrokeKernelPixels(
+  pixels: Set<number>,
+  width: number,
+  height: number,
+  x: number,
+  y: number,
+  radius: number,
+): void {
+  if (radius <= 0.75) {
+    const pixelX = Math.round(x);
+    const pixelY = Math.round(y);
+    if (pixelX >= 0 && pixelY >= 0 && pixelX < width && pixelY < height) {
+      pixels.add(pixelY * width + pixelX);
+    }
+    return;
+  }
+
+  const minX = Math.max(0, Math.floor(x - radius));
+  const maxX = Math.min(width - 1, Math.ceil(x + radius));
+  const minY = Math.max(0, Math.floor(y - radius));
+  const maxY = Math.min(height - 1, Math.ceil(y + radius));
+  const squaredRadius = radius * radius;
+
+  for (let pixelY = minY; pixelY <= maxY; pixelY += 1) {
+    for (let pixelX = minX; pixelX <= maxX; pixelX += 1) {
+      const centerX = pixelX + 0.5;
+      const centerY = pixelY + 0.5;
+      const distanceX = centerX - x;
+      const distanceY = centerY - y;
+      if ((distanceX * distanceX) + (distanceY * distanceY) <= squaredRadius) {
+        pixels.add(pixelY * width + pixelX);
       }
     }
   }
@@ -938,25 +1151,6 @@ function interpolatePoint(
     x: start.x + (end.x - start.x) * ratio,
     y: start.y + (end.y - start.y) * ratio,
   };
-}
-
-function distanceToSegment(
-  x: number,
-  y: number,
-  start: NormalizedPoint,
-  end: NormalizedPoint,
-): number {
-  const dx = end.x - start.x;
-  const dy = end.y - start.y;
-  if (dx === 0 && dy === 0) {
-    return Math.hypot(x - start.x, y - start.y);
-  }
-
-  const projection = ((x - start.x) * dx + (y - start.y) * dy) / (dx * dx + dy * dy);
-  const clamped = Math.max(0, Math.min(1, projection));
-  const closestX = start.x + clamped * dx;
-  const closestY = start.y + clamped * dy;
-  return Math.hypot(x - closestX, y - closestY);
 }
 
 function decodeImagePayload(payload: Extract<PdfRenderResourcePayload, { readonly kind: "image" }>): DecodedImagePixels | undefined {
