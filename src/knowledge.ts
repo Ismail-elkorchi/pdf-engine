@@ -2072,7 +2072,35 @@ function compactRowsLookTabular(
     return false;
   }
 
+  if (!compactHeadersFitNumericEvidence(headers, numericColumnIndexes)) {
+    return false;
+  }
+
   return bodyRows.every((row) => row.cells.some((cell) => compactCellContainsNumber(cell)));
+}
+
+function compactHeadersFitNumericEvidence(
+  headers: readonly string[],
+  numericColumnIndexes: readonly number[],
+): boolean {
+  const numericColumnIndexSet = new Set(numericColumnIndexes);
+  return numericColumnIndexes.some((columnIndex) => {
+    const lastWord = normalizeCompactToken(splitCompactRunTokens(headers[columnIndex] ?? "").at(-1) ?? "");
+    if (lastWord.length === 0) {
+      return false;
+    }
+
+    if (COMPACT_MEASUREMENT_HEADER_SUFFIXES.has(lastWord)) {
+      return true;
+    }
+
+    const previousLastWord = normalizeCompactToken(splitCompactRunTokens(headers[columnIndex - 1] ?? "").at(-1) ?? "");
+    const nextLastWord = normalizeCompactToken(splitCompactRunTokens(headers[columnIndex + 1] ?? "").at(-1) ?? "");
+    return (
+      (numericColumnIndexSet.has(columnIndex - 1) && previousLastWord === lastWord) ||
+      (numericColumnIndexSet.has(columnIndex + 1) && nextLastWord === lastWord)
+    );
+  });
 }
 
 function compactCellContainsNumber(text: string): boolean {

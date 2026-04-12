@@ -23,3 +23,4 @@ All notable changes are documented in this file.
 - Render hashing now canonicalizes byte payloads through deterministic byte digests so large imagery-bearing pages remain hashable under the validation proof sets.
 - The browser viewer now prefers render imagery in page mode, uses render selection geometry for page-mode search highlights, surfaces render-text hits in search results, and falls back explicitly per page when render imagery is unavailable.
 - Knowledge table projection now recovers compact row-run measurement tables with citation-backed cells when header and body rows are consistent.
+- Knowledge table projection now rejects compact row-run candidates whose numeric evidence is only incidental prose.

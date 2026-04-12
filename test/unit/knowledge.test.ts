@@ -81,6 +81,27 @@ test("knowledge does not project compact row-run tables without consistent numer
   ]);
 });
 
+test("knowledge does not project compact row-run tables from prose with incidental numbers", () => {
+  const texts = [
+    "Programming Note",
+    "Data to be loaded into a floating-point double or quad register that is not doubleword-aligned in memory",
+    "must be loaded into the lower 16 double registers using single-precision instructions",
+    "If desired it can then be copied into the upper 16 double registers",
+  ];
+
+  const knowledge = buildKnowledgeDocument(
+    createCompactRowRunLayout(texts),
+    createCompactRowRunObservation(texts),
+  );
+
+  assert.equal(knowledge.tables.length, 0);
+  assert.match(
+    knowledge.extractedText,
+    /Data to be loaded into a floating-point double or quad register/u,
+  );
+  assert.match(knowledge.extractedText, /single-precision instructions/u);
+});
+
 function createCompactRowRunLayout(texts: readonly string[]): PdfLayoutDocument {
   const [title = "", header = "", firstRow = "", secondRow = "", thirdRow = ""] = texts;
   const blocks: PdfLayoutBlock[] = [
