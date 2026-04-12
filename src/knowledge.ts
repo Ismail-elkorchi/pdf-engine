@@ -22,21 +22,75 @@ const GRID_HEADER_ROW_MIN_COLUMNS = 3;
 const GRID_ROW_CELL_MIN_COUNT = 2;
 const ROW_SEQUENCE_MIN_HEADERS = 3;
 const ROW_SEQUENCE_MIN_ROWS = 2;
+const COMPACT_ROW_SEQUENCE_MAX_HEADER_TOKENS = 18;
+const COMPACT_ROW_SEQUENCE_MAX_ROW_TOKENS = 32;
+const COMPACT_ROW_SEQUENCE_MAX_COLUMNS = 8;
 const FIELD_VALUE_MIN_ROWS = 2;
 const FIELD_LABEL_MIN_ROWS = 4;
 const FIELD_LABEL_MAX_X_SPAN = 240;
 const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
 const CONTRACT_AWARD_HEADERS = ["Serial No.", "Contract Description", "Contractor", "Amount", "Remarks"] as const;
 const CONTRACT_AWARD_MIN_ROWS = 2;
+const COMPACT_MEASUREMENT_UNITS = new Set([
+  "%",
+  "a",
+  "cm",
+  "ft",
+  "g",
+  "gb",
+  "hz",
+  "in",
+  "kb",
+  "kg",
+  "khz",
+  "lb",
+  "m",
+  "mb",
+  "mhz",
+  "min",
+  "mm",
+  "ms",
+  "oz",
+  "ppm",
+  "pt",
+  "px",
+  "s",
+  "sec",
+  "v",
+  "w",
+]);
+const COMPACT_MEASUREMENT_HEADER_SUFFIXES = new Set([
+  "amount",
+  "count",
+  "height",
+  "length",
+  "measure",
+  "measured",
+  "nominal",
+  "quantity",
+  "rate",
+  "score",
+  "size",
+  "total",
+  "value",
+  "weight",
+  "width",
+]);
 
 interface ProjectedTableCellSeed {
   readonly columnIndex: number;
   readonly text: string;
   readonly blocks: readonly PdfLayoutBlock[];
+  readonly runIds?: readonly string[];
 }
 
 interface ProjectedTableRowSeed {
   readonly cells: readonly ProjectedTableCellSeed[];
+}
+
+interface CompactRunRowSeed {
+  readonly run: PdfObservedTextRun;
+  readonly cells: readonly string[];
 }
 
 interface ProjectedTableCandidate {
@@ -455,6 +509,11 @@ function projectRowSequenceTable(
   runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
 ): ProjectedTableCandidate | undefined {
   const runs = observationPage.runs.filter((run) => normalizeCellText(run.text).length > 0);
+  const compactRunCandidate = projectCompactRunSequenceTable(layoutPage, runs, runToBlock);
+  if (compactRunCandidate) {
+    return compactRunCandidate;
+  }
+
   const headerGroup = findBestHeaderRunGroup(runs);
   if (!headerGroup) {
     return undefined;
@@ -476,6 +535,7 @@ function projectRowSequenceTable(
       columnIndex,
       text: normalizeCellText(run.text),
       blocks: toRunBlocks([run], runToBlock),
+      runIds: [run.id],
     })),
   };
   const bodyRowSeeds = bodyRows.map((rowRuns) => ({
@@ -483,6 +543,7 @@ function projectRowSequenceTable(
       columnIndex,
       text: normalizeCellText(run.text),
       blocks: toRunBlocks([run], runToBlock),
+      runIds: [run.id],
     })),
   }));
 
@@ -498,6 +559,102 @@ function projectRowSequenceTable(
     headers,
     blockIds: dedupeStrings(rows.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
     confidence: Number(Math.min(0.72, 0.44 + headers.length * 0.03 + bodyRows.length * 0.025).toFixed(2)),
+    rows,
+  };
+}
+
+function projectCompactRunSequenceTable(
+  layoutPage: PdfLayoutPage,
+  runs: readonly PdfObservedTextRun[],
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): ProjectedTableCandidate | undefined {
+  let bestCandidate: ProjectedTableCandidate | undefined;
+  let bestScore = -1;
+
+  for (let headerIndex = 0; headerIndex < runs.length - ROW_SEQUENCE_MIN_ROWS; headerIndex += 1) {
+    const candidate = buildCompactRunSequenceCandidate(layoutPage, runs, headerIndex, runToBlock);
+    if (!candidate) {
+      continue;
+    }
+
+    const bodyRowCount = candidate.rows.length - 1;
+    const score = candidate.headers.length * 10 + bodyRowCount;
+    if (score > bestScore) {
+      bestScore = score;
+      bestCandidate = candidate;
+    }
+  }
+
+  return bestCandidate;
+}
+
+function buildCompactRunSequenceCandidate(
+  layoutPage: PdfLayoutPage,
+  runs: readonly PdfObservedTextRun[],
+  headerIndex: number,
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): ProjectedTableCandidate | undefined {
+  const headerRun = runs[headerIndex];
+  if (!headerRun) {
+    return undefined;
+  }
+
+  const headerText = normalizeCellText(headerRun.text);
+  if (!looksLikeCompactRunHeaderText(headerText)) {
+    return undefined;
+  }
+
+  const compactRows: CompactRunRowSeed[] = [];
+  let columnCount: number | undefined;
+  for (let runIndex = headerIndex + 1; runIndex < runs.length; runIndex += 1) {
+    const run = runs[runIndex] as PdfObservedTextRun;
+    const rowCells = parseCompactRunRowCells(run.text);
+    if (!rowCells) {
+      break;
+    }
+
+    if (columnCount === undefined) {
+      columnCount = rowCells.length;
+    } else if (rowCells.length !== columnCount) {
+      break;
+    }
+
+    compactRows.push({ run, cells: rowCells });
+  }
+
+  if (columnCount === undefined || compactRows.length < ROW_SEQUENCE_MIN_ROWS) {
+    return undefined;
+  }
+
+  const headers = splitCompactRunHeaderText(headerText, columnCount, compactRows);
+  if (!headers || headers.length < ROW_SEQUENCE_MIN_HEADERS || !compactRowsLookTabular(headers, compactRows)) {
+    return undefined;
+  }
+
+  const headerRow: ProjectedTableRowSeed = {
+    cells: headers.map((text, columnIndex) => ({
+      columnIndex,
+      text,
+      blocks: toRunBlocks([headerRun], runToBlock),
+      runIds: [headerRun.id],
+    })),
+  };
+  const bodyRows = compactRows.map((row) => ({
+    cells: row.cells.map((text, columnIndex) => ({
+      columnIndex,
+      text,
+      blocks: toRunBlocks([row.run], runToBlock),
+      runIds: [row.run.id],
+    })),
+  }));
+  const rows = [headerRow, ...bodyRows];
+
+  return {
+    pageNumber: layoutPage.pageNumber,
+    heuristic: "row-sequence",
+    headers,
+    blockIds: dedupeStrings(rows.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
+    confidence: Number(Math.min(0.7, 0.46 + headers.length * 0.025 + compactRows.length * 0.025).toFixed(2)),
     rows,
   };
 }
@@ -1520,7 +1677,7 @@ function finalizeProjectedTable(tableIndex: number, candidate: ProjectedTableCan
         rowIndex,
         columnIndex: cell.columnIndex,
         text: cell.text,
-        citations: createTableCellCitations(tableIndex, rowIndex, cell.columnIndex, cell.blocks),
+        citations: createTableCellCitations(tableIndex, rowIndex, cell.columnIndex, cell.blocks, cell.runIds),
       });
     }
   }
@@ -1557,12 +1714,17 @@ function createTableCellCitations(
   rowIndex: number,
   columnIndex: number,
   blocks: readonly PdfLayoutBlock[],
+  runIds?: readonly string[],
 ): readonly PdfKnowledgeCitation[] {
+  const runIdSet = runIds === undefined ? undefined : new Set(runIds);
   return blocks.map((block, citationIndex) => ({
     id: `table-${tableIndex}-r${rowIndex}-c${columnIndex + 1}-${citationIndex + 1}`,
     pageNumber: block.pageNumber,
     blockId: block.id,
-    runIds: block.runIds,
+    runIds:
+      runIdSet === undefined
+        ? block.runIds
+        : block.runIds.filter((runId) => runIdSet.has(runId)),
     text: block.text,
     ...(block.pageRef !== undefined ? { pageRef: block.pageRef } : {}),
   }));
@@ -1705,6 +1867,232 @@ function isSequenceDataRunText(text: string): boolean {
   }
 
   return !/[/:]/u.test(normalized) && !/\.(?:json|pdf)$/iu.test(normalized);
+}
+
+function looksLikeCompactRunHeaderText(text: string): boolean {
+  const normalized = normalizeCellText(text);
+  if (normalized.length === 0 || normalized.length > 120 || /[.:]/u.test(normalized)) {
+    return false;
+  }
+
+  const tokens = splitCompactRunTokens(normalized);
+  if (
+    tokens.length < ROW_SEQUENCE_MIN_HEADERS ||
+    tokens.length > COMPACT_ROW_SEQUENCE_MAX_HEADER_TOKENS ||
+    tokens.some((token) => looksLikeNumericCell(token))
+  ) {
+    return false;
+  }
+
+  return tokens.some((token) => startsWithUppercaseLetter(token));
+}
+
+function parseCompactRunRowCells(text: string): readonly string[] | undefined {
+  const tokens = splitCompactRunTokens(text);
+  if (
+    tokens.length < ROW_SEQUENCE_MIN_HEADERS ||
+    tokens.length > COMPACT_ROW_SEQUENCE_MAX_ROW_TOKENS
+  ) {
+    return undefined;
+  }
+
+  const cells: string[] = [];
+  let tokenIndex = 0;
+  let numericCellCount = 0;
+  while (tokenIndex < tokens.length) {
+    const token = tokens[tokenIndex] as string;
+    if (looksLikeCompactNumberToken(token)) {
+      const nextToken = tokens[tokenIndex + 1];
+      const cellTokens =
+        nextToken !== undefined && looksLikeCompactUnitToken(nextToken)
+          ? [token, nextToken]
+          : [token];
+      cells.push(cellTokens.join(" "));
+      numericCellCount += 1;
+      tokenIndex += cellTokens.length;
+      continue;
+    }
+
+    const cellTokens: string[] = [];
+    while (tokenIndex < tokens.length) {
+      const currentToken = tokens[tokenIndex] as string;
+      if (looksLikeCompactNumberToken(currentToken)) {
+        break;
+      }
+      cellTokens.push(currentToken);
+      tokenIndex += 1;
+    }
+
+    const cellText = normalizeCellText(cellTokens.join(" "));
+    if (cellText.length > 0) {
+      cells.push(cellText);
+    }
+  }
+
+  if (
+    numericCellCount === 0 ||
+    cells.length < ROW_SEQUENCE_MIN_HEADERS ||
+    cells.length > COMPACT_ROW_SEQUENCE_MAX_COLUMNS
+  ) {
+    return undefined;
+  }
+
+  return cells;
+}
+
+function splitCompactRunHeaderText(
+  headerText: string,
+  columnCount: number,
+  bodyRows: readonly CompactRunRowSeed[],
+): readonly string[] | undefined {
+  const tokens = splitCompactRunTokens(headerText);
+  if (tokens.length < columnCount || tokens.length > COMPACT_ROW_SEQUENCE_MAX_HEADER_TOKENS) {
+    return undefined;
+  }
+
+  const columnHasNumericEvidence = Array.from({ length: columnCount }, (_, columnIndex) =>
+    bodyRows.some((row) => compactCellContainsNumber(row.cells[columnIndex] ?? ""))
+  );
+  let bestHeaders: readonly string[] | undefined;
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  for (const partition of enumerateCompactHeaderTokenPartitions(tokens, columnCount)) {
+    const headers = partition.map((cellTokens) => normalizeCellText(cellTokens.join(" ")));
+    if (!headers.every(looksLikeCompactHeaderCell)) {
+      continue;
+    }
+
+    const score = scoreCompactHeaderPartition(headers, columnHasNumericEvidence);
+    if (score > bestScore) {
+      bestScore = score;
+      bestHeaders = headers;
+    }
+  }
+
+  return bestHeaders;
+}
+
+function enumerateCompactHeaderTokenPartitions(
+  tokens: readonly string[],
+  columnCount: number,
+): readonly (readonly (readonly string[])[])[] {
+  const partitions: (readonly string[])[][] = [];
+
+  function visit(startIndex: number, remainingColumns: number, current: (readonly string[])[]): void {
+    if (remainingColumns === 0) {
+      if (startIndex === tokens.length) {
+        partitions.push([...current]);
+      }
+      return;
+    }
+
+    const maxEndIndex = tokens.length - remainingColumns + 1;
+    for (let endIndex = startIndex + 1; endIndex <= maxEndIndex; endIndex += 1) {
+      current.push(tokens.slice(startIndex, endIndex));
+      visit(endIndex, remainingColumns - 1, current);
+      current.pop();
+    }
+  }
+
+  visit(0, columnCount, []);
+  return partitions;
+}
+
+function scoreCompactHeaderPartition(
+  headers: readonly string[],
+  columnHasNumericEvidence: readonly boolean[],
+): number {
+  let score = 0;
+
+  for (const [columnIndex, header] of headers.entries()) {
+    const words = splitCompactRunTokens(header);
+    const wordCount = words.length;
+    const lastWord = normalizeCompactToken(words.at(-1) ?? "");
+    if (header.length <= 32) {
+      score += 2;
+    } else {
+      score -= 8;
+    }
+
+    if (wordCount === 1) {
+      score += columnIndex === 0 || columnIndex === headers.length - 1 ? 2 : 0;
+    } else if (wordCount === 2) {
+      score += 3;
+    } else {
+      score -= (wordCount - 2) * 2;
+    }
+
+    if (columnHasNumericEvidence[columnIndex]) {
+      if (wordCount >= 2) {
+        score += 4;
+      }
+      if (COMPACT_MEASUREMENT_HEADER_SUFFIXES.has(lastWord)) {
+        score += 3;
+      }
+    }
+  }
+
+  for (let columnIndex = 1; columnIndex < headers.length; columnIndex += 1) {
+    const previousLastWord = normalizeCompactToken(splitCompactRunTokens(headers[columnIndex - 1] ?? "").at(-1) ?? "");
+    const currentLastWord = normalizeCompactToken(splitCompactRunTokens(headers[columnIndex] ?? "").at(-1) ?? "");
+    if (
+      previousLastWord.length > 0 &&
+      previousLastWord === currentLastWord &&
+      columnHasNumericEvidence[columnIndex - 1] &&
+      columnHasNumericEvidence[columnIndex]
+    ) {
+      score += 4;
+    }
+  }
+
+  return score;
+}
+
+function looksLikeCompactHeaderCell(text: string): boolean {
+  const normalized = normalizeCellText(text);
+  if (normalized.length === 0 || normalized.length > 48 || looksLikeNumericCell(normalized)) {
+    return false;
+  }
+
+  return !/[/:]/u.test(normalized);
+}
+
+function compactRowsLookTabular(
+  headers: readonly string[],
+  bodyRows: readonly CompactRunRowSeed[],
+): boolean {
+  if (bodyRows.length < ROW_SEQUENCE_MIN_ROWS || bodyRows.some((row) => row.cells.length !== headers.length)) {
+    return false;
+  }
+
+  const numericColumnIndexes = headers
+    .map((_, columnIndex) => columnIndex)
+    .filter((columnIndex) => bodyRows.some((row) => compactCellContainsNumber(row.cells[columnIndex] ?? "")));
+  if (numericColumnIndexes.length === 0) {
+    return false;
+  }
+
+  return bodyRows.every((row) => row.cells.some((cell) => compactCellContainsNumber(cell)));
+}
+
+function compactCellContainsNumber(text: string): boolean {
+  return /\d/u.test(text);
+}
+
+function splitCompactRunTokens(text: string): readonly string[] {
+  return normalizeCellText(text).split(/\s+/u).filter((token) => token.length > 0);
+}
+
+function looksLikeCompactNumberToken(token: string): boolean {
+  return /^[+-]?(?:\d+(?:[.,]\d+)?|[.,]\d+)%?$/u.test(token);
+}
+
+function looksLikeCompactUnitToken(token: string): boolean {
+  return COMPACT_MEASUREMENT_UNITS.has(normalizeCompactToken(token));
+}
+
+function normalizeCompactToken(token: string): string {
+  return token.replaceAll(/^[^\p{L}\p{N}%]+|[^\p{L}\p{N}%]+$/gu, "").toLowerCase();
 }
 
 function looksLikeNumericCell(text: string): boolean {
