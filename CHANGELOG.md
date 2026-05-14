@@ -22,5 +22,6 @@ All notable changes are documented in this file.
 - Breaking render contract update: rendered pages now expose `pageBox` and `imagery`, with deterministic SVG page imagery, deterministic PNG raster output, and truthful `render-imagery-partial` limits when available payloads or supported semantics are not enough for complete page imagery.
 - Render hashing now canonicalizes byte payloads through deterministic byte digests so large imagery-bearing pages remain hashable under the validation proof sets.
 - The browser viewer now prefers render imagery in page mode, uses render selection geometry for page-mode search highlights, surfaces render-text hits in search results, and falls back explicitly per page when render imagery is unavailable.
+- Layout blocks now expose optional bounding boxes and inference records, and the layout stage now uses anchored column evidence, paragraph-flow continuity, and repeated-boundary separation before emitting flattened layout text.
 - Knowledge table projection now recovers compact row-run measurement tables with citation-backed cells when header and body rows are consistent.
 - Knowledge table projection now rejects compact row-run candidates whose numeric evidence is only incidental prose.

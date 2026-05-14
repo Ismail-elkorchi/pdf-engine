@@ -1,7 +1,10 @@
 import type {
+  PdfBoundingBox,
   PdfKnownLimitCode,
   PdfLayoutBlock,
   PdfLayoutDocument,
+  PdfLayoutInferenceRecord,
+  PdfLayoutRole,
   PdfLayoutPage,
   PdfObjectRef,
   PdfPoint,
@@ -28,7 +31,9 @@ interface GroupedBlockSeed {
   readonly resolutionMethod: PdfObservedPage["resolutionMethod"];
   readonly pageRef?: PdfObjectRef;
   readonly anchor?: PdfPoint;
+  readonly bbox?: PdfBoundingBox;
   readonly fontSize?: number;
+  readonly inferences?: readonly PdfLayoutInferenceRecord[];
   readonly hasGeneratorPathTrace?: boolean;
 }
 
@@ -86,6 +91,24 @@ function toPublicLayoutBlock(block: GroupedLayoutBlock): PdfLayoutBlock {
   return publicBlock;
 }
 
+function mergeRunBoundingBoxes(runs: readonly PdfObservedTextRun[]): PdfBoundingBox | undefined {
+  const boxes = runs.map((run) => run.bbox).filter((bbox): bbox is PdfBoundingBox => bbox !== undefined);
+  if (boxes.length === 0) {
+    return undefined;
+  }
+
+  const left = Math.min(...boxes.map((bbox) => bbox.x));
+  const top = Math.min(...boxes.map((bbox) => bbox.y));
+  const right = Math.max(...boxes.map((bbox) => bbox.x + bbox.width));
+  const bottom = Math.max(...boxes.map((bbox) => bbox.y + bbox.height));
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
 function groupPageIntoBlocks(page: PdfObservedPage): GroupedLayoutPage {
   const pageWritingMode = resolvePageWritingMode(page);
   const hasGeneratorPathTrace = page.runs.some((run) => looksLikeGeneratorPathTraceText(normalizeBlockText(run.text)));
@@ -99,6 +122,7 @@ function groupPageIntoBlocks(page: PdfObservedPage): GroupedLayoutPage {
 
     const firstRun = currentRuns[0] as PdfObservedTextRun;
     const blockIndex = lineBlocks.length + 1;
+    const bbox = mergeRunBoundingBoxes(currentRuns);
     lineBlocks.push({
       id: `block-${page.pageNumber}-${blockIndex}`,
       pageNumber: page.pageNumber,
@@ -111,6 +135,7 @@ function groupPageIntoBlocks(page: PdfObservedPage): GroupedLayoutPage {
       resolutionMethod: page.resolutionMethod,
       ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
       ...(firstRun.anchor !== undefined ? { anchor: firstRun.anchor } : {}),
+      ...(bbox !== undefined ? { bbox } : {}),
       ...(firstRun.fontSize !== undefined ? { fontSize: firstRun.fontSize } : {}),
       ...(hasGeneratorPathTrace ? { hasGeneratorPathTrace: true } : {}),
     });
@@ -198,8 +223,25 @@ function continuesRunOnSameLine(
   const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
   const baselineGap = Math.abs(previousRun.anchor.y - currentRun.anchor.y);
   const forwardAdvance = currentRun.anchor.x - previousRun.anchor.x;
+  if (hasLargeInlineGap(previousRun.anchor, currentRun.anchor, previousRun.bbox, fontSize)) {
+    return false;
+  }
 
   return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(3, fontSize * 0.35);
+}
+
+function hasLargeInlineGap(
+  previousAnchor: PdfPoint,
+  currentAnchor: PdfPoint,
+  previousBox: PdfBoundingBox | undefined,
+  fontSize: number,
+): boolean {
+  if (!previousBox) {
+    return false;
+  }
+
+  const inlineGap = currentAnchor.x - (previousBox.x + previousBox.width);
+  return inlineGap > Math.max(48, fontSize * 4);
 }
 
 function mergeAdjacentBlocks(
@@ -281,9 +323,26 @@ function orderPageBlocks(
 }
 
 function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
+  const columnOrderedBlocks = orderHorizontalColumnsWhenSupported(blocks);
+  if (columnOrderedBlocks) {
+    return assignReadingOrderInference(
+      columnOrderedBlocks,
+      "geometry-column-order",
+      0.72,
+      "Anchored text formed separated column groups with overlapping vertical ranges.",
+      "inferred",
+    );
+  }
+
   const firstReadableBlock = blocks.find((block) => block.anchor !== undefined && !looksLikeProductionMetadata(block.text));
   if (!firstReadableBlock?.anchor) {
-    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
+    return assignReadingOrderInference(
+      blocks,
+      "observed-content-order",
+      0.28,
+      "No stable text anchors were available, so observed content order was preserved.",
+      "abstained",
+    );
   }
 
   const promotionThreshold = Math.max(24, (firstReadableBlock.fontSize ?? 12) * 2.2);
@@ -295,7 +354,13 @@ function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly Gr
     (looksLikeHeading(block.text, block.fontSize) || looksLikeSectionHeading(block.text))
   );
   if (promotedBlocks.length === 0) {
-    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
+    return assignReadingOrderInference(
+      blocks,
+      "geometry-line-order",
+      0.55,
+      "Anchored text did not form separated column groups; observed line order was preserved.",
+      "inferred",
+    );
   }
 
   const promotedBlockIds = new Set(promotedBlocks.map((block) => block.id));
@@ -304,10 +369,159 @@ function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly Gr
     ...blocks.filter((block) => !promotedBlockIds.has(block.id)),
   ];
 
-  return orderedBlocks.map((block, blockIndex) => ({
-    ...block,
-    readingOrder: blockIndex,
-  }));
+  return assignReadingOrderInference(
+    orderedBlocks,
+    "geometry-line-order",
+    0.62,
+    "A later anchored heading was promoted ahead of body text using page-space anchors.",
+    "inferred",
+  );
+}
+
+function orderHorizontalColumnsWhenSupported(
+  blocks: readonly GroupedBlockSeed[],
+): readonly GroupedBlockSeed[] | undefined {
+  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined && !looksLikeProductionMetadata(block.text));
+  if (anchoredBlocks.length < 4) {
+    return undefined;
+  }
+
+  const fontSizes = anchoredBlocks.map((block) => block.fontSize ?? 12).sort((left, right) => left - right);
+  const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] ?? 12;
+  const columnThreshold = Math.max(64, medianFontSize * 5.5);
+  const xGapThreshold = Math.max(120, medianFontSize * 8);
+  const clusters: GroupedBlockSeed[][] = [];
+
+  for (const block of [...anchoredBlocks].sort(compareBlockAnchorX)) {
+    const anchor = block.anchor as PdfPoint;
+    const nearestCluster = clusters.find((cluster) => {
+      const centerX = averageAnchorX(cluster);
+      return Math.abs(centerX - anchor.x) <= columnThreshold;
+    });
+    if (nearestCluster) {
+      nearestCluster.push(block);
+      continue;
+    }
+    clusters.push([block]);
+  }
+
+  const columnClusters = clusters
+    .filter((cluster) => cluster.length >= 2)
+    .sort((left, right) => averageAnchorX(left) - averageAnchorX(right));
+  if (columnClusters.length < 2) {
+    return undefined;
+  }
+
+  for (let clusterIndex = 1; clusterIndex < columnClusters.length; clusterIndex += 1) {
+    const previousCluster = columnClusters[clusterIndex - 1] as readonly GroupedBlockSeed[];
+    const currentCluster = columnClusters[clusterIndex] as readonly GroupedBlockSeed[];
+    if (averageAnchorX(currentCluster) - averageAnchorX(previousCluster) < xGapThreshold) {
+      return undefined;
+    }
+  }
+
+  if (!columnClustersHaveVerticalOverlap(columnClusters, medianFontSize)) {
+    return undefined;
+  }
+
+  const columnBlockIds = new Set(columnClusters.flat().map((block) => block.id));
+  const bodyAnchors = columnClusters.flat().map((block) => block.anchor as PdfPoint);
+  const maxColumnY = Math.max(...bodyAnchors.map((anchor) => anchor.y));
+  const minColumnY = Math.min(...bodyAnchors.map((anchor) => anchor.y));
+  const boundaryBand = Math.max(18, medianFontSize * 1.5);
+  const prefixBlocks: GroupedBlockSeed[] = [];
+  const suffixBlocks: GroupedBlockSeed[] = [];
+  const ambiguousBlocks: GroupedBlockSeed[] = [];
+
+  for (const block of blocks) {
+    if (columnBlockIds.has(block.id)) {
+      continue;
+    }
+
+    if (!block.anchor) {
+      suffixBlocks.push(block);
+      continue;
+    }
+
+    if (block.anchor.y > maxColumnY + boundaryBand) {
+      prefixBlocks.push(block);
+      continue;
+    }
+
+    if (block.anchor.y < minColumnY - boundaryBand) {
+      suffixBlocks.push(block);
+      continue;
+    }
+
+    ambiguousBlocks.push(block);
+  }
+
+  if (ambiguousBlocks.length > 0) {
+    return undefined;
+  }
+
+  return [
+    ...prefixBlocks.sort(compareHorizontalBlocks),
+    ...columnClusters.flatMap((cluster) => [...cluster].sort(compareHorizontalBlocks)),
+    ...suffixBlocks.sort(compareHorizontalBlocks),
+  ];
+}
+
+function compareBlockAnchorX(left: GroupedBlockSeed, right: GroupedBlockSeed): number {
+  const leftAnchor = left.anchor as PdfPoint;
+  const rightAnchor = right.anchor as PdfPoint;
+  return leftAnchor.x - rightAnchor.x;
+}
+
+function averageAnchorX(blocks: readonly GroupedBlockSeed[]): number {
+  return blocks.reduce((sum, block) => sum + (block.anchor?.x ?? 0), 0) / blocks.length;
+}
+
+function columnClustersHaveVerticalOverlap(
+  clusters: readonly (readonly GroupedBlockSeed[])[],
+  medianFontSize: number,
+): boolean {
+  const ranges = clusters.map((cluster) => {
+    const yValues = cluster.map((block) => (block.anchor as PdfPoint).y);
+    return {
+      min: Math.min(...yValues),
+      max: Math.max(...yValues),
+    };
+  });
+  const sharedMin = Math.max(...ranges.map((range) => range.min));
+  const sharedMax = Math.min(...ranges.map((range) => range.max));
+  return sharedMax - sharedMin >= Math.max(8, medianFontSize * 0.5);
+}
+
+function assignReadingOrderInference(
+  blocks: readonly GroupedBlockSeed[],
+  method: string,
+  confidence: number,
+  reason: string,
+  status: PdfLayoutInferenceRecord["status"],
+): readonly GroupedBlockSeed[] {
+  return blocks.map((block, blockIndex) => {
+    const blockStatus = block.anchor ? status : "abstained";
+    const blockReason = block.anchor
+      ? reason
+      : "No recovered text anchor was available for this block; observed content order was preserved.";
+    return {
+      ...block,
+      readingOrder: blockIndex,
+      inferences: [
+        ...(block.inferences ?? []),
+        {
+          kind: "reading-order",
+          status: blockStatus,
+          method: block.anchor ? method : "observed-content-order",
+          confidence: block.anchor ? confidence : 0.25,
+          reason: blockReason,
+          evidenceRunIds: block.runIds,
+          evidenceBlockIds: [block.id],
+        },
+      ],
+    };
+  });
 }
 
 function compareHorizontalBlocks(left: GroupedBlockSeed, right: GroupedBlockSeed): number {
@@ -595,10 +809,45 @@ function annotateParagraphStarts(
   blocks: readonly GroupedBlockSeed[],
   writingMode: PdfWritingMode | undefined,
 ): readonly GroupedBlockSeed[] {
-  return blocks.map((block, blockIndex) => ({
-    ...block,
-    startsParagraph: blockIndex === 0 || shouldStartParagraph(blocks, blockIndex, writingMode),
-  }));
+  return blocks.map((block, blockIndex) => {
+    const startsParagraph = blockIndex === 0 || shouldStartParagraph(blocks, blockIndex, writingMode);
+    const previousBlock = blocks[blockIndex - 1];
+    const geometryAvailable = block.anchor !== undefined && (blockIndex === 0 || previousBlock?.anchor !== undefined);
+    return {
+      ...block,
+      startsParagraph,
+      inferences: [
+        ...(block.inferences ?? []),
+        {
+          kind: "paragraph-flow",
+          status: geometryAvailable ? "inferred" : "abstained",
+          method: geometryAvailable ? "paragraph-geometry" : "observed-content-order",
+          confidence: geometryAvailable ? (startsParagraph ? 0.6 : 0.66) : 0.28,
+          reason: paragraphInferenceReason(startsParagraph, geometryAvailable, blockIndex),
+          evidenceRunIds: block.runIds,
+          evidenceBlockIds: previousBlock ? [previousBlock.id, block.id] : [block.id],
+        },
+      ],
+    };
+  });
+}
+
+function paragraphInferenceReason(
+  startsParagraph: boolean,
+  geometryAvailable: boolean,
+  blockIndex: number,
+): string {
+  if (!geometryAvailable) {
+    return "Paragraph flow could not rely on anchors for this boundary, so the observed content order was preserved.";
+  }
+
+  if (blockIndex === 0) {
+    return "First block on the page starts a paragraph by construction.";
+  }
+
+  return startsParagraph
+    ? "Text geometry and boundary cues indicate a new paragraph."
+    : "Text geometry and continuation cues keep this block in the previous paragraph.";
 }
 
 function shouldMergeAdjacentBlocks(
@@ -1090,6 +1339,32 @@ function boundaryKey(text: string): string | undefined {
   return normalized;
 }
 
+function withStructuralRoleInference(
+  block: PdfLayoutBlock,
+  role: PdfLayoutRole,
+  confidence: number,
+  method: string,
+  reason: string,
+): PdfLayoutBlock {
+  return {
+    ...block,
+    role,
+    roleConfidence: confidence,
+    inferences: [
+      ...(block.inferences ?? []),
+      {
+        kind: "structural-role",
+        status: "inferred",
+        method,
+        confidence,
+        reason,
+        evidenceRunIds: block.runIds,
+        evidenceBlockIds: [block.id],
+      },
+    ],
+  };
+}
+
 function classifyLayoutBlock(
   block: PdfLayoutBlock,
   blockIndex: number,
@@ -1099,42 +1374,52 @@ function classifyLayoutBlock(
   const key = boundaryKey(block.text);
   if (key && repeatedBoundarySets.headers.has(key) && blockIndex === 0) {
     if (shouldTreatRepeatedBoundaryAsBody(block, blockIndex, blocks)) {
-      return {
-        ...block,
-        role: "body",
-        roleConfidence: 0.62,
-      };
+      return withStructuralRoleInference(
+        block,
+        "body",
+        0.62,
+        "repeated-boundary-body",
+        "Repeated text aligned with body-like evidence, so it was not treated as a header.",
+      );
     }
 
     if (shouldTreatRepeatedHeaderAsHeading(block, blockIndex, blocks)) {
-      return {
-        ...block,
-        role: "heading",
-        roleConfidence: 0.66,
-      };
+      return withStructuralRoleInference(
+        block,
+        "heading",
+        0.66,
+        "repeated-boundary-heading",
+        "Repeated top text also matched heading evidence, so it was kept as a heading.",
+      );
     }
 
-    return {
-      ...block,
-      role: "header",
-      roleConfidence: 0.7,
-    };
+    return withStructuralRoleInference(
+      block,
+      "header",
+      0.7,
+      "repeated-boundary",
+      "The same short top-of-page text recurred across pages.",
+    );
   }
 
   if (key && repeatedBoundarySets.footers.has(key) && blockIndex === blocks.length - 1) {
     if (shouldTreatRepeatedBoundaryAsBody(block, blockIndex, blocks)) {
-      return {
-        ...block,
-        role: "body",
-        roleConfidence: 0.62,
-      };
+      return withStructuralRoleInference(
+        block,
+        "body",
+        0.62,
+        "repeated-boundary-body",
+        "Repeated text aligned with body-like evidence, so it was not treated as a footer.",
+      );
     }
 
-    return {
-      ...block,
-      role: "footer",
-      roleConfidence: 0.7,
-    };
+    return withStructuralRoleInference(
+      block,
+      "footer",
+      0.7,
+      "repeated-boundary",
+      "The same short bottom-of-page text recurred across pages.",
+    );
   }
 
   if (looksLikeLeadingMetadataLabel(block, blockIndex, blocks)) {
@@ -2229,6 +2514,9 @@ function isSameLineBlockContinuation(
   const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
   const baselineGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
   const forwardAdvance = currentBlock.anchor.x - previousBlock.anchor.x;
+  if (hasLargeInlineGap(previousBlock.anchor, currentBlock.anchor, previousBlock.bbox, fontSize)) {
+    return false;
+  }
 
   return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(6, fontSize * 0.55);
 }
@@ -2332,14 +2620,20 @@ function serializeObservationBlocks(blocks: readonly GroupedLayoutBlock[]): stri
 
 function serializeLayoutBlocks(blocks: readonly PdfLayoutBlock[]): string {
   let text = "";
+  let emittedBlockCount = 0;
 
-  for (const [blockIndex, block] of blocks.entries()) {
+  for (const block of blocks) {
+    if (block.role === "header" || block.role === "footer") {
+      continue;
+    }
+
     const normalizedBlockText = normalizeBlockText(block.text);
     if (normalizedBlockText.length === 0) {
       continue;
     }
-    const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
+    const separator = emittedBlockCount === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
     text += `${separator}${normalizedBlockText}`;
+    emittedBlockCount += 1;
   }
 
   return text;
