@@ -1233,6 +1233,36 @@ export interface PdfObservedDocument {
 export type PdfLayoutRole = "body" | "heading" | "list" | "header" | "footer" | "unknown";
 
 /**
+ * Layout inference made by the current geometry-aware heuristics.
+ */
+export type PdfLayoutInferenceKind = "reading-order" | "paragraph-flow" | "structural-role";
+
+/**
+ * Whether a layout inference was made or deliberately withheld.
+ */
+export type PdfLayoutInferenceStatus = "inferred" | "abstained";
+
+/**
+ * One explainable layout inference attached to a public layout block.
+ */
+export interface PdfLayoutInferenceRecord {
+  /** Inference family this record explains. */
+  readonly kind: PdfLayoutInferenceKind;
+  /** Whether the implementation made the inference or abstained. */
+  readonly status: PdfLayoutInferenceStatus;
+  /** Stable heuristic method identifier. */
+  readonly method: string;
+  /** Confidence assigned to the inference, when made. */
+  readonly confidence: number;
+  /** Short explanation of the evidence and any uncertainty. */
+  readonly reason: string;
+  /** Observation run identifiers used as evidence for this inference. */
+  readonly evidenceRunIds: readonly string[];
+  /** Related layout block identifiers used as context for this inference. */
+  readonly evidenceBlockIds?: readonly string[];
+}
+
+/**
  * First-layout strategy used by the current implementation.
  */
 export type PdfLayoutStrategy = "line-blocks";
@@ -1267,8 +1297,12 @@ export interface PdfLayoutBlock {
   readonly pageRef?: PdfObjectRef;
   /** Approximate block anchor when the current implementation can recover one. */
   readonly anchor?: PdfPoint;
+  /** Approximate block bounding box when the current implementation can recover one. */
+  readonly bbox?: PdfBoundingBox;
   /** Dominant font size for the first run in this block when the current implementation can recover it. */
   readonly fontSize?: number;
+  /** Explainable inference records for ordering, paragraph flow, and structural role heuristics. */
+  readonly inferences?: readonly PdfLayoutInferenceRecord[];
 }
 
 /**
