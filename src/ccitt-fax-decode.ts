@@ -267,6 +267,9 @@ export function decodeCcittFaxBytes(
   while (true) {
     const decodedByte = decoder.readNextByte();
     if (decodedByte < 0) {
+      if (decoder.didEncounterError()) {
+        throw new Error("Malformed CCITT fax stream.");
+      }
       return Uint8Array.from(decodedBytes);
     }
 
@@ -296,6 +299,7 @@ class PdfCcittFaxDecoder {
   private outputBits = 0;
   private codingPosition = 0;
   private hasError = false;
+  private encounteredError = false;
 
   constructor(rawBytes: Uint8Array, options: PdfCcittFaxDecodeOptions) {
     this.rawBytes = rawBytes;
@@ -345,6 +349,9 @@ class PdfCcittFaxDecoder {
         this.decodeTwoDimensionalLine();
       } else {
         this.decodeOneDimensionalLine();
+      }
+      if (this.hasError) {
+        this.encounteredError = true;
       }
 
       this.finishDecodedLine();
@@ -399,6 +406,10 @@ class PdfCcittFaxDecoder {
     }
 
     return decodedByte;
+  }
+
+  didEncounterError(): boolean {
+    return this.encounteredError;
   }
 
   private decodeTwoDimensionalLine(): void {
