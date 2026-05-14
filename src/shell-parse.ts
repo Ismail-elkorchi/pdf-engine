@@ -629,6 +629,7 @@ function expandObjectStreams(indirectObjects: readonly ParsedIndirectObject[]): 
   indirectObjects: readonly ParsedIndirectObject[];
   expanded: boolean;
 } {
+  const existingObjectKeys = new Set(indirectObjects.map((objectShell) => keyOfObjectRef(objectShell.ref)));
   const expandedMembers: ParsedIndirectObject[] = [];
 
   for (const objectStream of indirectObjects) {
@@ -636,7 +637,14 @@ function expandObjectStreams(indirectObjects: readonly ParsedIndirectObject[]): 
       continue;
     }
 
-    expandedMembers.push(...expandObjectStreamMembers(objectStream));
+    for (const member of expandObjectStreamMembers(objectStream)) {
+      const memberKey = keyOfObjectRef(member.ref);
+      if (existingObjectKeys.has(memberKey)) {
+        continue;
+      }
+      existingObjectKeys.add(memberKey);
+      expandedMembers.push(member);
+    }
   }
 
   if (expandedMembers.length === 0) {
