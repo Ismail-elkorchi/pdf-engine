@@ -1,5 +1,6 @@
 import js from "@eslint/js";
-import importPlugin from "eslint-plugin-import";
+import { createTypeScriptImportResolver } from "eslint-import-resolver-typescript";
+import { importX } from "eslint-plugin-import-x";
 import regexpPlugin from "eslint-plugin-regexp";
 import tseslint from "typescript-eslint";
 
@@ -82,16 +83,16 @@ export default [
       },
     },
     plugins: {
-      import: importPlugin,
+      "import-x": importX,
       regexp: regexpPlugin,
     },
     settings: {
-      "import/resolver": {
-        typescript: {
+      "import-x/resolver-next": [
+        createTypeScriptImportResolver({
           alwaysTryTypes: false,
           project: "./tsconfig.eslint.json",
-        },
-      },
+        }),
+      ],
     },
     rules: {
       "@typescript-eslint/await-thenable": "error",
@@ -104,16 +105,16 @@ export default [
       "@typescript-eslint/no-misused-promises": "error",
       "@typescript-eslint/no-unnecessary-type-assertion": "error",
       "@typescript-eslint/switch-exhaustiveness-check": "error",
-      "import/no-duplicates": "error",
-      "import/no-unresolved": "error",
-      "import/order": importOrderRule,
+      "import-x/no-duplicates": "error",
+      "import-x/no-unresolved": "error",
+      "import-x/order": importOrderRule,
       ...regexpSafetyRules,
     },
   },
   {
     files: ["src/**/*.ts", "jsr/**/*.ts"],
     rules: {
-      "import/no-nodejs-modules": "error",
+      "import-x/no-nodejs-modules": "error",
       "no-restricted-imports": [
         "error",
         {
@@ -125,12 +126,12 @@ export default [
   {
     files: scriptFiles,
     plugins: {
-      import: importPlugin,
+      "import-x": importX,
       regexp: regexpPlugin,
     },
     rules: {
-      "import/no-duplicates": "error",
-      "import/order": importOrderRule,
+      "import-x/no-duplicates": "error",
+      "import-x/order": importOrderRule,
       "no-restricted-imports": [
         "error",
         {
