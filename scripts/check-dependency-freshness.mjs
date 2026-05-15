@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 
-let commandOutput = "";
+let commandOutput;
 
 try {
   commandOutput = execFileSync("npm", ["outdated", "--json"], {
@@ -16,7 +16,7 @@ try {
   }
 }
 
-const parsed = commandOutput.trim() === "" ? {} : JSON.parse(commandOutput);
+const parsed = commandOutput?.trim() === "" ? {} : JSON.parse(commandOutput);
 const staleEntries = [];
 const peerCappedEntries = [];
 

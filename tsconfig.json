@@ -15,6 +15,7 @@
     "exactOptionalPropertyTypes": true,
     "useUnknownInCatchVariables": true,
     "isolatedDeclarations": true,
+    "ignoreDeprecations": "6.0",
     "resolveJsonModule": true,
     "esModuleInterop": false,
     "forceConsistentCasingInFileNames": true,
