@@ -259,6 +259,72 @@ test("unused resource ordering does not change render resource payloads or rende
   assert.equal(baseResult.render.value?.renderHash.hex, reorderedResult.render.value?.renderHash.hex);
 });
 
+test("adding unrelated prose does not change the interpreted table-region evidence", async () => {
+  const engine = createPdfEngine();
+  const baseBytes = buildPdfWithPageContents([buildMeasurementTableContent()]);
+  const withProseBytes = buildPdfWithPageContents([
+    buildMeasurementTableContent([
+      "1 0 0 1 72 600 Tm",
+      "(This paragraph mentions an amount and remarks but is not part of the table.) Tj",
+    ]),
+  ]);
+
+  const baseResult = await engine.run({
+    source: {
+      bytes: baseBytes,
+      fileName: "layout-region-table-base.pdf",
+    },
+  });
+  const withProseResult = await engine.run({
+    source: {
+      bytes: withProseBytes,
+      fileName: "layout-region-table-with-prose.pdf",
+    },
+  });
+
+  const baseRegionText = tableRegionText(baseResult.layout.value?.pages[0]);
+  const withProseRegionText = tableRegionText(withProseResult.layout.value?.pages[0]);
+  for (const marker of ["Specimen", "Nominal Width", "Measured Width", "Result", "Alpha", "Beta"]) {
+    assert.match(baseRegionText, new RegExp(marker, "u"));
+    assert.match(withProseRegionText, new RegExp(marker, "u"));
+  }
+  assert.doesNotMatch(baseRegionText, /not part of the table/u);
+  assert.doesNotMatch(withProseRegionText, /not part of the table/u);
+});
+
+function buildMeasurementTableContent(extraLines: readonly string[] = []): string {
+  return [
+    "BT",
+    "/F1 12 Tf",
+    "1 0 0 1 72 700 Tm",
+    "(Specimen) Tj",
+    "1 0 0 1 180 700 Tm",
+    "(Nominal Width) Tj",
+    "1 0 0 1 310 700 Tm",
+    "(Measured Width) Tj",
+    "1 0 0 1 450 700 Tm",
+    "(Result) Tj",
+    "1 0 0 1 72 676 Tm",
+    "(Alpha 10.0 mm 10.4 mm pass) Tj",
+    "1 0 0 1 72 656 Tm",
+    "(Beta 12.0 mm 11.1 mm review) Tj",
+    ...extraLines,
+    "ET",
+  ].join("\n");
+}
+
+function tableRegionText(
+  page: {
+    readonly blocks: readonly { readonly id: string; readonly text: string }[];
+    readonly regions?: readonly { readonly kind: string; readonly blockIds: readonly string[] }[];
+  } | undefined,
+): string {
+  const blockById = new Map((page?.blocks ?? []).map((block) => [block.id, block.text]));
+  const tableRegion = page?.regions?.find((region) => region.kind === "table");
+  assert.ok(tableRegion);
+  return tableRegion.blockIds.map((blockId) => blockById.get(blockId) ?? "").join(" | ");
+}
+
 test("resource ordering does not change page imagery or render hash", async () => {
   const engine = createPdfEngine();
   const baseBytes = buildPdfWithRenderImagery({

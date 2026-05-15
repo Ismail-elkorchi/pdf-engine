@@ -23,5 +23,6 @@ All notable changes are documented in this file.
 - Render hashing now canonicalizes byte payloads through deterministic byte digests so large imagery-bearing pages remain hashable under the validation proof sets.
 - The browser viewer now prefers render imagery in page mode, uses render selection geometry for page-mode search highlights, surfaces render-text hits in search results, and falls back explicitly per page when render imagery is unavailable.
 - Layout blocks now expose optional bounding boxes and inference records, and the layout stage now uses anchored column evidence, paragraph-flow continuity, and repeated-boundary separation before emitting flattened layout text.
+- Layout pages now expose conservative table and form-like region evidence with source block identifiers, bounding boxes, confidence, and region inference records.
 - Knowledge table projection now recovers compact row-run measurement tables with citation-backed cells when header and body rows are consistent.
 - Knowledge table projection now rejects compact row-run candidates whose numeric evidence is only incidental prose.

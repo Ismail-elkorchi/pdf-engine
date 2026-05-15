@@ -94,6 +94,67 @@ test("layout separates repeated page boundaries from body flow without dropping 
   );
 });
 
+test("layout emits a provenance-backed table region from anchored header and row evidence", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-header-specimen", 0, "Specimen", 72, 700),
+    run("run-header-nominal", 1, "Nominal Width", 180, 700),
+    run("run-header-measured", 2, "Measured Width", 310, 700),
+    run("run-header-result", 3, "Result", 450, 700),
+    run("run-row-alpha", 4, "Alpha 10.0 mm 10.4 mm pass", 72, 676),
+    run("run-row-beta", 5, "Beta 12.0 mm 11.1 mm review", 72, 656),
+    run("run-row-gamma", 6, "Gamma 8.0 mm 8.0 mm pass", 72, 636),
+  ]));
+
+  const page = layout.pages[0];
+  const tableRegion = page?.regions?.find((region) => region.kind === "table");
+
+  assert.ok(tableRegion);
+  assert.equal(tableRegion?.pageNumber, 1);
+  assert.ok((tableRegion?.confidence ?? 0) >= 0.7);
+  assert.ok(tableRegion?.blockIds.length);
+  assert.ok(tableRegion?.bbox);
+  assert.ok(tableRegion?.inferences?.some((inference) =>
+    inference.kind === "region" &&
+    inference.method === "measurement-table" &&
+    inference.status === "inferred" &&
+    inference.evidenceRunIds.includes("run-header-specimen") &&
+    inference.evidenceRunIds.includes("run-row-gamma")
+  ));
+});
+
+test("layout does not emit a table region from incidental numeric prose", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Quarterly Amount Review", 72, 700, 16),
+    run("run-body-1", 1, "The report mentions an amount and remarks in a narrative paragraph.", 72, 670),
+    run("run-body-2", 2, "The specimen was reviewed, but no table headers or row grid are present.", 72, 648),
+  ]));
+
+  assert.deepEqual(layout.pages[0]?.regions ?? [], []);
+});
+
+test("layout emits a conservative form-like region from repeated field evidence", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Application Form", 72, 700, 16),
+    run("run-name-label", 1, "Name:", 72, 668),
+    run("run-name-value", 2, "Alex Doe", 170, 668),
+    run("run-date-label", 3, "Date:", 72, 646),
+    run("run-date-value", 4, "2026-05-15", 170, 646),
+    run("run-signature-label", 5, "Signature:", 72, 624),
+    run("run-signature-value", 6, "Signed", 170, 624),
+  ]));
+
+  const formRegion = layout.pages[0]?.regions?.find((region) => region.kind === "form-like");
+
+  assert.ok(formRegion);
+  assert.ok((formRegion?.confidence ?? 1) < 0.75);
+  assert.ok(formRegion?.blockIds.includes("block-1-2"));
+  assert.ok(formRegion?.inferences?.some((inference) =>
+    inference.kind === "region" &&
+    inference.method === "field-cluster" &&
+    inference.evidenceRunIds.includes("run-signature-label")
+  ));
+});
+
 function createObservation(runs: readonly PdfObservedTextRun[]): PdfObservedDocument {
   return {
     kind: "pdf-observation",

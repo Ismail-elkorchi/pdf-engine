@@ -124,6 +124,7 @@ export type PdfKnownLimitCode =
   | "layout-block-heuristic"
   | "layout-role-heuristic"
   | "layout-reading-order-heuristic"
+  | "layout-region-heuristic"
   | "knowledge-chunk-heuristic"
   | "table-projection-heuristic"
   | "table-projection-not-implemented"
@@ -1235,7 +1236,7 @@ export type PdfLayoutRole = "body" | "heading" | "list" | "header" | "footer" | 
 /**
  * Layout inference made by the current geometry-aware heuristics.
  */
-export type PdfLayoutInferenceKind = "reading-order" | "paragraph-flow" | "structural-role";
+export type PdfLayoutInferenceKind = "reading-order" | "paragraph-flow" | "structural-role" | "region";
 
 /**
  * Whether a layout inference was made or deliberately withheld.
@@ -1306,6 +1307,31 @@ export interface PdfLayoutBlock {
 }
 
 /**
+ * Interpreted region kind recovered from geometry and block evidence.
+ */
+export type PdfLayoutRegionKind = "table" | "form-like";
+
+/**
+ * One interpreted layout region spanning related layout blocks.
+ */
+export interface PdfLayoutRegion {
+  /** Stable region identifier within the layout result. */
+  readonly id: string;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Region kind inferred from the current layout evidence. */
+  readonly kind: PdfLayoutRegionKind;
+  /** Source layout block identifiers covered by the region. */
+  readonly blockIds: readonly string[];
+  /** Confidence attached to the current region inference. */
+  readonly confidence: number;
+  /** Approximate region bounding box when the source blocks expose geometry. */
+  readonly bbox?: PdfBoundingBox;
+  /** Explainable inference records for the region heuristic. */
+  readonly inferences?: readonly PdfLayoutInferenceRecord[];
+}
+
+/**
  * One layout page in the current layout result.
  */
 export interface PdfLayoutPage {
@@ -1317,6 +1343,8 @@ export interface PdfLayoutPage {
   readonly pageRef?: PdfObjectRef;
   /** Layout blocks in reading order. */
   readonly blocks: readonly PdfLayoutBlock[];
+  /** Interpreted layout regions recovered from related blocks. */
+  readonly regions?: readonly PdfLayoutRegion[];
 }
 
 /**

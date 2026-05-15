@@ -4,6 +4,7 @@ import type {
   PdfLayoutBlock,
   PdfLayoutDocument,
   PdfLayoutInferenceRecord,
+  PdfLayoutRegion,
   PdfLayoutRole,
   PdfLayoutPage,
   PdfObjectRef,
@@ -64,12 +65,16 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
     blocks: page.blocks.map((block) => toPublicLayoutBlock(block)),
   }));
   const repeatedBoundarySets = buildRepeatedBoundarySets(publicGroupedPages);
-  const pages = publicGroupedPages.map((page) => ({
-    pageNumber: page.pageNumber,
-    resolutionMethod: page.resolutionMethod,
-    ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
-    blocks: page.blocks.map((block, blockIndex) => classifyLayoutBlock(block, blockIndex, repeatedBoundarySets, page.blocks)),
-  }));
+  const pages = publicGroupedPages.map((page) => {
+    const blocks = page.blocks.map((block, blockIndex) => classifyLayoutBlock(block, blockIndex, repeatedBoundarySets, page.blocks));
+    return {
+      pageNumber: page.pageNumber,
+      resolutionMethod: page.resolutionMethod,
+      ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
+      blocks,
+      regions: inferLayoutRegions(page.pageNumber, blocks),
+    };
+  });
 
   return {
     kind: "pdf-layout",
@@ -81,6 +86,7 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
       "layout-block-heuristic",
       "layout-role-heuristic",
       "layout-reading-order-heuristic",
+      "layout-region-heuristic",
     ]),
   };
 }
@@ -1532,6 +1538,311 @@ function classifyLayoutBlock(
   }
 
   return block;
+}
+
+function inferLayoutRegions(pageNumber: number, blocks: readonly PdfLayoutBlock[]): readonly PdfLayoutRegion[] {
+  const regions: PdfLayoutRegion[] = [];
+  const tableRegion = inferTableLayoutRegion(pageNumber, blocks);
+  if (tableRegion) {
+    regions.push(tableRegion);
+  }
+
+  const tableBlockIds = new Set(tableRegion?.blockIds ?? []);
+  const formLikeRegion = inferFormLikeLayoutRegion(pageNumber, blocks, tableBlockIds);
+  if (formLikeRegion) {
+    regions.push(formLikeRegion);
+  }
+
+  return regions;
+}
+
+type TableRegionProfile = "measurement-table" | "contract-award-table" | "anchored-grid-table";
+
+function inferTableLayoutRegion(
+  pageNumber: number,
+  blocks: readonly PdfLayoutBlock[],
+): PdfLayoutRegion | undefined {
+  const profile = resolveTableRegionProfile(blocks);
+  if (!profile) {
+    return undefined;
+  }
+
+  const candidateBlocks = selectTableRegionBlocks(blocks, profile);
+  if (!hasEnoughTableRegionEvidence(candidateBlocks, profile)) {
+    return undefined;
+  }
+
+  const confidence = tableRegionConfidence(candidateBlocks, profile);
+  const reason =
+    profile === "measurement-table"
+      ? "Repeated measurement headers and compatible value rows formed one table-like region."
+      : profile === "contract-award-table"
+        ? "Contract-award headers and compatible row evidence formed one table-like region."
+        : "Anchored header and data rows formed one table-like region.";
+  return buildLayoutRegion(
+    `layout-region-${pageNumber}-table-1`,
+    pageNumber,
+    "table",
+    profile,
+    confidence,
+    reason,
+    candidateBlocks,
+  );
+}
+
+function resolveTableRegionProfile(blocks: readonly PdfLayoutBlock[]): TableRegionProfile | undefined {
+  const pageText = normalizeBlockText(blocks.map((block) => block.text).join(" ")).toLowerCase();
+  const measurementSignals = [
+    /\bspecimen\b/u,
+    /\bnominal\s+width\b/u,
+    /\bmeasured\s+width\b/u,
+    /\bresult\b/u,
+  ].filter((pattern) => pattern.test(pageText)).length;
+  if (measurementSignals >= 4 && blocks.some((block) => looksLikeMeasurementTableBlock(block.text))) {
+    return "measurement-table";
+  }
+
+  const contractSignals = [
+    /\bserial\s+no\.?\b/u,
+    /\bcontract\s+description\b/u,
+    /\bcontract(?:or|ors|\/suppliers?| no\.?| amount)\b/u,
+    /\bamount\b/u,
+    /\bremarks\b/u,
+  ].filter((pattern) => pattern.test(pageText)).length;
+  if (contractSignals >= 4 && blocks.some((block) => looksLikeContractAwardDataBlock(block.text))) {
+    return "contract-award-table";
+  }
+
+  const headerLikeCount = blocks.filter((block) => looksLikeTableHeaderLabel(block, blocks)).length;
+  const dataLikeCount = blocks.filter((block, blockIndex) =>
+    looksLikeTableRowDescriptor(block, blockIndex, blocks) || looksLikeTabularDataText(block.text)
+  ).length;
+  return headerLikeCount >= 3 && dataLikeCount >= 2 ? "anchored-grid-table" : undefined;
+}
+
+function selectTableRegionBlocks(
+  blocks: readonly PdfLayoutBlock[],
+  profile: TableRegionProfile,
+): readonly PdfLayoutBlock[] {
+  const selectedBlocks = blocks.filter((block, blockIndex) => {
+    const text = normalizeBlockText(block.text);
+    if (text.length === 0) {
+      return false;
+    }
+
+    if (profile === "measurement-table") {
+      return looksLikeMeasurementTableBlock(text) ||
+        looksLikeMeasurementTableHeaderSignalText(text) ||
+        looksLikeTableRowDescriptor(block, blockIndex, blocks);
+    }
+
+    if (profile === "contract-award-table") {
+      return looksLikeContractAwardHeaderText(text) ||
+        looksLikeContractAwardDataBlock(text) ||
+        looksLikeTableRowDescriptor(block, blockIndex, blocks);
+    }
+
+    return looksLikeTableHeaderLabel(block, blocks) ||
+      looksLikeTableRowDescriptor(block, blockIndex, blocks) ||
+      looksLikeTabularDataText(text);
+  });
+
+  return [...dedupeByBlockId(selectedBlocks)].sort((left, right) => left.readingOrder - right.readingOrder);
+}
+
+function hasEnoughTableRegionEvidence(
+  blocks: readonly PdfLayoutBlock[],
+  profile: TableRegionProfile,
+): boolean {
+  if (profile === "measurement-table") {
+    return countMeasurementHeaderSignals(blocks.map((block) => block.text).join(" ")) >= 4 &&
+      blocks.some((block) => looksLikeMeasurementTableBlock(block.text));
+  }
+
+  if (profile === "contract-award-table") {
+    const headerSignalCount = countContractAwardHeaderSignals(blocks.map((block) => block.text).join(" "));
+    return headerSignalCount >= 4 && blocks.filter((block) => looksLikeContractAwardDataBlock(block.text)).length >= 2;
+  }
+
+  const headerCount = blocks.filter((block) => looksLikeTableHeaderLabel(block, blocks)).length;
+  const dataCount = blocks.filter((block, blockIndex) =>
+    looksLikeTableRowDescriptor(block, blockIndex, blocks) || looksLikeTabularDataText(block.text)
+  ).length;
+  return headerCount >= 3 && dataCount >= 2;
+}
+
+function tableRegionConfidence(
+  blocks: readonly PdfLayoutBlock[],
+  profile: TableRegionProfile,
+): number {
+  const headerBonus =
+    profile === "contract-award-table"
+      ? countContractAwardHeaderSignals(blocks.map((block) => block.text).join(" ")) * 0.035
+      : countMeasurementHeaderSignals(blocks.map((block) => block.text).join(" ")) * 0.035;
+  const dataBonus = blocks.filter((block) => looksLikeTabularDataText(block.text) || looksLikeContractAwardDataBlock(block.text)).length * 0.012;
+  return Number(Math.min(0.84, 0.58 + headerBonus + dataBonus).toFixed(2));
+}
+
+function looksLikeMeasurementTableHeaderText(text: string): boolean {
+  const normalized = normalizeBlockText(text).toLowerCase();
+  return countMeasurementHeaderSignals(normalized) >= 4;
+}
+
+function looksLikeMeasurementTableHeaderSignalText(text: string): boolean {
+  return countMeasurementHeaderSignals(text) >= 1;
+}
+
+function countMeasurementHeaderSignals(text: string): number {
+  const normalized = normalizeBlockText(text).toLowerCase();
+  return [
+    /\bspecimen\b/u,
+    /\bnominal\s+width\b/u,
+    /\bmeasured\s+width\b/u,
+    /\bresult\b/u,
+  ].filter((pattern) => pattern.test(normalized)).length;
+}
+
+function looksLikeMeasurementTableBlock(text: string): boolean {
+  const normalized = normalizeBlockText(text).toLowerCase();
+  return looksLikeMeasurementTableHeaderText(normalized) ||
+    (/\b(?:pass|review|fail|failed)\b/u.test(normalized) && /\b\d+(?:\.\d+)?\s*mm\b/u.test(normalized)) ||
+    (/\b(?:alpha|beta|gamma|delta|sample|specimen)\b/u.test(normalized) && /\b\d+(?:\.\d+)?\s*mm\b/u.test(normalized));
+}
+
+function looksLikeContractAwardHeaderText(text: string): boolean {
+  return countContractAwardHeaderSignals(text) >= 1;
+}
+
+function countContractAwardHeaderSignals(text: string): number {
+  const normalized = normalizeBlockText(text).toLowerCase();
+  return [
+    /\bserial\s+no\.?\b/u,
+    /\bcontract\s+description\b/u,
+    /\bcontract\s+no\.?\b/u,
+    /\bcontractor(?:s)?(?:\/suppliers?)?\b/u,
+    /\bconsultant\b/u,
+    /\bcontract\s+amount\b/u,
+    /\bamount\b/u,
+    /\bremarks\b/u,
+  ].filter((pattern) => pattern.test(normalized)).length;
+}
+
+function looksLikeContractAwardDataBlock(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  return /\b(?:procurement|consultancy|services|supply|rehabilitation|construction|maintenance)\b/iu.test(normalized) ||
+    /\b(?:completed|pending|ongoing|awarded|terminated)\b/iu.test(normalized) ||
+    /[$€£¥]?\d{1,3}(?:,\d{3})+(?:\.\d{2})?\s*(?:ghs|usd|eur|gbp)?\b/iu.test(normalized) ||
+    /\b(?:ghs|usd|eur|gbp)\b/iu.test(normalized);
+}
+
+function inferFormLikeLayoutRegion(
+  pageNumber: number,
+  blocks: readonly PdfLayoutBlock[],
+  excludedBlockIds: ReadonlySet<string>,
+): PdfLayoutRegion | undefined {
+  const pageText = normalizeBlockText(blocks.map((block) => block.text).join(" ")).toLowerCase();
+  if (!/\b(?:application|applicant|claimant|consent|form|gender|patient|signature|signed|authorized)\b/u.test(pageText)) {
+    return undefined;
+  }
+
+  const candidateBlocks = blocks.filter((block, blockIndex) => {
+    if (excludedBlockIds.has(block.id)) {
+      return false;
+    }
+
+    const text = normalizeBlockText(block.text);
+    return looksLikeFieldChoiceParagraphStart(text) ||
+      looksLikeShortFieldLabel(text, block.fontSize) ||
+      looksLikeFieldLikeClusterText(text, block.fontSize) ||
+      looksLikeFieldLabelBody(block, blockIndex, blocks) ||
+      looksLikeFieldValueBody(block, blockIndex, blocks);
+  });
+  const fieldLikeCount = candidateBlocks.filter((block) =>
+    looksLikeShortFieldLabel(block.text, block.fontSize) || looksLikeFieldLikeClusterText(block.text, block.fontSize)
+  ).length;
+  if (candidateBlocks.length < 4 || fieldLikeCount < 3) {
+    return undefined;
+  }
+
+  const confidence = Number(Math.min(0.74, 0.5 + fieldLikeCount * 0.035 + candidateBlocks.length * 0.01).toFixed(2));
+  return buildLayoutRegion(
+    `layout-region-${pageNumber}-form-like-1`,
+    pageNumber,
+    "form-like",
+    "field-cluster",
+    confidence,
+    "Field labels and nearby values formed one form-like region.",
+    [...dedupeByBlockId(candidateBlocks)].sort((left, right) => left.readingOrder - right.readingOrder),
+  );
+}
+
+function buildLayoutRegion(
+  id: string,
+  pageNumber: number,
+  kind: PdfLayoutRegion["kind"],
+  method: string,
+  confidence: number,
+  reason: string,
+  blocks: readonly PdfLayoutBlock[],
+): PdfLayoutRegion {
+  const blockIds = blocks.map((block) => block.id);
+  const runIds = dedupeStrings(blocks.flatMap((block) => block.runIds));
+  const bbox = mergeBlockBoundingBoxes(blocks);
+  return {
+    id,
+    pageNumber,
+    kind,
+    blockIds,
+    confidence,
+    ...(bbox !== undefined ? { bbox } : {}),
+    inferences: [
+      {
+        kind: "region",
+        status: "inferred",
+        method,
+        confidence,
+        reason,
+        evidenceRunIds: runIds,
+        evidenceBlockIds: blockIds,
+      },
+    ],
+  };
+}
+
+function mergeBlockBoundingBoxes(blocks: readonly PdfLayoutBlock[]): PdfBoundingBox | undefined {
+  const boxes = blocks.map((block) => block.bbox).filter((bbox): bbox is PdfBoundingBox => bbox !== undefined);
+  if (boxes.length === 0) {
+    return undefined;
+  }
+
+  const left = Math.min(...boxes.map((bbox) => bbox.x));
+  const top = Math.min(...boxes.map((bbox) => bbox.y));
+  const right = Math.max(...boxes.map((bbox) => bbox.x + bbox.width));
+  const bottom = Math.max(...boxes.map((bbox) => bbox.y + bbox.height));
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+  };
+}
+
+function dedupeByBlockId(blocks: readonly PdfLayoutBlock[]): readonly PdfLayoutBlock[] {
+  const seenIds = new Set<string>();
+  const dedupedBlocks: PdfLayoutBlock[] = [];
+  for (const block of blocks) {
+    if (seenIds.has(block.id)) {
+      continue;
+    }
+
+    seenIds.add(block.id);
+    dedupedBlocks.push(block);
+  }
+  return dedupedBlocks;
+}
+
+function dedupeStrings(values: readonly string[]): readonly string[] {
+  return Array.from(new Set(values));
 }
 
 function looksLikeNumberedListPrompt(text: string): boolean {

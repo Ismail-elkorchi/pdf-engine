@@ -37,6 +37,7 @@ test("public pipeline contracts expose staged artifacts with current kinds", asy
   const layoutBlock = result.layout.value?.pages[0]?.blocks[0];
   assert.ok(Array.isArray(layoutBlock?.inferences));
   assert.ok(layoutBlock?.inferences?.some((inference) => inference.kind === "reading-order"));
+  assert.ok(Array.isArray(result.layout.value?.pages[0]?.regions));
   assert.equal(typeof result.render.value?.pages[0]?.textIndex.text, "string");
   assert.ok(Array.isArray(result.render.value?.pages[0]?.textIndex.spans));
   assert.ok(Array.isArray(result.render.value?.pages[0]?.selectionModel.units));
@@ -147,6 +148,48 @@ test("public observation and render contracts expose path paint state", async ()
   assert.deepEqual(pathCommand.colorState, pathMark.colorState);
   assert.deepEqual(pathCommand.transparencyState, pathMark.transparencyState);
   assert.deepEqual(pathCommand.segments, pathMark.segments);
+});
+
+test("public layout contracts expose interpreted regions with inference evidence", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageContents([
+    [
+      "BT",
+      "/F1 12 Tf",
+      "1 0 0 1 72 700 Tm",
+      "(Specimen) Tj",
+      "1 0 0 1 180 700 Tm",
+      "(Nominal Width) Tj",
+      "1 0 0 1 310 700 Tm",
+      "(Measured Width) Tj",
+      "1 0 0 1 450 700 Tm",
+      "(Result) Tj",
+      "1 0 0 1 72 676 Tm",
+      "(Alpha 10.0 mm 10.4 mm pass) Tj",
+      "1 0 0 1 72 656 Tm",
+      "(Beta 12.0 mm 11.1 mm review) Tj",
+      "ET",
+    ].join("\n"),
+  ]);
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-layout-regions.pdf",
+    },
+  });
+
+  const tableRegion = result.layout.value?.pages[0]?.regions?.find((region) => region.kind === "table");
+
+  assert.ok(tableRegion);
+  assert.equal(tableRegion?.pageNumber, 1);
+  assert.ok(Array.isArray(tableRegion?.blockIds));
+  assert.ok(tableRegion?.blockIds.length);
+  assert.ok(tableRegion?.inferences?.some((inference) =>
+    inference.kind === "region" &&
+    inference.status === "inferred" &&
+    inference.evidenceBlockIds?.length === tableRegion.blockIds.length
+  ));
 });
 
 test("public render contracts expose text index and selection model", async () => {
