@@ -1002,6 +1002,12 @@ function createLayoutDiagnostics(observation: PdfStageResult<PdfObservedDocument
     level: "medium",
     message: "The current layout roles are heuristic and should not be treated as final semantic labels.",
   });
+  diagnostics.push({
+    code: "layout-region-heuristic",
+    stage: "layout",
+    level: "medium",
+    message: "The current layout regions are inferred from block geometry and should not be treated as a complete document-structure model.",
+  });
 
   if (observation.value?.pages.every((page) => page.runs.length === 0)) {
     diagnostics.push({
