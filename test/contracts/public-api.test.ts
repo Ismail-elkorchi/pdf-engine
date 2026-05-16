@@ -35,6 +35,10 @@ test("public pipeline contracts expose staged artifacts with current kinds", asy
   assert.equal(result.knowledge.value?.kind, "pdf-knowledge");
   assert.equal(result.render.value?.kind, "pdf-render");
   assert.equal(typeof result.knowledge.value?.markdown, "string");
+  const firstCitation = result.knowledge.value?.chunks[0]?.citations[0];
+  assert.equal(firstCitation?.sourceSpan?.text, firstCitation?.text);
+  assert.equal(firstCitation?.sourceSpan?.blockRange.start, 0);
+  assert.ok((firstCitation?.sourceSpan?.runSpans.length ?? 0) > 0);
   const layoutBlock = result.layout.value?.pages[0]?.blocks[0];
   assert.ok(Array.isArray(layoutBlock?.inferences));
   assert.ok(layoutBlock?.inferences?.some((inference) => inference.kind === "reading-order"));
