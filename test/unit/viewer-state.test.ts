@@ -81,6 +81,7 @@ function createPipelineResultFixture(): PdfPipelineResult {
   const knowledgeValue: PdfKnowledgeDocument = {
     kind: "pdf-knowledge",
     strategy: "layout-chunks-and-heuristic-tables",
+    markdown: "## Chunk one\n\nChunk two",
     extractedText: "Chunk one\nChunk two",
     knownLimits: [],
     chunks: [

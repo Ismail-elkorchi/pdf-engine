@@ -26,3 +26,4 @@ All notable changes are documented in this file.
 - Layout pages now expose conservative table and form-like region evidence with source block identifiers, bounding boxes, confidence, and region inference records.
 - Knowledge table projection now recovers compact row-run measurement tables with citation-backed cells when header and body rows are consistent.
 - Knowledge table projection now rejects compact row-run candidates whose numeric evidence is only incidental prose.
+- Breaking knowledge contract update: knowledge documents now expose deterministic Markdown in chunk order, keep projected table Markdown tied to citation-backed table cells, and hard-fail unresolvable knowledge citation anchors during projection.

@@ -216,6 +216,8 @@ try {
       runtimeKind: simpleResult.runtime.kind === "web",
       simpleText:
         simpleResult.observation.value?.extractedText === "Hello Test Layer",
+      simpleKnowledgeMarkdown:
+        simpleResult.knowledge.value?.markdown.includes("Hello Test Layer") === true,
       simpleRenderHash:
         simpleResult.render.value?.renderHash.algorithm === "sha-256" &&
         simpleResult.render.value?.renderHash.hex.length === 64,
@@ -311,6 +313,7 @@ try {
       checks,
       oracle: {
         simpleText: simpleResult.observation.value?.extractedText ?? null,
+        simpleKnowledgeMarkdown: simpleResult.knowledge.value?.markdown ?? null,
         simpleRenderHash: simpleResult.render.value?.renderHash.hex ?? null,
         javascriptDecision: javascriptAdmission.value?.decision ?? null,
         multiPageCount: multiPageResult.render.value?.pages.length ?? null,

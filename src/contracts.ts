@@ -126,6 +126,7 @@ export type PdfKnownLimitCode =
   | "layout-reading-order-heuristic"
   | "layout-region-heuristic"
   | "knowledge-chunk-heuristic"
+  | "knowledge-markdown-heuristic"
   | "table-projection-heuristic"
   | "table-projection-not-implemented"
   | "render-imagery-partial"
@@ -1468,6 +1469,8 @@ export interface PdfKnowledgeDocument {
   readonly chunks: readonly PdfKnowledgeChunk[];
   /** Table projections when the current evidence is sufficient. */
   readonly tables: readonly PdfKnowledgeTable[];
+  /** Markdown projection in knowledge-chunk order. */
+  readonly markdown: string;
   /** Flattened text in knowledge-chunk order. */
   readonly extractedText: string;
   /** Known implementation limits that materially affect this knowledge result. */

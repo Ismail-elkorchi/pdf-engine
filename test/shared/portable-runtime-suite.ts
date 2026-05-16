@@ -7,6 +7,7 @@ export interface PortableRuntimeSuiteResult {
   readonly checks: Readonly<Record<string, boolean>>;
   readonly oracle: {
     readonly simpleText: string | null;
+    readonly simpleKnowledgeMarkdown: string | null;
     readonly simpleRenderHash: string | null;
     readonly javascriptDecision: string | null;
     readonly javascriptFeatureKinds: readonly string[];
@@ -185,6 +186,11 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
     simpleMarksPresent:
       simpleFirst.observation.value?.pages[0]?.marks[0]?.kind === "text",
     simpleRenderPresent: simpleFirst.render.value?.kind === "pdf-render",
+    simpleKnowledgeMarkdown:
+      simpleFirst.knowledge.value?.markdown.includes(simpleTextFixture.fixture.expectedText ?? "") === true,
+    simpleKnowledgeMarkdownStable:
+      simpleFirst.knowledge.value?.markdown ===
+      simpleSecond.knowledge.value?.markdown,
     simpleRenderStable:
       simpleFirst.render.value?.renderHash.hex ===
       simpleSecond.render.value?.renderHash.hex,
@@ -252,6 +258,7 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
     checks,
     oracle: {
       simpleText: simpleFirst.observation.value?.extractedText ?? null,
+      simpleKnowledgeMarkdown: simpleFirst.knowledge.value?.markdown ?? null,
       simpleRenderHash: simpleFirst.render.value?.renderHash.hex ?? null,
       javascriptDecision: javascriptAdmission.value?.decision ?? null,
       javascriptFeatureKinds,

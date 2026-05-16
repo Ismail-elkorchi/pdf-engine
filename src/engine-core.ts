@@ -1033,6 +1033,12 @@ function createKnowledgeDiagnostics(
     level: "medium",
     message: "The current knowledge stage groups layout blocks into extractive chunks heuristically.",
   });
+  diagnostics.push({
+    code: "knowledge-markdown-heuristic",
+    stage: "knowledge",
+    level: "medium",
+    message: "The current knowledge stage serializes chunks and projected tables into Markdown heuristically.",
+  });
   diagnostics.push(
     knowledge.tables.length === 0
       ? {
