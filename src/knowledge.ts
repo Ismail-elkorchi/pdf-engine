@@ -258,7 +258,22 @@ function buildKnowledgeChunks(
   }
 
   for (const page of layout.pages) {
+    const pendingPlans = [...(pagePlans.get(page.pageNumber) ?? [])];
+
+    function flushTablePlansBefore(readingOrder: number): void {
+      while ((pendingPlans[0]?.startReadingOrder ?? Number.POSITIVE_INFINITY) <= readingOrder) {
+        const plan = pendingPlans.shift();
+        if (plan === undefined) {
+          return;
+        }
+        flushBlocks();
+        chunks.push(createProjectedTableChunk(plan.table));
+      }
+    }
+
     for (const block of page.blocks) {
+      flushTablePlansBefore(block.readingOrder);
+
       if (block.role === "header" || block.role === "footer") {
         continue;
       }
@@ -272,7 +287,7 @@ function buildKnowledgeChunks(
     }
     flushBlocks();
 
-    for (const plan of pagePlans.get(page.pageNumber) ?? []) {
+    for (const plan of pendingPlans) {
       chunks.push(createProjectedTableChunk(plan.table));
     }
   }
@@ -1069,7 +1084,6 @@ function projectFieldLabelFormTable(
       ],
     },
   ];
-  const blockIds = new Set<string>([headerBlock.id]);
   const canReuseHeadingFieldLabels = !hasFieldValueTable;
 
   for (const run of observationPage.runs) {
@@ -1099,14 +1113,14 @@ function projectFieldLabelFormTable(
         },
       ],
     });
-    blockIds.add(block.id);
   }
 
-  if (rows.length - 1 < FIELD_LABEL_MIN_ROWS) {
+  const projectedRows = selectFieldLabelProjectionRows(rows);
+  if (projectedRows.length - 1 < FIELD_LABEL_MIN_ROWS) {
     return undefined;
   }
 
-  const labelAnchors = rows
+  const labelAnchors = projectedRows
     .slice(1)
     .flatMap((row) => row.cells)
     .flatMap((cell) => cell.blocks)
@@ -1124,10 +1138,48 @@ function projectFieldLabelFormTable(
     pageNumber: page.pageNumber,
     heuristic: "field-label-form",
     headers: [headerText],
-    blockIds: [...blockIds],
-    confidence: Number(Math.min(0.76, 0.48 + (rows.length - 1) * 0.03).toFixed(2)),
-    rows,
+    blockIds: dedupeStrings(projectedRows.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
+    confidence: Number(Math.min(0.76, 0.48 + (projectedRows.length - 1) * 0.03).toFixed(2)),
+    rows: projectedRows,
   };
+}
+
+function selectFieldLabelProjectionRows(rows: readonly ProjectedTableRowSeed[]): readonly ProjectedTableRowSeed[] {
+  const [headerRow, ...bodyRows] = rows;
+  if (headerRow === undefined) {
+    return rows;
+  }
+
+  const explicitLabelRows = bodyRows.filter((row) =>
+    row.cells.some((cell) => normalizeCellText(cell.text).endsWith(":"))
+  );
+  if (explicitLabelRows.length >= FIELD_LABEL_MIN_ROWS) {
+    return [
+      headerRow,
+      ...bodyRows.filter((row) =>
+        row.cells.some((cell) =>
+          normalizeCellText(cell.text).endsWith(":") ||
+          looksLikeSupplementalFieldLabel(normalizeCellText(cell.text))
+        )
+      ),
+    ];
+  }
+
+  return rows;
+}
+
+function looksLikeSupplementalFieldLabel(text: string): boolean {
+  const normalizedText = normalizeCellText(text);
+  if (normalizedText.length === 0 || normalizedText.length > 64 || /[.!?:]$/u.test(normalizedText) || /\d/u.test(normalizedText)) {
+    return false;
+  }
+
+  const words = normalizedText.split(/\s+/u).filter((word) => /\p{L}/u.test(word));
+  if (words.length < 2 || words.length > 8) {
+    return false;
+  }
+
+  return /^(?:accept|acknowledge|agree|authorize|certify|confirm|consent|verify)\b/iu.test(normalizedText);
 }
 
 function projectContractAwardSequenceTable(

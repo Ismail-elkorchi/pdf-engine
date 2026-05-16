@@ -148,6 +148,27 @@ test("knowledge table identifiers stay stable when unrelated later prose is adde
   );
 });
 
+test("knowledge interleaves projected table chunks at their source reading position", () => {
+  const knowledge = buildKnowledgeDocument(
+    createFieldLabelFormLayout(),
+    createFieldLabelFormObservation(),
+  );
+
+  const tableChunkIndex = knowledge.chunks.findIndex((chunk) =>
+    chunk.role === "mixed" &&
+    chunk.text.includes("Registration Form") &&
+    chunk.text.includes("Name:") &&
+    chunk.text.includes("Reviewer:")
+  );
+  const closingChunkIndex = knowledge.chunks.findIndex((chunk) => chunk.text.includes("Closing paragraph"));
+
+  assert.notEqual(tableChunkIndex, -1);
+  assert.notEqual(closingChunkIndex, -1);
+  assert.ok(!knowledge.chunks[tableChunkIndex]?.text.includes("Closing paragraph"));
+  assert.ok(tableChunkIndex < closingChunkIndex);
+  assert.ok(knowledge.extractedText.indexOf("Registration Form\nName:") < knowledge.extractedText.indexOf("Closing paragraph"));
+});
+
 test("knowledge hard-fails unresolvable citation anchors", () => {
   const layout = createCompactRowRunLayout([
     "Sample Measurements",
@@ -462,6 +483,66 @@ function createCompactRowRunObservation(texts: readonly string[]): PdfObservedDo
           origin: "native-text",
           anchor: { x: 72, y: 740 - index * 20 },
           fontSize: 12,
+          startsNewLine: true,
+        })),
+        marks: [],
+      },
+    ],
+  };
+}
+
+function createFieldLabelFormLayout(): PdfLayoutDocument {
+  const texts = ["Registration Form", "Name:", "Department:", "Contact:", "Reviewer:", "Closing paragraph"];
+  const roles: readonly PdfLayoutBlock["role"][] = ["heading", "body", "body", "body", "body", "body"];
+  return {
+    kind: "pdf-layout",
+    strategy: "line-blocks",
+    pages: [
+      {
+        pageNumber: 1,
+        resolutionMethod: "page-tree",
+        blocks: texts.map((text, index): PdfLayoutBlock => ({
+          id: `field-block-${String(index + 1)}`,
+          pageNumber: 1,
+          readingOrder: index,
+          text,
+          role: roles[index] ?? "body",
+          roleConfidence: index === 0 ? 0.92 : 0.84,
+          startsParagraph: true,
+          runIds: [`field-run-${String(index + 1)}`],
+          glyphIds: [`field-glyph-${String(index + 1)}`],
+          resolutionMethod: "page-tree",
+          anchor: { x: 72, y: 740 - index * 24 },
+          fontSize: index === 0 ? 22 : 12,
+        })),
+      },
+    ],
+    extractedText: texts.join("\n"),
+    knownLimits: [],
+  };
+}
+
+function createFieldLabelFormObservation(): PdfObservedDocument {
+  const texts = ["Registration Form", "Name:", "Department:", "Contact:", "Reviewer:", "Closing paragraph"];
+  return {
+    kind: "pdf-observation",
+    strategy: "content-stream-interpreter",
+    extractedText: texts.join("\n"),
+    knownLimits: [],
+    pages: [
+      {
+        pageNumber: 1,
+        resolutionMethod: "page-tree",
+        glyphs: [],
+        runs: texts.map((text, index): PdfObservedTextRun => ({
+          id: `field-run-${String(index + 1)}`,
+          pageNumber: 1,
+          contentOrder: index,
+          text,
+          glyphIds: [`field-glyph-${String(index + 1)}`],
+          origin: "native-text",
+          anchor: { x: 72, y: 740 - index * 24 },
+          fontSize: index === 0 ? 22 : 12,
           startsNewLine: true,
         })),
         marks: [],
