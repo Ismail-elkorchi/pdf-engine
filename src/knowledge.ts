@@ -1,10 +1,16 @@
+import { buildKnowledgeChunks } from "./knowledge/chunks.ts";
+import {
+  assertKnowledgeCitationsResolvable,
+  citationTextPresent,
+  createKnowledgeSourceSpan,
+  findSourceTextRange,
+} from "./knowledge/citations.ts";
+import { buildKnowledgeMarkdown } from "./knowledge/markdown.ts";
+
 import type {
   PdfKnownLimitCode,
-  PdfKnowledgeChunk,
-  PdfKnowledgeChunkRole,
   PdfKnowledgeCitation,
   PdfKnowledgeDocument,
-  PdfKnowledgeSourceSpan,
   PdfKnowledgeStrategy,
   PdfKnowledgeTableHeuristic,
   PdfKnowledgeTable,
@@ -18,7 +24,8 @@ import type {
   PdfPoint,
 } from "./contracts.ts";
 
-const DEFAULT_CHUNK_TARGET = 420;
+export { assertKnowledgeCitationsResolvable } from "./knowledge/citations.ts";
+
 const GRID_HEADER_ROW_MIN_COLUMNS = 3;
 const GRID_ROW_CELL_MIN_COUNT = 2;
 const ROW_SEQUENCE_MIN_HEADERS = 3;
@@ -137,312 +144,6 @@ export function buildKnowledgeDocument(
   };
 }
 
-export function assertKnowledgeCitationsResolvable(
-  layout: PdfLayoutDocument,
-  knowledge: Pick<PdfKnowledgeDocument, "chunks" | "tables">,
-): void {
-  const blocksById = new Map(
-    layout.pages.flatMap((page) => page.blocks).map((block) => [block.id, block]),
-  );
-  for (const citation of knowledge.chunks.flatMap((chunk) => chunk.citations)) {
-    validateKnowledgeCitation(blocksById, citation);
-  }
-
-  for (const table of knowledge.tables) {
-    for (const cell of table.cells) {
-      for (const citation of cell.citations) {
-        validateKnowledgeCitation(blocksById, citation, cell.text);
-      }
-    }
-  }
-}
-
-function validateKnowledgeCitation(
-  blocksById: ReadonlyMap<string, PdfLayoutBlock>,
-  citation: PdfKnowledgeCitation,
-  tableCellText?: string,
-): void {
-    const block = blocksById.get(citation.blockId);
-    if (!block) {
-      throw new Error(`Unresolvable knowledge citation ${citation.id}: missing layout block ${citation.blockId}.`);
-    }
-    if (block.pageNumber !== citation.pageNumber) {
-      throw new Error(`Unresolvable knowledge citation ${citation.id}: page ${citation.pageNumber} does not match block ${block.id}.`);
-    }
-    for (const runId of citation.runIds) {
-      if (!block.runIds.includes(runId)) {
-        throw new Error(`Unresolvable knowledge citation ${citation.id}: run ${runId} is not part of block ${block.id}.`);
-      }
-    }
-    if (!citationTextPresent(block.text, citation.text)) {
-      throw new Error(`Unresolvable knowledge citation ${citation.id}: citation text is not present in block ${block.id}.`);
-    }
-    if (tableCellText !== undefined && !tableCellTextContainsCitation(tableCellText, citation.text)) {
-      throw new Error(`Unresolvable knowledge citation ${citation.id}: table cell citation overreaches cell text.`);
-    }
-    if (citation.sourceSpan !== undefined) {
-      validateKnowledgeSourceSpan(block, citation);
-    }
-}
-
-function validateKnowledgeSourceSpan(block: PdfLayoutBlock, citation: PdfKnowledgeCitation): void {
-  const sourceSpan = citation.sourceSpan;
-  if (sourceSpan === undefined) {
-    return;
-  }
-  validateKnowledgeTextRange(citation.id, block, sourceSpan.blockRange, "source span");
-  if (block.text.slice(sourceSpan.blockRange.start, sourceSpan.blockRange.end) !== sourceSpan.text) {
-    throw new Error(`Unresolvable knowledge citation ${citation.id}: source span text is stale for block ${block.id}.`);
-  }
-  if (sourceSpan.text !== citation.text) {
-    throw new Error(`Unresolvable knowledge citation ${citation.id}: source span text does not match citation text.`);
-  }
-  if (sourceSpan.runSpans.length === 0) {
-    throw new Error(`Unresolvable knowledge citation ${citation.id}: source span has no run spans.`);
-  }
-  const citationRunIds = new Set(citation.runIds);
-  for (const runSpan of sourceSpan.runSpans) {
-    if (!citationRunIds.has(runSpan.runId)) {
-      throw new Error(`Unresolvable knowledge citation ${citation.id}: source span run ${runSpan.runId} is not cited.`);
-    }
-    validateKnowledgeTextRange(citation.id, block, runSpan.range, `run span ${runSpan.runId}`);
-    if (block.text.slice(runSpan.range.start, runSpan.range.end) !== runSpan.text) {
-      throw new Error(`Unresolvable knowledge citation ${citation.id}: run span ${runSpan.runId} text is stale.`);
-    }
-  }
-}
-
-function validateKnowledgeTextRange(
-  citationId: string,
-  block: PdfLayoutBlock,
-  range: { readonly start: number; readonly end: number },
-  label: string,
-): void {
-  if (!Number.isInteger(range.start) || !Number.isInteger(range.end)) {
-    throw new Error(`Unresolvable knowledge citation ${citationId}: ${label} range is not integral.`);
-  }
-  if (range.start < 0 || range.end < range.start || range.end > block.text.length) {
-    throw new Error(`Unresolvable knowledge citation ${citationId}: ${label} range is outside block ${block.id}.`);
-  }
-}
-
-interface InlineKnowledgeTablePlan {
-  readonly table: PdfKnowledgeTable;
-  readonly pageNumber: number;
-  readonly startReadingOrder: number;
-}
-
-function buildKnowledgeChunks(
-  layout: PdfLayoutDocument,
-  tables: readonly PdfKnowledgeTable[],
-): readonly PdfKnowledgeChunk[] {
-  const chunks: PdfKnowledgeChunk[] = [];
-  let currentBlocks: PdfLayoutBlock[] = [];
-  const tablePlans = buildInlineKnowledgeTablePlans(layout, tables);
-  const pagePlans = new Map<number, readonly InlineKnowledgeTablePlan[]>(
-    dedupeNumbers(tablePlans.map((plan) => plan.pageNumber)).map((pageNumber) => [
-      pageNumber,
-      tablePlans
-        .filter((plan) => plan.pageNumber === pageNumber)
-        .sort((left, right) => left.startReadingOrder - right.startReadingOrder),
-    ]),
-  );
-
-  function flushBlocks(): void {
-    if (currentBlocks.length === 0) {
-      return;
-    }
-
-    chunks.push(createChunk(currentBlocks));
-    currentBlocks = [];
-  }
-
-  for (const page of layout.pages) {
-    const pendingPlans = [...(pagePlans.get(page.pageNumber) ?? [])];
-
-    function flushTablePlansBefore(readingOrder: number): void {
-      while ((pendingPlans[0]?.startReadingOrder ?? Number.POSITIVE_INFINITY) <= readingOrder) {
-        const plan = pendingPlans.shift();
-        if (plan === undefined) {
-          return;
-        }
-        flushBlocks();
-        chunks.push(createProjectedTableChunk(plan.table));
-      }
-    }
-
-    for (const block of page.blocks) {
-      flushTablePlansBefore(block.readingOrder);
-
-      if (block.role === "header" || block.role === "footer") {
-        continue;
-      }
-
-      const projectedLength = currentBlocks.reduce((sum, currentBlock) => sum + currentBlock.text.length, 0) + block.text.length;
-      if (shouldStartNewChunk(currentBlocks, block, projectedLength)) {
-        flushBlocks();
-      }
-
-      currentBlocks.push(block);
-    }
-    flushBlocks();
-
-    for (const plan of pendingPlans) {
-      chunks.push(createProjectedTableChunk(plan.table));
-    }
-  }
-
-  flushBlocks();
-
-  return chunks;
-}
-
-function buildInlineKnowledgeTablePlans(
-  layout: PdfLayoutDocument,
-  tables: readonly PdfKnowledgeTable[],
-): readonly InlineKnowledgeTablePlan[] {
-  const pagesByNumber = new Map(layout.pages.map((page) => [page.pageNumber, page]));
-  const plans: InlineKnowledgeTablePlan[] = [];
-
-  for (const table of tables) {
-    if (!shouldInlineKnowledgeTableChunk(table)) {
-      continue;
-    }
-
-    const page = pagesByNumber.get(table.pageNumber);
-    if (!page) {
-      continue;
-    }
-
-    const tableBlockIds = new Set(table.blockIds);
-    const startBlock = page.blocks
-      .filter((block) => tableBlockIds.has(block.id))
-      .sort((left, right) => left.readingOrder - right.readingOrder)[0];
-    if (!startBlock) {
-      continue;
-    }
-
-    plans.push({
-      table,
-      pageNumber: table.pageNumber,
-      startReadingOrder: startBlock.readingOrder,
-    });
-  }
-
-  return plans.sort((left, right) => {
-    if (left.pageNumber !== right.pageNumber) {
-      return left.pageNumber - right.pageNumber;
-    }
-    return left.startReadingOrder - right.startReadingOrder;
-  });
-}
-
-function buildKnowledgeMarkdown(
-  chunks: readonly PdfKnowledgeChunk[],
-  tables: readonly PdfKnowledgeTable[],
-): string {
-  const chunkTexts = chunks
-    .map(serializeChunkMarkdown)
-    .filter((text) => text.length > 0);
-  const chunkSourceTexts = new Set(chunks.map((chunk) => normalizeMarkdownText(chunk.text)));
-  const tableTexts = tables
-    .map(serializeKnowledgeTable)
-    .filter((text) => text.length > 0 && !chunkSourceTexts.has(normalizeMarkdownText(text)))
-    .map((text) => serializeTableLikeMarkdown(text) ?? text);
-  return [...chunkTexts, ...tableTexts]
-    .join("\n\n");
-}
-
-function serializeChunkMarkdown(chunk: PdfKnowledgeChunk): string {
-  const text = normalizeMarkdownText(chunk.text);
-  if (text.length === 0) {
-    return "";
-  }
-
-  const tableMarkdown = serializeTableLikeMarkdown(text);
-  if (tableMarkdown) {
-    return tableMarkdown;
-  }
-
-  const lines = text.split(/\n+/u).map((line) => line.trim()).filter((line) => line.length > 0);
-  if (chunk.role === "heading") {
-    const [heading = "", ...bodyLines] = lines;
-    return [`## ${heading}`, bodyLines.join("\n")].filter((part) => part.length > 0).join("\n\n");
-  }
-  if (chunk.role === "list") {
-    return lines.map((line) => `- ${line.replace(/^[-*]\s*/u, "")}`).join("\n");
-  }
-
-  return text;
-}
-
-function serializeTableLikeMarkdown(text: string): string | undefined {
-  const rows = text
-    .split(/\n+/u)
-    .map((line) => line.split("|").map((cell) => cell.trim()).filter((cell) => cell.length > 0))
-    .filter((cells) => cells.length > 0);
-  if (rows.length < 2) {
-    return undefined;
-  }
-
-  const columnCount = rows[0]?.length ?? 0;
-  if (columnCount < 2 || rows.some((row) => row.length !== columnCount)) {
-    return undefined;
-  }
-
-  const [header = [], ...body] = rows;
-  return [
-    `| ${header.join(" | ")} |`,
-    `| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`,
-    ...body.map((row) => `| ${row.join(" | ")} |`),
-  ].join("\n");
-}
-
-function normalizeMarkdownText(text: string): string {
-  return text
-    .split(/\r?\n/u)
-    .map((line) => line.replaceAll(/\s+/g, " ").trim())
-    .filter((line) => line.length > 0)
-    .join("\n");
-}
-
-function shouldInlineKnowledgeTableChunk(table: PdfKnowledgeTable): boolean {
-  if (table.heuristic === "contract-award-sequence") {
-    return true;
-  }
-
-  if (table.heuristic !== "field-label-form") {
-    return false;
-  }
-
-  return looksLikeInlineFieldLabelTable(table);
-}
-
-function looksLikeInlineFieldLabelTable(table: PdfKnowledgeTable): boolean {
-  const bodyCells = table.cells.filter((cell) => cell.rowIndex > 0 && cell.columnIndex === 0);
-  if (bodyCells.length < FIELD_LABEL_MIN_ROWS) {
-    return false;
-  }
-
-  const colonEndedCount = bodyCells.filter((cell) => normalizeCellText(cell.text).endsWith(":")).length;
-  const compactLabelCount = bodyCells.filter((cell) => looksLikeInlineFieldLabelCell(cell.text)).length;
-  return colonEndedCount / bodyCells.length >= 0.5 || compactLabelCount / bodyCells.length >= 0.75;
-}
-
-function looksLikeInlineFieldLabelCell(text: string): boolean {
-  const normalizedText = normalizeCellText(text);
-  if (normalizedText.length === 0 || normalizedText.length > 40) {
-    return false;
-  }
-
-  if (/[.!?]$/.test(normalizedText)) {
-    return false;
-  }
-
-  const words = normalizedText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  return words.length >= 1 && words.length <= 4;
-}
-
 function buildKnowledgeTables(
   layout: PdfLayoutDocument,
   observation?: PdfObservedDocument,
@@ -510,116 +211,6 @@ function buildKnowledgeTables(
   }
 
   return dedupeProjectedTableCandidates(candidates).map(finalizeProjectedTable);
-}
-
-function shouldStartNewChunk(
-  currentBlocks: readonly PdfLayoutBlock[],
-  incomingBlock: PdfLayoutBlock,
-  projectedLength: number,
-): boolean {
-  if (currentBlocks.length === 0) {
-    return false;
-  }
-
-  if (incomingBlock.role === "heading") {
-    return true;
-  }
-  if (currentBlocks.some((block) => block.role === "heading")) {
-    return true;
-  }
-
-  return projectedLength > DEFAULT_CHUNK_TARGET;
-}
-
-function createChunk(blocks: readonly PdfLayoutBlock[]): PdfKnowledgeChunk {
-  const text = serializeChunkBlocks(blocks);
-  const id = createStableId(
-    "chunk",
-    ["layout", ...blocks.map(createBlockFingerprint), text],
-    [blocks[0]?.role ?? "layout", blocks[0]?.pageNumber ?? 0, blocks[0]?.text ?? text],
-  );
-  const citations = blocks.map((block) => createCitation(id, block));
-  return {
-    id,
-    text,
-    role: summarizeChunkRole(blocks),
-    pageNumbers: dedupeNumbers(blocks.map((block) => block.pageNumber)),
-    blockIds: blocks.map((block) => block.id),
-    runIds: blocks.flatMap((block) => block.runIds),
-    citations,
-  };
-}
-
-function createProjectedTableChunk(table: PdfKnowledgeTable): PdfKnowledgeChunk {
-  const sourceCitations = dedupeKnowledgeCitations(table.cells.flatMap((cell) => cell.citations));
-  const text = serializeKnowledgeTable(table);
-  const id = createStableId(
-    "chunk",
-    ["projected-table", table.id, text],
-    ["table", table.pageNumber, table.headers?.join(" ") ?? table.heuristic ?? table.id],
-  );
-  return {
-    id,
-    text,
-    role: "mixed",
-    pageNumbers:
-      sourceCitations.length === 0
-        ? [table.pageNumber]
-        : dedupeNumbers(sourceCitations.map((citation) => citation.pageNumber)),
-    blockIds: dedupeStrings(table.blockIds),
-    runIds: dedupeStrings(sourceCitations.flatMap((citation) => citation.runIds)),
-    citations: sourceCitations.map((citation) => ({
-      ...citation,
-      id: createStableId(
-        "citation",
-        ["projected-table-chunk", id, citation.id, citation.pageNumber, citation.blockId, citation.runIds.join(","), citation.text],
-        ["table", citation.pageNumber, citation.blockId, citation.text],
-      ),
-    })),
-  };
-}
-
-function createCitation(ownerId: string, block: PdfLayoutBlock): PdfKnowledgeCitation {
-  const textRange = findSourceTextRange(block.text, block.text);
-  return {
-    id: createStableId(
-      "citation",
-      ["chunk", ownerId, createBlockFingerprint(block)],
-      [block.pageNumber, block.id, block.text],
-    ),
-    pageNumber: block.pageNumber,
-    blockId: block.id,
-    runIds: block.runIds,
-    text: block.text,
-    ...(textRange === undefined ? {} : { sourceSpan: createKnowledgeSourceSpan(block, block.text, block.runIds, textRange) }),
-    ...(block.pageRef !== undefined ? { pageRef: block.pageRef } : {}),
-  };
-}
-
-function dedupeKnowledgeCitations(citations: readonly PdfKnowledgeCitation[]): readonly PdfKnowledgeCitation[] {
-  const deduped: PdfKnowledgeCitation[] = [];
-  const seenKeys = new Set<string>();
-
-  for (const citation of citations) {
-    const key = `${citation.pageNumber}:${citation.blockId}:${citation.runIds.join(",")}:${citation.text}`;
-    if (seenKeys.has(key)) {
-      continue;
-    }
-
-    seenKeys.add(key);
-    deduped.push(citation);
-  }
-
-  return deduped;
-}
-
-function summarizeChunkRole(blocks: readonly PdfLayoutBlock[]): PdfKnowledgeChunkRole {
-  const roles = Array.from(new Set(blocks.map((block) => block.role)));
-  if (roles.length !== 1) {
-    return "mixed";
-  }
-
-  return roles[0] as PdfKnowledgeChunkRole;
 }
 
 function createStableId(
@@ -720,8 +311,8 @@ function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | 
   }
 
   const rowBands = clusterBlocksIntoRows(anchoredBlocks);
-  let bestCandidate: ProjectedTableCandidate | undefined;
-  let bestScore = -1;
+  let selectedCandidate: ProjectedTableCandidate | undefined;
+  let selectedScore = -1;
 
   for (const [rowIndex, headerBand] of rowBands.entries()) {
     const headerBlocks = [...headerBand.blocks].sort(compareBlocksByX);
@@ -781,13 +372,13 @@ function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | 
       rows: rowSeeds,
     };
     const score = headers.length * 10 + bodyRowCount;
-    if (score > bestScore) {
-      bestScore = score;
-      bestCandidate = candidate;
+    if (score > selectedScore) {
+      selectedScore = score;
+      selectedCandidate = candidate;
     }
   }
 
-  return bestCandidate;
+  return selectedCandidate;
 }
 
 function projectRowSequenceTable(
@@ -801,7 +392,7 @@ function projectRowSequenceTable(
     return compactRunCandidate;
   }
 
-  const headerGroup = findBestHeaderRunGroup(runs);
+  const headerGroup = findSelectedHeaderRunGroup(runs);
   if (!headerGroup) {
     return undefined;
   }
@@ -855,8 +446,8 @@ function projectCompactRunSequenceTable(
   runs: readonly PdfObservedTextRun[],
   runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
 ): ProjectedTableCandidate | undefined {
-  let bestCandidate: ProjectedTableCandidate | undefined;
-  let bestScore = -1;
+  let selectedCandidate: ProjectedTableCandidate | undefined;
+  let selectedScore = -1;
 
   for (let headerIndex = 0; headerIndex < runs.length - ROW_SEQUENCE_MIN_ROWS; headerIndex += 1) {
     const candidate = buildCompactRunSequenceCandidate(layoutPage, runs, headerIndex, runToBlock);
@@ -866,13 +457,13 @@ function projectCompactRunSequenceTable(
 
     const bodyRowCount = candidate.rows.length - 1;
     const score = candidate.headers.length * 10 + bodyRowCount;
-    if (score > bestScore) {
-      bestScore = score;
-      bestCandidate = candidate;
+    if (score > selectedScore) {
+      selectedScore = score;
+      selectedCandidate = candidate;
     }
   }
 
-  return bestCandidate;
+  return selectedCandidate;
 }
 
 function buildCompactRunSequenceCandidate(
@@ -952,7 +543,7 @@ function projectStackedHeaderSequenceTable(
   runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
 ): ProjectedTableCandidate | undefined {
   const runs = observationPage.runs.filter((run) => normalizeCellText(run.text).length > 0);
-  const headerGroup = findBestHeaderRunGroup(runs);
+  const headerGroup = findSelectedHeaderRunGroup(runs);
   if (!headerGroup) {
     return undefined;
   }
@@ -1237,14 +828,14 @@ function projectContractAwardSequenceTable(
   };
 }
 
-function findBestHeaderRunGroup(
+function findSelectedHeaderRunGroup(
   runs: readonly PdfObservedTextRun[],
 ): { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined {
   const fontSizes = runs.map((run) => run.fontSize ?? 0).filter((value) => value > 0).sort((left, right) => left - right);
   const medianFontSize =
     fontSizes.length === 0 ? 0 : fontSizes[Math.floor(fontSizes.length / 2)] ?? 0;
-  let bestGroup: { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined;
-  let bestScore = -1;
+  let selectedGroup: { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined;
+  let selectedScore = -1;
 
   for (let startIndex = 0; startIndex < runs.length; startIndex += 1) {
     const startRun = runs[startIndex] as PdfObservedTextRun;
@@ -1267,13 +858,13 @@ function findBestHeaderRunGroup(
     }
 
     const score = fontSize * 10 + group.length;
-    if (score > bestScore) {
-      bestScore = score;
-      bestGroup = { startIndex, runs: group };
+    if (score > selectedScore) {
+      selectedScore = score;
+      selectedGroup = { startIndex, runs: group };
     }
   }
 
-  return bestGroup;
+  return selectedGroup;
 }
 
 function findContractAwardHeaderEndIndex(runs: readonly PdfObservedTextRun[]): number | undefined {
@@ -1908,7 +1499,7 @@ function assignBlocksToColumns(
     const remainingBlocks = blockCount - blockIndex;
     for (let columnIndex = blockIndex; columnIndex <= columnCount - remainingBlocks; columnIndex += 1) {
       const skipCost = costs[blockIndex]![columnIndex - 1]!;
-      let bestCost = skipCost;
+      let selectedCost = skipCost;
       let assignCurrentBlock = false;
 
       const assignCost = costs[blockIndex - 1]![columnIndex - 1]!;
@@ -1917,14 +1508,14 @@ function assignBlocksToColumns(
         const columnAnchor = columnAnchors[columnIndex - 1];
         if (columnAnchor !== undefined) {
           const totalCost = assignCost + scoreColumnAssignment(block, columnAnchor, columnIndex - 1, columnAnchors.length);
-          if (totalCost < bestCost) {
-            bestCost = totalCost;
+          if (totalCost < selectedCost) {
+            selectedCost = totalCost;
             assignCurrentBlock = true;
           }
         }
       }
 
-      costs[blockIndex]![columnIndex] = bestCost;
+      costs[blockIndex]![columnIndex] = selectedCost;
       decisions[blockIndex]![columnIndex] = assignCurrentBlock;
     }
   }
@@ -2031,22 +1622,6 @@ function finalizeProjectedTable(candidate: ProjectedTableCandidate): PdfKnowledg
   };
 }
 
-function serializeKnowledgeTable(table: PdfKnowledgeTable): string {
-  const rowIndexes = [...dedupeNumbers(table.cells.map((cell) => cell.rowIndex))].sort(
-    (left: number, right: number) => left - right,
-  );
-  const serializedRows = rowIndexes.map((rowIndex: number) => {
-    const rowCells = table.cells
-      .filter((cell) => cell.rowIndex === rowIndex)
-      .sort((left, right) => left.columnIndex - right.columnIndex)
-      .map((cell) => normalizeCellText(cell.text))
-      .filter((text) => text.length > 0);
-    return rowCells.join(" | ");
-  });
-
-  return serializedRows.filter((rowText: string) => rowText.length > 0).join("\n");
-}
-
 function createTableCellCitations(
   tableId: string,
   rowIndex: number,
@@ -2110,49 +1685,6 @@ function selectTableCellCitationText(block: PdfLayoutBlock, cellText: string): s
     });
 }
 
-function createKnowledgeSourceSpan(
-  block: PdfLayoutBlock,
-  text: string,
-  runIds: readonly string[],
-  blockRange: { readonly start: number; readonly end: number },
-): PdfKnowledgeSourceSpan {
-  return {
-    text,
-    blockRange,
-    runSpans: runIds.map((runId) => ({
-      runId,
-      range: blockRange,
-      text,
-      ...(block.bbox !== undefined ? { bbox: block.bbox } : {}),
-    })),
-    ...(block.bbox !== undefined ? { bbox: block.bbox } : {}),
-    ...(block.pageRef !== undefined ? { pageRef: block.pageRef } : {}),
-  };
-}
-
-function findSourceTextRange(sourceText: string, targetText: string): { readonly start: number; readonly end: number } | undefined {
-  const directIndex = sourceText.indexOf(targetText);
-  if (directIndex >= 0) {
-    return { start: directIndex, end: directIndex + targetText.length };
-  }
-
-  return undefined;
-}
-
-function citationTextPresent(sourceText: string, targetText: string): boolean {
-  if (sourceText.includes(targetText)) {
-    return true;
-  }
-  const normalizedTarget = normalizeStableText(targetText);
-  return normalizedTarget.length > 0 && normalizeStableText(sourceText).includes(normalizedTarget);
-}
-
-function tableCellTextContainsCitation(cellText: string, citationText: string): boolean {
-  const normalizedCellText = normalizeStableText(cellText);
-  const normalizedCitationText = normalizeStableText(citationText);
-  return normalizedCitationText.length > 0 && normalizedCellText.includes(normalizedCitationText);
-}
-
 function buildRunToBlockIndex(layout: PdfLayoutDocument): ReadonlyMap<string, PdfLayoutBlock> {
   const runToBlock = new Map<string, PdfLayoutBlock>();
   for (const page of layout.pages) {
@@ -2191,17 +1723,17 @@ function projectedTableOverlap(
 function dedupeProjectedTableCandidates(
   candidates: readonly ProjectedTableCandidate[],
 ): readonly ProjectedTableCandidate[] {
-  const bestBySignature = new Map<string, ProjectedTableCandidate>();
+  const selectedBySignature = new Map<string, ProjectedTableCandidate>();
 
   for (const candidate of candidates) {
     const signature = projectedTableSignature(candidate);
-    const currentBest = bestBySignature.get(signature);
-    if (!currentBest || compareProjectedTableCandidates(candidate, currentBest) < 0) {
-      bestBySignature.set(signature, candidate);
+    const currentSelection = selectedBySignature.get(signature);
+    if (!currentSelection || compareProjectedTableCandidates(candidate, currentSelection) < 0) {
+      selectedBySignature.set(signature, candidate);
     }
   }
 
-  return [...bestBySignature.values()].sort((left, right) => {
+  return [...selectedBySignature.values()].sort((left, right) => {
     if (left.pageNumber !== right.pageNumber) {
       return left.pageNumber - right.pageNumber;
     }
@@ -2376,8 +1908,8 @@ function splitCompactRunHeaderText(
   const columnHasNumericEvidence = Array.from({ length: columnCount }, (_, columnIndex) =>
     bodyRows.some((row) => compactCellContainsNumber(row.cells[columnIndex] ?? ""))
   );
-  let bestHeaders: readonly string[] | undefined;
-  let bestScore = Number.NEGATIVE_INFINITY;
+  let selectedHeaders: readonly string[] | undefined;
+  let selectedScore = Number.NEGATIVE_INFINITY;
 
   for (const partition of enumerateCompactHeaderTokenPartitions(tokens, columnCount)) {
     const headers = partition.map((cellTokens) => normalizeCellText(cellTokens.join(" ")));
@@ -2386,13 +1918,13 @@ function splitCompactRunHeaderText(
     }
 
     const score = scoreCompactHeaderPartition(headers, columnHasNumericEvidence);
-    if (score > bestScore) {
-      bestScore = score;
-      bestHeaders = headers;
+    if (score > selectedScore) {
+      selectedScore = score;
+      selectedHeaders = headers;
     }
   }
 
-  return bestHeaders;
+  return selectedHeaders;
 }
 
 function enumerateCompactHeaderTokenPartitions(
@@ -2558,10 +2090,6 @@ function joinCellText(previousText: string, currentText: string): string {
   return `${previousText} ${normalizeCellText(currentText)}`.replaceAll(/\s+/g, " ").trim();
 }
 
-function dedupeNumbers(values: readonly number[]): readonly number[] {
-  return Array.from(new Set(values));
-}
-
 function dedupeKnownLimits(values: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {
   return Array.from(new Set(values));
 }
@@ -2581,19 +2109,4 @@ function dedupeById<T extends { readonly id: string }>(values: readonly T[]): re
     deduped.push(value);
   }
   return deduped;
-}
-
-function serializeChunkBlocks(blocks: readonly PdfLayoutBlock[]): string {
-  let text = "";
-
-  for (const [blockIndex, block] of blocks.entries()) {
-    const normalizedBlockText = block.text.replaceAll(/\s+/g, " ").trim();
-    if (normalizedBlockText.length === 0) {
-      continue;
-    }
-    const separator = blockIndex === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
-    text += `${separator}${normalizedBlockText}`;
-  }
-
-  return text.trim();
 }
