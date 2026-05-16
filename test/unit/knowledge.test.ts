@@ -4,10 +4,11 @@ import { test } from "node:test";
 import type {
   PdfLayoutBlock,
   PdfLayoutDocument,
+  PdfKnowledgeDocument,
   PdfObservedDocument,
   PdfObservedTextRun,
 } from "../../src/contracts.ts";
-import { buildKnowledgeDocument } from "../../src/knowledge.ts";
+import { assertKnowledgeCitationsResolvable, buildKnowledgeDocument } from "../../src/knowledge.ts";
 
 test("knowledge projects compact row-run tables with citation-backed cells", () => {
   const layout = createCompactRowRunLayout([
@@ -28,7 +29,11 @@ test("knowledge projects compact row-run tables with citation-backed cells", () 
   const knowledge = buildKnowledgeDocument(layout, observation);
 
   assert.equal(knowledge.strategy, "layout-chunks-and-heuristic-tables");
-  assert.deepEqual(knowledge.knownLimits, ["knowledge-chunk-heuristic", "table-projection-heuristic"]);
+  assert.deepEqual(knowledge.knownLimits, [
+    "knowledge-chunk-heuristic",
+    "knowledge-markdown-heuristic",
+    "table-projection-heuristic",
+  ]);
   assert.equal(knowledge.tables.length, 1);
 
   const [table] = knowledge.tables;
@@ -58,6 +63,45 @@ test("knowledge projects compact row-run tables with citation-backed cells", () 
   );
   assert.deepEqual(table.blockIds, ["block-1", "block-2", "block-3"]);
   assert.deepEqual(table.cells.at(5)?.citations.map((citation) => citation.runIds), [["run-3"]]);
+  assert.match(knowledge.markdown, /^## Sample Measurements/u);
+  assert.match(knowledge.markdown, /\| Item \| Nominal Width \| Measured Width \| Result \|/u);
+});
+
+test("knowledge hard-fails unresolvable citation anchors", () => {
+  const layout = createCompactRowRunLayout([
+    "Sample Measurements",
+    "Item Nominal Width Measured Width Result",
+    "Alpha 10.0 mm 10.4 mm pass",
+    "Beta 12.0 mm 11.1 mm review",
+    "Gamma 8.0 mm 8.0 mm pass",
+  ]);
+  const invalidKnowledge: Pick<PdfKnowledgeDocument, "chunks" | "tables"> = {
+    chunks: [
+      {
+        id: "chunk-1",
+        text: "Detached text",
+        role: "body",
+        pageNumbers: [1],
+        blockIds: ["missing-block"],
+        runIds: ["run-missing"],
+        citations: [
+          {
+            id: "citation-1",
+            pageNumber: 1,
+            blockId: "missing-block",
+            runIds: ["run-missing"],
+            text: "Detached text",
+          },
+        ],
+      },
+    ],
+    tables: [],
+  };
+
+  assert.throws(
+    () => assertKnowledgeCitationsResolvable(layout, invalidKnowledge),
+    /Unresolvable knowledge citation citation-1: missing layout block missing-block/u,
+  );
 });
 
 test("knowledge does not project compact row-run tables without consistent numeric body rows", () => {
@@ -77,6 +121,7 @@ test("knowledge does not project compact row-run tables without consistent numer
   assert.equal(knowledge.tables.length, 0);
   assert.deepEqual(knowledge.knownLimits, [
     "knowledge-chunk-heuristic",
+    "knowledge-markdown-heuristic",
     "table-projection-not-implemented",
   ]);
 });
