@@ -226,9 +226,9 @@ test("knowledge markdown escapes table, heading, and list text without changing 
 
   const knowledge = buildKnowledgeDocument(layout);
 
-  assert.match(knowledge.markdown, /^## Scope \\| Plan/u);
-  assert.match(knowledge.markdown, /\| Alpha \| uses A \\| B \| Active \|/u);
-  assert.match(knowledge.markdown, /- Check A \\| B/u);
+  assert.ok(knowledge.markdown.includes("## Scope \\| Plan"));
+  assert.ok(knowledge.markdown.includes("| Alpha | uses A \\| B | Active |"));
+  assert.ok(knowledge.markdown.includes("- Check A \\| B"));
   assert.ok(knowledge.markdown.indexOf("## Scope") < knowledge.markdown.indexOf("| Item | Notes | Status |"));
   assert.ok(knowledge.markdown.indexOf("| Item | Notes | Status |") < knowledge.markdown.indexOf("- Check A"));
 });
