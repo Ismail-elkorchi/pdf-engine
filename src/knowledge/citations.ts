@@ -8,7 +8,7 @@ import type {
 
 export function assertKnowledgeCitationsResolvable(
   layout: PdfLayoutDocument,
-  knowledge: Pick<PdfKnowledgeDocument, "chunks" | "tables">,
+  knowledge: Pick<PdfKnowledgeDocument, "chunks" | "tables"> & Partial<Pick<PdfKnowledgeDocument, "forms">>,
 ): void {
   const blocksById = new Map(
     layout.pages.flatMap((page) => page.blocks).map((block) => [block.id, block]),
@@ -21,6 +21,14 @@ export function assertKnowledgeCitationsResolvable(
     for (const cell of table.cells) {
       for (const citation of cell.citations) {
         validateKnowledgeCitation(blocksById, citation, cell.text);
+      }
+    }
+  }
+
+  for (const form of knowledge.forms ?? []) {
+    for (const field of form.fields) {
+      for (const citation of field.citations) {
+        validateKnowledgeCitation(blocksById, citation);
       }
     }
   }

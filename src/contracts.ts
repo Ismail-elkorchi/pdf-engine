@@ -1500,6 +1500,60 @@ export interface PdfKnowledgeTable {
 }
 
 /**
+ * Heuristic used to project one knowledge form.
+ */
+export type PdfKnowledgeFormHeuristic = "field-value-form" | "field-label-form";
+
+/**
+ * Whether a projected form field has direct value evidence.
+ */
+export type PdfKnowledgeFormFieldValueState = "value-present" | "not-observed";
+
+/**
+ * One field emitted in a projected knowledge form.
+ */
+export interface PdfKnowledgeFormField {
+  /** Stable field identifier within the knowledge result. */
+  readonly id: string;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Field label recovered from direct layout or observation evidence. */
+  readonly name: string;
+  /** Field value when direct evidence can isolate it. */
+  readonly value?: string;
+  /** Whether a direct field value was observed. */
+  readonly valueState: PdfKnowledgeFormFieldValueState;
+  /** Source layout block identifiers that fed this field. */
+  readonly blockIds: readonly string[];
+  /** Source observation run identifiers that fed this field. */
+  readonly runIds: readonly string[];
+  /** Confidence attached to the current field projection. */
+  readonly confidence: number;
+  /** Provenance records for the field label and value evidence. */
+  readonly citations: readonly PdfKnowledgeCitation[];
+}
+
+/**
+ * One projected knowledge form.
+ */
+export interface PdfKnowledgeForm {
+  /** Stable form identifier within the knowledge result. */
+  readonly id: string;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Form title when direct evidence can isolate one. */
+  readonly title?: string;
+  /** Heuristic used to project the current form. */
+  readonly heuristic?: PdfKnowledgeFormHeuristic;
+  /** Source layout block identifiers that fed this form. */
+  readonly blockIds: readonly string[];
+  /** Confidence attached to the current form projection. */
+  readonly confidence: number;
+  /** Projected fields in source order. */
+  readonly fields: readonly PdfKnowledgeFormField[];
+}
+
+/**
  * Current knowledge-stage result for a document.
  */
 export interface PdfKnowledgeDocument {
@@ -1511,6 +1565,8 @@ export interface PdfKnowledgeDocument {
   readonly chunks: readonly PdfKnowledgeChunk[];
   /** Table projections when the current evidence is sufficient. */
   readonly tables: readonly PdfKnowledgeTable[];
+  /** Form projections when the current evidence is sufficient. */
+  readonly forms: readonly PdfKnowledgeForm[];
   /** Markdown projection in knowledge-chunk order. */
   readonly markdown: string;
   /** Flattened text in knowledge-chunk order. */
