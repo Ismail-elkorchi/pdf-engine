@@ -1,89 +1,95 @@
+import {
+  buildKnowledgeProjectionTree,
+  tableToProjectionRows,
+} from "./projection-tree.ts";
+
 import type {
   PdfKnowledgeChunk,
   PdfKnowledgeTable,
 } from "../contracts.ts";
+import type {
+  KnowledgeProjectionNode,
+  KnowledgeProjectionTableNode,
+} from "./projection-tree.ts";
+import type {
+  KnowledgeProjectionItem,
+} from "./projection-types.ts";
+
+export function buildKnowledgeMarkdownFromProjectionItems(
+  items: readonly KnowledgeProjectionItem[],
+): string {
+  return serializeKnowledgeProjectionTree(buildKnowledgeProjectionTree(items));
+}
 
 export function buildKnowledgeMarkdown(
   chunks: readonly PdfKnowledgeChunk[],
   tables: readonly PdfKnowledgeTable[],
 ): string {
-  const chunkTexts = chunks
-    .map(serializeChunkMarkdown)
-    .filter((text) => text.length > 0);
-  const chunkSourceTexts = new Set(chunks.map((chunk) => normalizeMarkdownText(chunk.text)));
-  const tableTexts = tables
-    .map(serializeKnowledgeTable)
-    .filter((text) => text.length > 0 && !chunkSourceTexts.has(normalizeMarkdownText(text)))
-    .map((text) => serializeTableLikeMarkdown(text) ?? text);
-  return [...chunkTexts, ...tableTexts]
-    .join("\n\n");
+  const chunkTexts = new Set(chunks.map((chunk) => normalizeMultilineText(chunk.text)));
+  const tableItems: KnowledgeProjectionItem[] = tables
+    .filter((table) => !chunkTexts.has(normalizeMultilineText(serializeKnowledgeTable(table))))
+    .map((table) => ({ kind: "table", table }));
+  return buildKnowledgeMarkdownFromProjectionItems([
+    ...chunks.map((chunk) => ({ kind: "chunk" as const, chunk })),
+    ...tableItems,
+  ]);
 }
 
 export function serializeKnowledgeTable(table: PdfKnowledgeTable): string {
-  const rowIndexes = [...dedupeNumbers(table.cells.map((cell) => cell.rowIndex))].sort(
-    (left: number, right: number) => left - right,
-  );
-  const serializedRows = rowIndexes.map((rowIndex: number) => {
-    const rowCells = table.cells
-      .filter((cell) => cell.rowIndex === rowIndex)
-      .sort((left, right) => left.columnIndex - right.columnIndex)
-      .map((cell) => normalizeCellText(cell.text))
-      .filter((text) => text.length > 0);
-    return rowCells.join(" | ");
-  });
-
-  return serializedRows.filter((rowText: string) => rowText.length > 0).join("\n");
+  return tableToProjectionRows(table)
+    .map((row) => row.cells.map((cell) => normalizeCellText(cell.text)).filter((text) => text.length > 0).join(" | "))
+    .filter((rowText) => rowText.length > 0)
+    .join("\n");
 }
 
-function serializeChunkMarkdown(chunk: PdfKnowledgeChunk): string {
-  const text = normalizeMarkdownText(chunk.text);
-  if (text.length === 0) {
+function serializeKnowledgeProjectionTree(nodes: readonly KnowledgeProjectionNode[]): string {
+  return nodes
+    .map(serializeKnowledgeProjectionNode)
+    .filter((text) => text.length > 0)
+    .join("\n\n");
+}
+
+function serializeKnowledgeProjectionNode(node: KnowledgeProjectionNode): string {
+  if (node.kind === "heading") {
+    return `## ${escapeMarkdownInline(node.text)}`;
+  }
+
+  if (node.kind === "list") {
+    return node.items.map((item) => `- ${escapeMarkdownInline(item)}`).join("\n");
+  }
+
+  if (node.kind === "table") {
+    return serializeKnowledgeTableNode(node);
+  }
+
+  return normalizeMultilineText(node.text);
+}
+
+function serializeKnowledgeTableNode(node: KnowledgeProjectionTableNode): string {
+  const rows = node.rows
+    .map((row) => row.cells.map((cell) => normalizeCellText(cell.text)))
+    .filter((cells) => cells.some((cell) => cell.length > 0));
+  if (rows.length === 0) {
     return "";
   }
 
-  const tableMarkdown = serializeTableLikeMarkdown(text);
-  if (tableMarkdown) {
-    return tableMarkdown;
-  }
-
-  const lines = text.split(/\n+/u).map((line) => line.trim()).filter((line) => line.length > 0);
-  if (chunk.role === "heading") {
-    const [heading = "", ...bodyLines] = lines;
-    return [`## ${heading}`, bodyLines.join("\n")].filter((part) => part.length > 0).join("\n\n");
-  }
-  if (chunk.role === "list") {
-    return lines.map((line) => `- ${line.replace(/^[-*]\s*/u, "")}`).join("\n");
-  }
-
-  return text;
-}
-
-function serializeTableLikeMarkdown(text: string): string | undefined {
-  const rows = text
-    .split(/\n+/u)
-    .map((line) => line.split("|").map((cell) => cell.trim()).filter((cell) => cell.length > 0))
-    .filter((cells) => cells.length > 0);
-  if (rows.length < 2) {
-    return undefined;
-  }
-
   const columnCount = rows[0]?.length ?? 0;
-  if (columnCount < 2 || rows.some((row) => row.length !== columnCount)) {
-    return undefined;
+  if (rows.length < 2 || columnCount < 2 || rows.some((row) => row.length !== columnCount)) {
+    return rows.map((row) => row.filter((cell) => cell.length > 0).map(escapeMarkdownInline).join(" | ")).join("\n");
   }
 
   const [header = [], ...body] = rows;
   return [
-    `| ${header.join(" | ")} |`,
+    `| ${header.map(escapeMarkdownInline).join(" | ")} |`,
     `| ${Array.from({ length: columnCount }, () => "---").join(" | ")} |`,
-    ...body.map((row) => `| ${row.join(" | ")} |`),
+    ...body.map((row) => `| ${row.map(escapeMarkdownInline).join(" | ")} |`),
   ].join("\n");
 }
 
-function normalizeMarkdownText(text: string): string {
+function normalizeMultilineText(text: string): string {
   return text
     .split(/\r?\n/u)
-    .map((line) => line.replaceAll(/\s+/g, " ").trim())
+    .map((line) => normalizeCellText(line))
     .filter((line) => line.length > 0)
     .join("\n");
 }
@@ -92,6 +98,8 @@ function normalizeCellText(text: string): string {
   return text.replaceAll(/\s+/gu, " ").trim();
 }
 
-function dedupeNumbers(values: readonly number[]): readonly number[] {
-  return [...new Set(values)].sort((left, right) => left - right);
+function escapeMarkdownInline(text: string): string {
+  return normalizeCellText(text)
+    .replaceAll("\\", "\\\\")
+    .replaceAll("|", "\\|");
 }
