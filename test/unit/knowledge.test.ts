@@ -65,6 +65,25 @@ test("knowledge projects compact row-run tables with citation-backed cells", () 
   assert.deepEqual(table.cells.at(5)?.citations.map((citation) => citation.runIds), [["run-3"]]);
   assert.match(knowledge.markdown, /^## Sample Measurements/u);
   assert.match(knowledge.markdown, /\| Item \| Nominal Width \| Measured Width \| Result \|/u);
+  const measuredWidthCitation = table.cells.at(5)?.citations[0];
+  assert.equal(measuredWidthCitation?.text, "10.0 mm");
+  assert.equal(measuredWidthCitation?.sourceSpan?.text, "10.0 mm");
+  assert.equal(measuredWidthCitation?.sourceSpan?.runSpans[0]?.runId, "run-3");
+  assert.equal(
+    measuredWidthCitation?.sourceSpan === undefined
+      ? undefined
+      : createCompactRowRunLayout([
+          "Sample Measurements",
+          "Item Nominal Width Measured Width Result",
+          "Alpha 10.0 mm 10.4 mm pass",
+          "Beta 12.0 mm 11.1 mm review",
+          "Gamma 8.0 mm 8.0 mm pass",
+        ]).pages[0]?.blocks[1]?.text.slice(
+          measuredWidthCitation.sourceSpan.blockRange.start,
+          measuredWidthCitation.sourceSpan.blockRange.end,
+        ),
+    "10.0 mm",
+  );
 });
 
 test("knowledge projection identifiers are deterministic and source-derived", () => {
@@ -163,6 +182,158 @@ test("knowledge hard-fails unresolvable citation anchors", () => {
   assert.throws(
     () => assertKnowledgeCitationsResolvable(layout, invalidKnowledge),
     /Unresolvable knowledge citation citation-1: missing layout block missing-block/u,
+  );
+});
+
+test("knowledge hard-fails stale citation text", () => {
+  const layout = createCompactRowRunLayout([
+    "Sample Measurements",
+    "Item Nominal Width Measured Width Result",
+    "Alpha 10.0 mm 10.4 mm pass",
+    "Beta 12.0 mm 11.1 mm review",
+    "Gamma 8.0 mm 8.0 mm pass",
+  ]);
+  const invalidKnowledge: Pick<PdfKnowledgeDocument, "chunks" | "tables"> = {
+    chunks: [
+      {
+        id: "chunk-stale",
+        text: "Detached text",
+        role: "body",
+        pageNumbers: [1],
+        blockIds: ["block-1"],
+        runIds: ["run-1"],
+        citations: [
+          {
+            id: "citation-stale",
+            pageNumber: 1,
+            blockId: "block-1",
+            runIds: ["run-1"],
+            text: "Detached text",
+          },
+        ],
+      },
+    ],
+    tables: [],
+  };
+
+  assert.throws(
+    () => assertKnowledgeCitationsResolvable(layout, invalidKnowledge),
+    /Unresolvable knowledge citation citation-stale: citation text is not present in block block-1/u,
+  );
+});
+
+test("knowledge hard-fails stale source spans and table-cell overreach", () => {
+  const layout = createCompactRowRunLayout([
+    "Sample Measurements",
+    "Item Nominal Width Measured Width Result",
+    "Alpha 10.0 mm 10.4 mm pass",
+    "Beta 12.0 mm 11.1 mm review",
+    "Gamma 8.0 mm 8.0 mm pass",
+  ]);
+  const staleSourceSpan: Pick<PdfKnowledgeDocument, "chunks" | "tables"> = {
+    chunks: [
+      {
+        id: "chunk-source-span",
+        text: "Sample Measurements",
+        role: "heading",
+        pageNumbers: [1],
+        blockIds: ["block-1"],
+        runIds: ["run-1"],
+        citations: [
+          {
+            id: "citation-source-span",
+            pageNumber: 1,
+            blockId: "block-1",
+            runIds: ["run-1"],
+            text: "Sample Measurements",
+            sourceSpan: {
+              text: "Wrong text",
+              blockRange: { start: 0, end: "Sample Measurements".length },
+              runSpans: [
+                {
+                  runId: "run-1",
+                  range: { start: 0, end: "Sample Measurements".length },
+                  text: "Sample Measurements",
+                },
+              ],
+            },
+          },
+        ],
+      },
+    ],
+    tables: [],
+  };
+
+  assert.throws(
+    () => assertKnowledgeCitationsResolvable(layout, staleSourceSpan),
+    /Unresolvable knowledge citation citation-source-span: source span text is stale for block block-1/u,
+  );
+
+  const splitHeaderCell: Pick<PdfKnowledgeDocument, "chunks" | "tables"> = {
+    chunks: [],
+    tables: [
+      {
+        id: "table-split-header",
+        pageNumber: 1,
+        headers: ["Serial No."],
+        heuristic: "contract-award-sequence",
+        blockIds: ["block-1"],
+        confidence: 0.9,
+        cells: [
+          {
+            rowIndex: 0,
+            columnIndex: 0,
+            text: "Sample Measurements Item Nominal Width Measured Width Result",
+            citations: [
+              {
+                id: "citation-split-header",
+                pageNumber: 1,
+                blockId: "block-1",
+                runIds: ["run-1"],
+                text: "Sample Measurements",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.doesNotThrow(() => assertKnowledgeCitationsResolvable(layout, splitHeaderCell));
+
+  const overbroadTableCell: Pick<PdfKnowledgeDocument, "chunks" | "tables"> = {
+    chunks: [],
+    tables: [
+      {
+        id: "table-overbroad",
+        pageNumber: 1,
+        headers: ["Item"],
+        heuristic: "row-sequence",
+        blockIds: ["block-2"],
+        confidence: 0.9,
+        cells: [
+          {
+            rowIndex: 0,
+            columnIndex: 0,
+            text: "Alpha",
+            citations: [
+              {
+                id: "citation-overbroad",
+                pageNumber: 1,
+                blockId: "block-2",
+                runIds: ["run-3"],
+                text: "Alpha 10.0 mm 10.4 mm pass",
+              },
+            ],
+          },
+        ],
+      },
+    ],
+  };
+
+  assert.throws(
+    () => assertKnowledgeCitationsResolvable(layout, overbroadTableCell),
+    /Unresolvable knowledge citation citation-overbroad: table cell citation overreaches cell text/u,
   );
 });
 

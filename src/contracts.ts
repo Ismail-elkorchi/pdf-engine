@@ -1388,6 +1388,46 @@ export type PdfKnowledgeTableHeuristic =
 /**
  * One provenance record attached to a knowledge chunk or table cell.
  */
+export interface PdfKnowledgeTextRange {
+  /** Zero-based inclusive start offset in the source text. */
+  readonly start: number;
+  /** Zero-based exclusive end offset in the source text. */
+  readonly end: number;
+}
+
+/**
+ * Source span recovered from one observed text run when the current evidence can isolate it.
+ */
+export interface PdfKnowledgeRunSpan {
+  /** Source observation run identifier. */
+  readonly runId: string;
+  /** Text range covered inside the source layout block. */
+  readonly range: PdfKnowledgeTextRange;
+  /** Text covered by this run span. */
+  readonly text: string;
+  /** Approximate source span bounds when known. */
+  readonly bbox?: PdfBoundingBox;
+}
+
+/**
+ * Exact source slice attached to one knowledge citation when the current evidence can isolate it.
+ */
+export interface PdfKnowledgeSourceSpan {
+  /** Text slice covered by the citation. */
+  readonly text: string;
+  /** Text range covered inside the source layout block. */
+  readonly blockRange: PdfKnowledgeTextRange;
+  /** Source run spans that contributed to this citation. */
+  readonly runSpans: readonly PdfKnowledgeRunSpan[];
+  /** Approximate source span bounds when known. */
+  readonly bbox?: PdfBoundingBox;
+  /** Page object reference when known. */
+  readonly pageRef?: PdfObjectRef;
+}
+
+/**
+ * One provenance record attached to a knowledge chunk or table cell.
+ */
 export interface PdfKnowledgeCitation {
   /** Stable citation identifier within the knowledge result. */
   readonly id: string;
@@ -1399,6 +1439,8 @@ export interface PdfKnowledgeCitation {
   readonly runIds: readonly string[];
   /** Source block text excerpt. */
   readonly text: string;
+  /** Exact source slice when the current projection can isolate one. */
+  readonly sourceSpan?: PdfKnowledgeSourceSpan;
   /** Page object reference when known. */
   readonly pageRef?: PdfObjectRef;
 }
