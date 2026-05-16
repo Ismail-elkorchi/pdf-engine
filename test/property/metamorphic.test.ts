@@ -259,6 +259,49 @@ test("unused resource ordering does not change render resource payloads or rende
   assert.equal(baseResult.render.value?.renderHash.hex, reorderedResult.render.value?.renderHash.hex);
 });
 
+test("unused resource ordering does not change knowledge projection output", async () => {
+  const engine = createPdfEngine();
+  const baseBytes = buildPdfWithRenderResourcePayloads({
+    includeUnusedResources: true,
+    reorderResourceEntries: false,
+  });
+  const reorderedBytes = buildPdfWithRenderResourcePayloads({
+    includeUnusedResources: true,
+    reorderResourceEntries: true,
+  });
+
+  const baseResult = await engine.run({
+    source: {
+      bytes: baseBytes,
+      fileName: "knowledge-resource-order-base.pdf",
+    },
+  });
+  const reorderedResult = await engine.run({
+    source: {
+      bytes: reorderedBytes,
+      fileName: "knowledge-resource-order-reordered.pdf",
+    },
+  });
+
+  assert.equal(baseResult.knowledge.value?.markdown, reorderedResult.knowledge.value?.markdown);
+  assert.deepEqual(
+    baseResult.knowledge.value?.chunks.map((chunk) => ({
+      text: chunk.text,
+      role: chunk.role,
+      pageNumbers: chunk.pageNumbers,
+      blockIds: chunk.blockIds,
+      runIds: chunk.runIds,
+    })),
+    reorderedResult.knowledge.value?.chunks.map((chunk) => ({
+      text: chunk.text,
+      role: chunk.role,
+      pageNumbers: chunk.pageNumbers,
+      blockIds: chunk.blockIds,
+      runIds: chunk.runIds,
+    })),
+  );
+});
+
 test("adding unrelated prose does not change the interpreted table-region evidence", async () => {
   const engine = createPdfEngine();
   const baseBytes = buildPdfWithPageContents([buildMeasurementTableContent()]);

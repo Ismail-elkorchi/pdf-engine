@@ -31,3 +31,4 @@ All notable changes are documented in this file.
 - Knowledge citations now expose source-span evidence when a chunk or table cell can be tied to an exact layout-block slice, and citation validation now rejects stale text, stale spans, and table-cell citations that overreach the cell text.
 - Knowledge projected table chunks now stay near their source reading position instead of being appended after later page text, while explicit field-label projections avoid pulling later prose into table cells.
 - Knowledge documents now expose typed form projections when direct field-value or field-label evidence is sufficient, while still abstaining when form evidence is too weak.
+- Knowledge Markdown now serializes from typed projection nodes, keeps projected tables at their source position, and escapes Markdown table, heading, and list separators deterministically.

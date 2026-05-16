@@ -5,10 +5,12 @@ import type {
   PdfLayoutBlock,
   PdfLayoutDocument,
   PdfKnowledgeDocument,
+  PdfKnowledgeTable,
   PdfObservedDocument,
   PdfObservedTextRun,
 } from "../../src/contracts.ts";
 import { assertKnowledgeCitationsResolvable, buildKnowledgeDocument } from "../../src/knowledge.ts";
+import { buildKnowledgeMarkdownFromProjectionItems } from "../../src/knowledge/markdown.ts";
 
 test("knowledge projects compact row-run tables with citation-backed cells", () => {
   const layout = createCompactRowRunLayout([
@@ -167,6 +169,68 @@ test("knowledge interleaves projected table chunks at their source reading posit
   assert.ok(!knowledge.chunks[tableChunkIndex]?.text.includes("Closing paragraph"));
   assert.ok(tableChunkIndex < closingChunkIndex);
   assert.ok(knowledge.extractedText.indexOf("Registration Form\nName:") < knowledge.extractedText.indexOf("Closing paragraph"));
+  assert.ok(knowledge.markdown.indexOf("Registration Form\nName:") < knowledge.markdown.indexOf("Closing paragraph"));
+});
+
+test("knowledge markdown serializes typed table nodes instead of table chunk text", () => {
+  const table: PdfKnowledgeTable = {
+    id: "table-typed-node",
+    pageNumber: 1,
+    headers: ["Field", "Value"],
+    heuristic: "field-value-form",
+    blockIds: ["block-field"],
+    confidence: 0.82,
+    cells: [
+      { rowIndex: 0, columnIndex: 0, text: "Field", citations: [] },
+      { rowIndex: 0, columnIndex: 1, text: "Value", citations: [] },
+      { rowIndex: 1, columnIndex: 0, text: "Requester", citations: [] },
+      { rowIndex: 1, columnIndex: 1, text: "Ada Lovelace", citations: [] },
+    ],
+  };
+
+  const markdown = buildKnowledgeMarkdownFromProjectionItems([
+    {
+      kind: "table",
+      table,
+      chunk: {
+        id: "chunk-corrupted-table",
+        text: "corrupted serialized table chunk",
+        role: "mixed",
+        pageNumbers: [1],
+        blockIds: ["block-field"],
+        runIds: ["run-field"],
+        citations: [],
+      },
+    },
+  ]);
+
+  assert.doesNotMatch(markdown, /corrupted serialized table chunk/u);
+  assert.match(markdown, /\| Field \| Value \|/u);
+  assert.match(markdown, /\| Requester \| Ada Lovelace \|/u);
+});
+
+test("knowledge markdown escapes table, heading, and list text without changing projection order", () => {
+  const layout = createSinglePageLayout([
+    createLayoutBlock({ id: "heading-escape", readingOrder: 0, text: "Scope | Plan", role: "heading", x: 72, y: 760, fontSize: 18 }),
+    createLayoutBlock({ id: "grid-h1", readingOrder: 1, text: "Item", x: 72, y: 720 }),
+    createLayoutBlock({ id: "grid-h2", readingOrder: 2, text: "Notes", x: 180, y: 720 }),
+    createLayoutBlock({ id: "grid-h3", readingOrder: 3, text: "Status", x: 300, y: 720 }),
+    createLayoutBlock({ id: "grid-r1c1", readingOrder: 4, text: "Alpha", x: 72, y: 700 }),
+    createLayoutBlock({ id: "grid-r1c2", readingOrder: 5, text: "uses A | B", x: 180, y: 700 }),
+    createLayoutBlock({ id: "grid-r1c3", readingOrder: 6, text: "Active", x: 300, y: 700 }),
+    createLayoutBlock({ id: "grid-r2c1", readingOrder: 7, text: "Beta", x: 72, y: 680 }),
+    createLayoutBlock({ id: "grid-r2c2", readingOrder: 8, text: "uses C", x: 180, y: 680 }),
+    createLayoutBlock({ id: "grid-r2c3", readingOrder: 9, text: "Pending", x: 300, y: 680 }),
+    createLayoutBlock({ id: "list-after-table", readingOrder: 10, text: "* Check A | B", role: "list", x: 72, y: 640 }),
+  ]);
+
+  const knowledge = buildKnowledgeDocument(layout);
+
+  assert.ok(knowledge.markdown.includes("## Scope \\| Plan"));
+  assert.ok(knowledge.markdown.includes("| Alpha | uses A \\| B | Active |"));
+  assert.ok(knowledge.markdown.includes("- Check A \\| B"));
+  assert.ok(knowledge.markdown.indexOf("## Scope") < knowledge.markdown.indexOf("| Item | Notes | Status |"));
+  assert.ok(knowledge.markdown.indexOf("| Item | Notes | Status |") < knowledge.markdown.indexOf("- Check A"));
 });
 
 test("knowledge projects anchored layout grids in row-major source order", () => {

@@ -12,6 +12,10 @@ import type {
   PdfLayoutBlock,
   PdfLayoutDocument,
 } from "../contracts.ts";
+import type {
+  KnowledgeChunkBuildResult,
+  KnowledgeProjectionItem,
+} from "./projection-types.ts";
 
 const DEFAULT_CHUNK_TARGET = 420;
 const FIELD_LABEL_MIN_ROWS = 4;
@@ -21,15 +25,26 @@ interface InlineKnowledgeTablePlan {
   readonly table: PdfKnowledgeTable;
   readonly pageNumber: number;
   readonly startReadingOrder: number;
+  readonly inlineChunk: boolean;
 }
 
 export function buildKnowledgeChunks(
   layout: PdfLayoutDocument,
   tables: readonly PdfKnowledgeTable[],
 ): readonly PdfKnowledgeChunk[] {
+  return buildKnowledgeChunksWithProjectionItems(layout, tables).chunks;
+}
+
+export function buildKnowledgeChunksWithProjectionItems(
+  layout: PdfLayoutDocument,
+  tables: readonly PdfKnowledgeTable[],
+): KnowledgeChunkBuildResult {
   const chunks: PdfKnowledgeChunk[] = [];
+  const projectionItems: KnowledgeProjectionItem[] = [];
+  const tableProjectionBlockIds = new Set(tables.flatMap((table) => table.blockIds));
   let currentBlocks: PdfLayoutBlock[] = [];
-  const tablePlans = buildInlineKnowledgeTablePlans(layout, tables);
+  let currentProjectionBlocks: PdfLayoutBlock[] = [];
+  const tablePlans = buildKnowledgeTablePlans(layout, tables);
   const pagePlans = new Map<number, readonly InlineKnowledgeTablePlan[]>(
     dedupeNumbers(tablePlans.map((plan) => plan.pageNumber)).map((pageNumber) => [
       pageNumber,
@@ -40,12 +55,40 @@ export function buildKnowledgeChunks(
   );
 
   function flushBlocks(): void {
-    if (currentBlocks.length === 0) {
+    if (currentBlocks.length === 0 && currentProjectionBlocks.length === 0) {
       return;
     }
 
-    chunks.push(createChunk(currentBlocks));
+    const publicChunk = currentBlocks.length === 0 ? undefined : createChunk(currentBlocks);
+    if (publicChunk !== undefined) {
+      pushChunk(publicChunk, { includeProjectionItem: false });
+    }
+    if (currentProjectionBlocks.length > 0) {
+      projectionItems.push({
+        kind: "chunk",
+        chunk: publicChunk !== undefined && sameBlockSequence(currentBlocks, currentProjectionBlocks)
+          ? publicChunk
+          : createChunk(currentProjectionBlocks),
+      });
+    }
     currentBlocks = [];
+    currentProjectionBlocks = [];
+  }
+
+  function pushChunk(chunk: PdfKnowledgeChunk, options: { readonly includeProjectionItem?: boolean } = {}): void {
+    chunks.push(chunk);
+    if (options.includeProjectionItem !== false) {
+      projectionItems.push({ kind: "chunk", chunk });
+    }
+  }
+
+  function pushTableChunk(table: PdfKnowledgeTable): void {
+    const chunk = createProjectedTableChunk(table);
+    pushChunk(chunk, { includeProjectionItem: false });
+  }
+
+  function pushTableProjection(table: PdfKnowledgeTable): void {
+    projectionItems.push({ kind: "table", table });
   }
 
   for (const page of layout.pages) {
@@ -58,7 +101,10 @@ export function buildKnowledgeChunks(
           return;
         }
         flushBlocks();
-        chunks.push(createProjectedTableChunk(plan.table));
+        pushTableProjection(plan.table);
+        if (plan.inlineChunk) {
+          pushTableChunk(plan.table);
+        }
       }
     }
 
@@ -75,20 +121,26 @@ export function buildKnowledgeChunks(
       }
 
       currentBlocks.push(block);
+      if (shouldProjectBlockAsText(block, tableProjectionBlockIds)) {
+        currentProjectionBlocks.push(block);
+      }
     }
     flushBlocks();
 
     for (const plan of pendingPlans) {
-      chunks.push(createProjectedTableChunk(plan.table));
+      pushTableProjection(plan.table);
+      if (plan.inlineChunk) {
+        pushTableChunk(plan.table);
+      }
     }
   }
 
   flushBlocks();
 
-  return chunks;
+  return { chunks, projectionItems };
 }
 
-function buildInlineKnowledgeTablePlans(
+function buildKnowledgeTablePlans(
   layout: PdfLayoutDocument,
   tables: readonly PdfKnowledgeTable[],
 ): readonly InlineKnowledgeTablePlan[] {
@@ -96,27 +148,26 @@ function buildInlineKnowledgeTablePlans(
   const plans: InlineKnowledgeTablePlan[] = [];
 
   for (const table of tables) {
-    if (!shouldInlineKnowledgeTableChunk(table)) {
-      continue;
-    }
-
     const page = pagesByNumber.get(table.pageNumber);
     if (!page) {
       continue;
     }
 
     const tableBlockIds = new Set(table.blockIds);
-    const startBlock = page.blocks
+    const tableBlocks = page.blocks
       .filter((block) => tableBlockIds.has(block.id))
-      .sort((left, right) => left.readingOrder - right.readingOrder)[0];
+      .sort((left, right) => left.readingOrder - right.readingOrder);
+    const startBlock = selectTableProjectionAnchorBlock(tableBlocks);
     if (!startBlock) {
       continue;
     }
 
+    const inlineChunk = shouldInlineKnowledgeTableChunk(table);
     plans.push({
       table,
       pageNumber: table.pageNumber,
       startReadingOrder: startBlock.readingOrder,
+      inlineChunk,
     });
   }
 
@@ -126,6 +177,34 @@ function buildInlineKnowledgeTablePlans(
     }
     return left.startReadingOrder - right.startReadingOrder;
   });
+}
+
+function selectTableProjectionAnchorBlock(blocks: readonly PdfLayoutBlock[]): PdfLayoutBlock | undefined {
+  const [firstBlock, secondBlock] = blocks;
+  if (firstBlock?.role === "heading" && secondBlock !== undefined) {
+    return secondBlock;
+  }
+
+  return firstBlock;
+}
+
+function shouldProjectBlockAsText(
+  block: PdfLayoutBlock,
+  tableProjectionBlockIds: ReadonlySet<string>,
+): boolean {
+  if (!tableProjectionBlockIds.has(block.id)) {
+    return true;
+  }
+
+  return block.role === "heading";
+}
+
+function sameBlockSequence(
+  leftBlocks: readonly PdfLayoutBlock[],
+  rightBlocks: readonly PdfLayoutBlock[],
+): boolean {
+  return leftBlocks.length === rightBlocks.length &&
+    leftBlocks.every((block, index) => rightBlocks[index]?.id === block.id);
 }
 
 function shouldInlineKnowledgeTableChunk(table: PdfKnowledgeTable): boolean {
@@ -178,6 +257,12 @@ function shouldStartNewChunk(
     return true;
   }
   if (currentBlocks.some((block) => block.role === "heading")) {
+    return true;
+  }
+  if (incomingBlock.role === "list") {
+    return true;
+  }
+  if (currentBlocks.some((block) => block.role === "list")) {
     return true;
   }
 
