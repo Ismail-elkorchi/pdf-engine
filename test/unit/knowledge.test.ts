@@ -372,6 +372,23 @@ test("knowledge projects inline field-value rows without field-label duplication
       [3, 1, "High"],
     ],
   );
+  assert.equal(knowledge.forms.length, 1);
+  const [form] = knowledge.forms;
+  assert.ok(form);
+  assert.equal(form.heuristic, "field-value-form");
+  assert.equal(form.fields.length, 3);
+  assert.deepEqual(
+    form.fields.map((field) => [field.name, field.value, field.valueState]),
+    [
+      ["Requester", "Ada Lovelace", "value-present"],
+      ["Team", "Research", "value-present"],
+      ["Priority", "High", "value-present"],
+    ],
+  );
+  assert.ok(form.fields.every((field) => field.citations.length > 0));
+  assert.deepEqual(form.fields[0]?.blockIds, ["fv-name"]);
+  assert.equal(form.fields[0]?.citations[0]?.sourceSpan?.text, "Requester");
+  assert.equal(form.fields[0]?.citations[1]?.sourceSpan?.text, "Ada Lovelace");
 });
 
 test("knowledge projects field-label forms only when labels are spatially coherent", () => {
@@ -387,6 +404,18 @@ test("knowledge projects field-label forms only when labels are spatially cohere
     knowledge.tables[0]?.cells.filter((cell) => cell.rowIndex > 0).map((cell) => cell.text),
     ["Name:", "Department:", "Contact:", "Reviewer:"],
   );
+  assert.equal(knowledge.forms.length, 1);
+  assert.deepEqual(
+    knowledge.forms[0]?.fields.map((field) => [field.name, field.value, field.valueState]),
+    [
+      ["Name", undefined, "not-observed"],
+      ["Department", undefined, "not-observed"],
+      ["Contact", undefined, "not-observed"],
+      ["Reviewer", undefined, "not-observed"],
+    ],
+  );
+  assert.equal(knowledge.forms[0]?.title, "Registration Form");
+  assert.deepEqual(knowledge.forms[0]?.fields[0]?.blockIds, ["field-block-2"]);
 });
 
 test("knowledge projects contract award sequences with separated contractor and amount evidence", () => {
@@ -700,6 +729,7 @@ test("knowledge does not project scattered field labels as a form table", () => 
   const knowledge = buildKnowledgeDocument(layout, observation);
 
   assert.equal(knowledge.tables.length, 0);
+  assert.equal(knowledge.forms.length, 0);
 });
 
 test("knowledge does not project URL-like prose as field-value form data", () => {
@@ -713,6 +743,7 @@ test("knowledge does not project URL-like prose as field-value form data", () =>
   const knowledge = buildKnowledgeDocument(layout);
 
   assert.equal(knowledge.tables.length, 0);
+  assert.equal(knowledge.forms.length, 0);
   assert.match(knowledge.extractedText, /source material/u);
 });
 

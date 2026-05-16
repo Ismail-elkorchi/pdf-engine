@@ -120,6 +120,7 @@ function createPipelineResultFixture(): PdfPipelineResult {
         ],
       },
     ],
+    forms: [],
     tables: [
       {
         id: "table-1",
