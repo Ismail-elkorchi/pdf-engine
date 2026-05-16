@@ -27,3 +27,4 @@ All notable changes are documented in this file.
 - Knowledge table projection now recovers compact row-run measurement tables with citation-backed cells when header and body rows are consistent.
 - Knowledge table projection now rejects compact row-run candidates whose numeric evidence is only incidental prose.
 - Breaking knowledge contract update: knowledge documents now expose deterministic Markdown in chunk order, keep projected table Markdown tied to citation-backed table cells, and hard-fail unresolvable knowledge citation anchors during projection.
+- Knowledge chunk, table, and citation identifiers now derive from source provenance instead of creation order, so unchanged projections keep stable identifiers across unrelated later content.

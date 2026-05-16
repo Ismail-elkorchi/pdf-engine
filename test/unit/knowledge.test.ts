@@ -67,6 +67,68 @@ test("knowledge projects compact row-run tables with citation-backed cells", () 
   assert.match(knowledge.markdown, /\| Item \| Nominal Width \| Measured Width \| Result \|/u);
 });
 
+test("knowledge projection identifiers are deterministic and source-derived", () => {
+  const texts = [
+    "Sample Measurements",
+    "Item Nominal Width Measured Width Result",
+    "Alpha 10.0 mm 10.4 mm pass",
+    "Beta 12.0 mm 11.1 mm review",
+    "Gamma 8.0 mm 8.0 mm pass",
+  ];
+  const layout = createCompactRowRunLayout(texts);
+  const observation = createCompactRowRunObservation(texts);
+
+  const firstKnowledge = buildKnowledgeDocument(layout, observation);
+  const secondKnowledge = buildKnowledgeDocument(layout, observation);
+
+  assert.deepEqual(collectKnowledgeIds(secondKnowledge), collectKnowledgeIds(firstKnowledge));
+  assert.ok(firstKnowledge.chunks.every((chunk) => !/^chunk-\d+$/u.test(chunk.id)));
+  assert.ok(firstKnowledge.tables.every((table) => !/^table-\d+$/u.test(table.id)));
+  assert.ok(
+    [
+      ...firstKnowledge.chunks.flatMap((chunk) => chunk.citations),
+      ...firstKnowledge.tables.flatMap((table) => table.cells.flatMap((cell) => cell.citations)),
+    ].every((citation) => !/^(?:citation-\d+-\d+|table-\d+-r\d-c\d-\d)$/u.test(citation.id)),
+  );
+});
+
+test("knowledge table identifiers stay stable when unrelated later prose is added", () => {
+  const texts = [
+    "Sample Measurements",
+    "Item Nominal Width Measured Width Result",
+    "Alpha 10.0 mm 10.4 mm pass",
+    "Beta 12.0 mm 11.1 mm review",
+    "Gamma 8.0 mm 8.0 mm pass",
+  ];
+  const baseKnowledge = buildKnowledgeDocument(
+    createCompactRowRunLayout(texts),
+    createCompactRowRunObservation(texts),
+  );
+  const extendedKnowledge = buildKnowledgeDocument(
+    appendLayoutBlock(createCompactRowRunLayout(texts), {
+      id: "block-extra",
+      pageNumber: 1,
+      readingOrder: 3,
+      text: "Unrelated later prose",
+      role: "body",
+      roleConfidence: 0.82,
+      startsParagraph: true,
+      runIds: ["run-extra"],
+      glyphIds: ["glyph-extra"],
+      resolutionMethod: "page-tree",
+      anchor: { x: 72, y: 640 },
+      fontSize: 12,
+    }),
+    createCompactRowRunObservation(texts),
+  );
+
+  assert.equal(extendedKnowledge.tables[0]?.id, baseKnowledge.tables[0]?.id);
+  assert.deepEqual(
+    getTableCellCitationIds(extendedKnowledge, "10.0 mm"),
+    getTableCellCitationIds(baseKnowledge, "10.0 mm"),
+  );
+});
+
 test("knowledge hard-fails unresolvable citation anchors", () => {
   const layout = createCompactRowRunLayout([
     "Sample Measurements",
@@ -235,4 +297,39 @@ function createCompactRowRunObservation(texts: readonly string[]): PdfObservedDo
       },
     ],
   };
+}
+
+function collectKnowledgeIds(knowledge: PdfKnowledgeDocument): readonly string[] {
+  return [
+    ...knowledge.chunks.map((chunk) => chunk.id),
+    ...knowledge.chunks.flatMap((chunk) => chunk.citations.map((citation) => citation.id)),
+    ...knowledge.tables.map((table) => table.id),
+    ...knowledge.tables.flatMap((table) =>
+      table.cells.flatMap((cell) => cell.citations.map((citation) => citation.id))
+    ),
+  ];
+}
+
+function appendLayoutBlock(layout: PdfLayoutDocument, block: PdfLayoutBlock): PdfLayoutDocument {
+  const [firstPage, ...remainingPages] = layout.pages;
+  assert.ok(firstPage);
+  return {
+    ...layout,
+    pages: [
+      {
+        ...firstPage,
+        blocks: [...firstPage.blocks, block],
+      },
+      ...remainingPages,
+    ],
+    extractedText: `${layout.extractedText}\n${block.text}`,
+  };
+}
+
+function getTableCellCitationIds(knowledge: PdfKnowledgeDocument, cellText: string): readonly string[] {
+  return knowledge.tables.flatMap((table) =>
+    table.cells
+      .filter((cell) => cell.text === cellText)
+      .flatMap((cell) => cell.citations.map((citation) => citation.id))
+  );
 }

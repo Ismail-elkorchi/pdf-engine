@@ -31,6 +31,7 @@ const FIELD_LABEL_MAX_X_SPAN = 240;
 const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
 const CONTRACT_AWARD_HEADERS = ["Serial No.", "Contract Description", "Contractor", "Amount", "Remarks"] as const;
 const CONTRACT_AWARD_MIN_ROWS = 2;
+const STABLE_ID_SLUG_MAX_LENGTH = 56;
 const COMPACT_MEASUREMENT_UNITS = new Set([
   "%",
   "a",
@@ -174,7 +175,6 @@ function buildKnowledgeChunks(
   tables: readonly PdfKnowledgeTable[],
 ): readonly PdfKnowledgeChunk[] {
   const chunks: PdfKnowledgeChunk[] = [];
-  let chunkIndex = 0;
   let currentBlocks: PdfLayoutBlock[] = [];
   const tablePlans = buildInlineKnowledgeTablePlans(layout, tables);
   const pagePlans = new Map<number, readonly InlineKnowledgeTablePlan[]>(
@@ -191,8 +191,7 @@ function buildKnowledgeChunks(
       return;
     }
 
-    chunkIndex += 1;
-    chunks.push(createChunk(chunkIndex, currentBlocks));
+    chunks.push(createChunk(currentBlocks));
     currentBlocks = [];
   }
 
@@ -212,8 +211,7 @@ function buildKnowledgeChunks(
     flushBlocks();
 
     for (const plan of pagePlans.get(page.pageNumber) ?? []) {
-      chunkIndex += 1;
-      chunks.push(createProjectedTableChunk(chunkIndex, plan.table));
+      chunks.push(createProjectedTableChunk(plan.table));
     }
   }
 
@@ -434,9 +432,7 @@ function buildKnowledgeTables(
     }
   }
 
-  return dedupeProjectedTableCandidates(candidates).map((candidate, candidateIndex) =>
-    finalizeProjectedTable(candidateIndex + 1, candidate)
-  );
+  return dedupeProjectedTableCandidates(candidates).map(finalizeProjectedTable);
 }
 
 function shouldStartNewChunk(
@@ -458,11 +454,17 @@ function shouldStartNewChunk(
   return projectedLength > DEFAULT_CHUNK_TARGET;
 }
 
-function createChunk(chunkIndex: number, blocks: readonly PdfLayoutBlock[]): PdfKnowledgeChunk {
-  const citations = blocks.map((block, blockIndex) => createCitation(chunkIndex, blockIndex, block));
+function createChunk(blocks: readonly PdfLayoutBlock[]): PdfKnowledgeChunk {
+  const text = serializeChunkBlocks(blocks);
+  const id = createStableId(
+    "chunk",
+    ["layout", ...blocks.map(createBlockFingerprint), text],
+    [blocks[0]?.role ?? "layout", blocks[0]?.pageNumber ?? 0, blocks[0]?.text ?? text],
+  );
+  const citations = blocks.map((block) => createCitation(id, block));
   return {
-    id: `chunk-${chunkIndex}`,
-    text: serializeChunkBlocks(blocks),
+    id,
+    text,
     role: summarizeChunkRole(blocks),
     pageNumbers: dedupeNumbers(blocks.map((block) => block.pageNumber)),
     blockIds: blocks.map((block) => block.id),
@@ -471,11 +473,17 @@ function createChunk(chunkIndex: number, blocks: readonly PdfLayoutBlock[]): Pdf
   };
 }
 
-function createProjectedTableChunk(chunkIndex: number, table: PdfKnowledgeTable): PdfKnowledgeChunk {
+function createProjectedTableChunk(table: PdfKnowledgeTable): PdfKnowledgeChunk {
   const sourceCitations = dedupeKnowledgeCitations(table.cells.flatMap((cell) => cell.citations));
+  const text = serializeKnowledgeTable(table);
+  const id = createStableId(
+    "chunk",
+    ["projected-table", table.id, text],
+    ["table", table.pageNumber, table.headers?.join(" ") ?? table.heuristic ?? table.id],
+  );
   return {
-    id: `chunk-${chunkIndex}`,
-    text: serializeKnowledgeTable(table),
+    id,
+    text,
     role: "mixed",
     pageNumbers:
       sourceCitations.length === 0
@@ -483,16 +491,24 @@ function createProjectedTableChunk(chunkIndex: number, table: PdfKnowledgeTable)
         : dedupeNumbers(sourceCitations.map((citation) => citation.pageNumber)),
     blockIds: dedupeStrings(table.blockIds),
     runIds: dedupeStrings(sourceCitations.flatMap((citation) => citation.runIds)),
-    citations: sourceCitations.map((citation, citationIndex) => ({
+    citations: sourceCitations.map((citation) => ({
       ...citation,
-      id: `citation-${chunkIndex}-${citationIndex + 1}`,
+      id: createStableId(
+        "citation",
+        ["projected-table-chunk", id, citation.id, citation.pageNumber, citation.blockId, citation.runIds.join(","), citation.text],
+        ["table", citation.pageNumber, citation.blockId, citation.text],
+      ),
     })),
   };
 }
 
-function createCitation(chunkIndex: number, blockIndex: number, block: PdfLayoutBlock): PdfKnowledgeCitation {
+function createCitation(ownerId: string, block: PdfLayoutBlock): PdfKnowledgeCitation {
   return {
-    id: `citation-${chunkIndex}-${blockIndex + 1}`,
+    id: createStableId(
+      "citation",
+      ["chunk", ownerId, createBlockFingerprint(block)],
+      [block.pageNumber, block.id, block.text],
+    ),
     pageNumber: block.pageNumber,
     blockId: block.id,
     runIds: block.runIds,
@@ -525,6 +541,95 @@ function summarizeChunkRole(blocks: readonly PdfLayoutBlock[]): PdfKnowledgeChun
   }
 
   return roles[0] as PdfKnowledgeChunkRole;
+}
+
+function createStableId(
+  prefix: string,
+  fingerprintParts: readonly unknown[],
+  labelParts: readonly unknown[] = fingerprintParts,
+): string {
+  const fingerprint = fingerprintParts.map(canonicalizeStableIdPart).join("\u001f");
+  const label = labelParts
+    .map(canonicalizeStableIdPart)
+    .map(slugifyStableIdPart)
+    .filter((part) => part.length > 0)
+    .join("-");
+  const slug = truncateStableIdPart(label.length === 0 ? "source" : label, STABLE_ID_SLUG_MAX_LENGTH);
+  return `${prefix}-${slug}-${hashStableIdFingerprint(fingerprint)}`;
+}
+
+function createBlockFingerprint(block: PdfLayoutBlock): string {
+  return [
+    block.pageNumber,
+    block.pageRef === undefined ? "" : `${block.pageRef.objectNumber}:${block.pageRef.generationNumber}`,
+    block.id,
+    block.role,
+    block.runIds.join(","),
+    normalizeStableText(block.text),
+    block.anchor === undefined ? "" : `${formatStableNumber(block.anchor.x)},${formatStableNumber(block.anchor.y)}`,
+    block.bbox === undefined
+      ? ""
+      : [
+          formatStableNumber(block.bbox.x),
+          formatStableNumber(block.bbox.y),
+          formatStableNumber(block.bbox.width),
+          formatStableNumber(block.bbox.height),
+        ].join(","),
+  ].join("\u001e");
+}
+
+function canonicalizeStableIdPart(value: unknown): string {
+  if (value === undefined || value === null) {
+    return "";
+  }
+  if (typeof value === "number") {
+    return formatStableNumber(value);
+  }
+  if (typeof value === "string") {
+    return normalizeStableText(value);
+  }
+  if (Array.isArray(value)) {
+    return value.map(canonicalizeStableIdPart).join("\u001d");
+  }
+  if (typeof value === "boolean" || typeof value === "bigint") {
+    return String(value);
+  }
+  return normalizeStableText(JSON.stringify(value) ?? "");
+}
+
+function normalizeStableText(text: string): string {
+  return text.replaceAll(/\s+/gu, " ").trim();
+}
+
+function formatStableNumber(value: number): string {
+  if (!Number.isFinite(value)) {
+    return String(value);
+  }
+  return Number.isInteger(value) ? String(value) : value.toFixed(4).replace(/0+$/u, "").replace(/\.$/u, "");
+}
+
+function slugifyStableIdPart(value: string): string {
+  return value
+    .toLowerCase()
+    .normalize("NFKD")
+    .replaceAll(/[^a-z0-9]+/gu, "-")
+    .replaceAll(/^-+|-+$/gu, "");
+}
+
+function truncateStableIdPart(value: string, maxLength: number): string {
+  if (value.length <= maxLength) {
+    return value;
+  }
+  return value.slice(0, maxLength).replaceAll(/-+$/gu, "");
+}
+
+function hashStableIdFingerprint(value: string): string {
+  let hash = 0xcbf29ce484222325n;
+  for (let index = 0; index < value.length; index += 1) {
+    hash ^= BigInt(value.charCodeAt(index));
+    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
+  }
+  return hash.toString(36).padStart(13, "0");
 }
 
 function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
@@ -1771,7 +1876,21 @@ function looksLikeGridHeaderRow(blocks: readonly AnchoredLayoutBlock[]): boolean
   return Math.max(...xValues) - Math.min(...xValues) >= 60;
 }
 
-function finalizeProjectedTable(tableIndex: number, candidate: ProjectedTableCandidate): PdfKnowledgeTable {
+function finalizeProjectedTable(candidate: ProjectedTableCandidate): PdfKnowledgeTable {
+  const tableId = createStableId(
+    "table",
+    [
+      "knowledge-table",
+      candidate.pageNumber,
+      candidate.heuristic,
+      candidate.headers.join("\u001f"),
+      candidate.blockIds.join("\u001f"),
+      candidate.rows.map((row) =>
+        row.cells.map((cell) => `${cell.columnIndex}:${normalizeStableText(cell.text)}:${cell.runIds?.join(",") ?? ""}`).join("\u001e")
+      ).join("\u001d"),
+    ],
+    [candidate.heuristic, candidate.pageNumber, candidate.headers.join(" ") || (candidate.blockIds[0] ?? "table")],
+  );
   const cells: PdfKnowledgeTableCell[] = [];
 
   for (const [rowIndex, row] of candidate.rows.entries()) {
@@ -1780,13 +1899,13 @@ function finalizeProjectedTable(tableIndex: number, candidate: ProjectedTableCan
         rowIndex,
         columnIndex: cell.columnIndex,
         text: cell.text,
-        citations: createTableCellCitations(tableIndex, rowIndex, cell.columnIndex, cell.blocks, cell.runIds),
+        citations: createTableCellCitations(tableId, rowIndex, cell.columnIndex, cell.text, cell.blocks, cell.runIds),
       });
     }
   }
 
   return {
-    id: `table-${tableIndex}`,
+    id: tableId,
     pageNumber: candidate.pageNumber,
     headers: candidate.headers,
     ...(candidate.heuristic !== undefined ? { heuristic: candidate.heuristic } : {}),
@@ -1813,15 +1932,28 @@ function serializeKnowledgeTable(table: PdfKnowledgeTable): string {
 }
 
 function createTableCellCitations(
-  tableIndex: number,
+  tableId: string,
   rowIndex: number,
   columnIndex: number,
+  cellText: string,
   blocks: readonly PdfLayoutBlock[],
   runIds?: readonly string[],
 ): readonly PdfKnowledgeCitation[] {
   const runIdSet = runIds === undefined ? undefined : new Set(runIds);
-  return blocks.map((block, citationIndex) => ({
-    id: `table-${tableIndex}-r${rowIndex}-c${columnIndex + 1}-${citationIndex + 1}`,
+  return blocks.map((block) => ({
+    id: createStableId(
+      "citation",
+      [
+        "table-cell",
+        tableId,
+        rowIndex,
+        columnIndex,
+        normalizeStableText(cellText),
+        createBlockFingerprint(block),
+        runIds?.join(",") ?? "",
+      ],
+      [`r${rowIndex}`, `c${columnIndex + 1}`, block.id, cellText],
+    ),
     pageNumber: block.pageNumber,
     blockId: block.id,
     runIds:
