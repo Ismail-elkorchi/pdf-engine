@@ -328,6 +328,45 @@ test("knowledge scopes table projection to interpreted layout table regions befo
   assert.ok(!table.blockIds.includes("grid-noise-row"));
 });
 
+test("knowledge keeps page-wide layout-grid fallback when a table region omits same-header rows", () => {
+  const scopedBlockIds = [
+    "grid-h1",
+    "grid-h2",
+    "grid-h3",
+    "grid-r1c1",
+    "grid-r1c2",
+    "grid-r1c3",
+    "grid-r2c1",
+    "grid-r2c2",
+    "grid-r2c3",
+  ];
+  const blocks = [
+    createLayoutBlock({ id: "grid-h1", readingOrder: 0, text: "Code", x: 72, y: 720 }),
+    createLayoutBlock({ id: "grid-h2", readingOrder: 1, text: "Label", x: 180, y: 720 }),
+    createLayoutBlock({ id: "grid-h3", readingOrder: 2, text: "Amount", x: 300, y: 720 }),
+    createLayoutBlock({ id: "grid-r1c1", readingOrder: 3, text: "A1", x: 72, y: 700 }),
+    createLayoutBlock({ id: "grid-r1c2", readingOrder: 4, text: "Base Salary", x: 180, y: 700 }),
+    createLayoutBlock({ id: "grid-r1c3", readingOrder: 5, text: "1000", x: 300, y: 700 }),
+    createLayoutBlock({ id: "grid-r2c1", readingOrder: 6, text: "B2", x: 72, y: 680 }),
+    createLayoutBlock({ id: "grid-r2c2", readingOrder: 7, text: "Allowance", x: 180, y: 680 }),
+    createLayoutBlock({ id: "grid-r2c3", readingOrder: 8, text: "250", x: 300, y: 680 }),
+    createLayoutBlock({ id: "grid-r3c1", readingOrder: 9, text: "C3", x: 72, y: 660 }),
+    createLayoutBlock({ id: "grid-r3c2", readingOrder: 10, text: "Total", x: 180, y: 660 }),
+    createLayoutBlock({ id: "grid-r3c3", readingOrder: 11, text: "1250", x: 300, y: 660 }),
+  ];
+
+  const knowledge = buildKnowledgeDocument(createSinglePageLayout(blocks, [
+    createLayoutRegion("region-table-partial", "table", scopedBlockIds),
+  ]));
+  const [table] = knowledge.tables;
+
+  assert.ok(table);
+  assert.equal(table.heuristic, "layout-grid");
+  assert.deepEqual(table.headers, ["Code", "Label", "Amount"]);
+  assert.ok(table.blockIds.includes("grid-r3c2"));
+  assert.ok(table.cells.some((cell) => cell.rowIndex === 3 && cell.columnIndex === 1 && cell.text === "Total"));
+});
+
 test("knowledge projects high-font row sequences without relying on compact line parsing", () => {
   const runs = [
     createObservedRun({ id: "run-r1c1", contentOrder: 0, text: "Alpha", fontSize: 10 }),

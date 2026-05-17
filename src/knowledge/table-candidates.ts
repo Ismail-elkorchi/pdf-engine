@@ -141,24 +141,6 @@ function collectRegionScopedCandidates(
 
     if (region.kind === "table") {
       addCandidateIfNonOverlapping(candidates, projectLayoutGridTable(scopedPage));
-      addCandidateIfNonOverlapping(
-        candidates,
-        scopedObservationPage === undefined
-          ? undefined
-          : projectRowSequenceTable(scopedPage, scopedObservationPage, scopedRunToBlock),
-      );
-      addCandidateIfNonOverlapping(
-        candidates,
-        scopedObservationPage === undefined
-          ? undefined
-          : projectStackedHeaderSequenceTable(scopedPage, scopedObservationPage, scopedRunToBlock),
-      );
-      addCandidateIfNonOverlapping(
-        candidates,
-        scopedObservationPage === undefined
-          ? undefined
-          : projectContractAwardSequenceTable(scopedPage, scopedObservationPage, scopedRunToBlock),
-      );
       continue;
     }
 
@@ -181,9 +163,41 @@ function addCandidateIfNonOverlapping(
   candidates: ProjectedTableCandidate[],
   candidate: ProjectedTableCandidate | undefined,
 ): void {
-  if (candidate && !candidates.some((selectedCandidate) => projectedTableOverlap(selectedCandidate, candidate))) {
-    candidates.push(candidate);
+  if (!candidate) {
+    return;
   }
+
+  const overlapIndex = candidates.findIndex((selectedCandidate) => projectedTableOverlap(selectedCandidate, candidate));
+  if (overlapIndex < 0) {
+    candidates.push(candidate);
+    return;
+  }
+
+  const selectedCandidate = candidates[overlapIndex];
+  if (selectedCandidate && shouldReplaceOverlappingCandidate(selectedCandidate, candidate)) {
+    candidates[overlapIndex] = candidate;
+  }
+}
+
+function shouldReplaceOverlappingCandidate(
+  selectedCandidate: ProjectedTableCandidate,
+  candidate: ProjectedTableCandidate,
+): boolean {
+  if (selectedCandidate.heuristic !== "layout-grid" || candidate.heuristic !== "layout-grid") {
+    return false;
+  }
+
+  return tableHeadersEqual(selectedCandidate.headers, candidate.headers) &&
+    countProjectedTableCells(candidate) > countProjectedTableCells(selectedCandidate);
+}
+
+function tableHeadersEqual(left: readonly string[], right: readonly string[]): boolean {
+  return left.length === right.length &&
+    left.every((header, index) => normalizeCellText(header).toLowerCase() === normalizeCellText(right[index] ?? "").toLowerCase());
+}
+
+function countProjectedTableCells(candidate: ProjectedTableCandidate): number {
+  return candidate.rows.reduce((sum, row) => sum + row.cells.length, 0);
 }
 
 function createRegionScopedPage(page: PdfLayoutPage, region: PdfLayoutRegion): PdfLayoutPage {
