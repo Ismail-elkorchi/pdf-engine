@@ -1,3 +1,5 @@
+import { createStableId } from "./stable-id.ts";
+
 import type {
   PdfKnowledgeCitation,
   PdfKnowledgeForm,
@@ -8,7 +10,6 @@ import type {
 } from "../contracts.ts";
 
 const FORM_TABLE_HEURISTICS = new Set<PdfKnowledgeFormHeuristic>(["field-value-form", "field-label-form"]);
-const STABLE_ID_SLUG_MAX_LENGTH = 56;
 
 export function buildKnowledgeForms(tables: readonly PdfKnowledgeTable[]): readonly PdfKnowledgeForm[] {
   return tables
@@ -201,69 +202,4 @@ function dedupeKnowledgeCitations(citations: readonly PdfKnowledgeCitation[]): r
 
 function dedupeStrings(values: readonly string[]): readonly string[] {
   return [...new Set(values)];
-}
-
-function createStableId(
-  prefix: string,
-  fingerprintParts: readonly unknown[],
-  labelParts: readonly unknown[] = fingerprintParts,
-): string {
-  const fingerprint = fingerprintParts.map(canonicalizeStableIdPart).join("\u001f");
-  const label = labelParts
-    .map(canonicalizeStableIdPart)
-    .map(slugifyStableIdPart)
-    .filter((part) => part.length > 0)
-    .join("-");
-  const slug = truncateStableIdPart(label.length === 0 ? "source" : label, STABLE_ID_SLUG_MAX_LENGTH);
-  return `${prefix}-${slug}-${hashStableIdFingerprint(fingerprint)}`;
-}
-
-function canonicalizeStableIdPart(value: unknown): string {
-  if (value === undefined || value === null) {
-    return "";
-  }
-  if (typeof value === "number") {
-    return formatStableNumber(value);
-  }
-  if (typeof value === "string") {
-    return normalizeFormText(value);
-  }
-  if (Array.isArray(value)) {
-    return value.map(canonicalizeStableIdPart).join("\u001d");
-  }
-  if (typeof value === "boolean" || typeof value === "bigint") {
-    return String(value);
-  }
-  return normalizeFormText(JSON.stringify(value) ?? "");
-}
-
-function formatStableNumber(value: number): string {
-  if (!Number.isFinite(value)) {
-    return String(value);
-  }
-  return Number.isInteger(value) ? String(value) : value.toFixed(4).replace(/0+$/u, "").replace(/\.$/u, "");
-}
-
-function slugifyStableIdPart(value: string): string {
-  return value
-    .toLowerCase()
-    .normalize("NFKD")
-    .replaceAll(/[^a-z0-9]+/gu, "-")
-    .replaceAll(/^-+|-+$/gu, "");
-}
-
-function truncateStableIdPart(value: string, maxLength: number): string {
-  if (value.length <= maxLength) {
-    return value;
-  }
-  return value.slice(0, maxLength).replaceAll(/-+$/gu, "");
-}
-
-function hashStableIdFingerprint(value: string): string {
-  let hash = 0xcbf29ce484222325n;
-  for (let index = 0; index < value.length; index += 1) {
-    hash ^= BigInt(value.charCodeAt(index));
-    hash = (hash * 0x100000001b3n) & 0xffffffffffffffffn;
-  }
-  return hash.toString(36).padStart(13, "0");
 }

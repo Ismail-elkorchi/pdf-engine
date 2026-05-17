@@ -1045,7 +1045,7 @@ function createKnowledgeDiagnostics(
           code: "table-projection-not-implemented",
           stage: "knowledge",
           level: "medium",
-          message: "The current knowledge stage does not emit tables unless stronger structural evidence is available.",
+          message: "The current knowledge stage does not emit tables unless sufficient structural evidence is available.",
         }
       : {
           code: "table-projection-heuristic",
