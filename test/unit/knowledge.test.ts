@@ -4,7 +4,10 @@ import { test } from "node:test";
 import type {
   PdfLayoutBlock,
   PdfLayoutDocument,
+  PdfKnowledgeCitation,
+  PdfKnowledgeChunk,
   PdfKnowledgeDocument,
+  PdfKnowledgeSourceSpan,
   PdfKnowledgeTable,
   PdfObservedDocument,
   PdfObservedTextRun,
@@ -712,6 +715,185 @@ test("knowledge hard-fails stale source spans and table-cell overreach", () => {
   assert.throws(
     () => assertKnowledgeCitationsResolvable(layout, overbroadTableCell),
     /Unresolvable knowledge citation citation-overbroad: table cell citation overreaches cell text/u,
+  );
+});
+
+test("knowledge validates source-span page, run, bbox, and split-text evidence", () => {
+  const block: PdfLayoutBlock = {
+    id: "split-block",
+    pageNumber: 1,
+    readingOrder: 0,
+    text: "Alpha Beta",
+    role: "body",
+    roleConfidence: 0.9,
+    startsParagraph: true,
+    runIds: ["run-alpha", "run-beta"],
+    glyphIds: ["glyph-alpha", "glyph-beta"],
+    resolutionMethod: "page-tree",
+    pageRef: { objectNumber: 4, generationNumber: 0 },
+    anchor: { x: 72, y: 720 },
+    bbox: { x: 70, y: 710, width: 120, height: 18 },
+    fontSize: 12,
+  };
+  const layout = createSinglePageLayout([block]);
+  const validSourceSpan: PdfKnowledgeSourceSpan = {
+    text: "Alpha Beta",
+    blockRange: { start: 0, end: 10 },
+    pageRef: { objectNumber: 4, generationNumber: 0 },
+    bbox: { x: 72, y: 712, width: 80, height: 12 },
+    runSpans: [
+      {
+        runId: "run-alpha",
+        range: { start: 0, end: 5 },
+        text: "Alpha",
+        bbox: { x: 72, y: 712, width: 38, height: 12 },
+      },
+      {
+        runId: "run-beta",
+        range: { start: 6, end: 10 },
+        text: "Beta",
+        bbox: { x: 112, y: 712, width: 40, height: 12 },
+      },
+    ],
+  };
+  const validCitation: PdfKnowledgeCitation = {
+    id: "citation-split",
+    pageNumber: 1,
+    blockId: "split-block",
+    runIds: ["run-alpha", "run-beta"],
+    text: "Alpha Beta",
+    pageRef: { objectNumber: 4, generationNumber: 0 },
+    sourceSpan: validSourceSpan,
+  };
+  const validChunk: PdfKnowledgeChunk = {
+    id: "chunk-split",
+    text: "Alpha Beta",
+    role: "body",
+    pageNumbers: [1],
+    blockIds: ["split-block"],
+    runIds: ["run-alpha", "run-beta"],
+    citations: [validCitation],
+  };
+  const validSplitSpan: Pick<PdfKnowledgeDocument, "chunks" | "tables"> = {
+    chunks: [validChunk],
+    tables: [],
+  };
+
+  assert.doesNotThrow(() => assertKnowledgeCitationsResolvable(layout, validSplitSpan));
+
+  assert.throws(
+    () =>
+      assertKnowledgeCitationsResolvable(layout, {
+        ...validSplitSpan,
+        chunks: [
+          {
+            ...validChunk,
+            citations: [
+              {
+                ...validCitation,
+                id: "citation-page-mismatch",
+                pageNumber: 2,
+              },
+            ],
+          },
+        ],
+      }),
+    /Unresolvable knowledge citation citation-page-mismatch: page 2 does not match block split-block/u,
+  );
+
+  assert.throws(
+    () =>
+      assertKnowledgeCitationsResolvable(layout, {
+        ...validSplitSpan,
+        chunks: [
+          {
+            ...validChunk,
+            citations: [
+              {
+                ...validCitation,
+                id: "citation-run-mismatch",
+                runIds: ["run-alpha", "run-missing"],
+              },
+            ],
+          },
+        ],
+      }),
+    /Unresolvable knowledge citation citation-run-mismatch: run run-missing is not part of block split-block/u,
+  );
+
+  assert.throws(
+    () =>
+      assertKnowledgeCitationsResolvable(layout, {
+        ...validSplitSpan,
+        chunks: [
+          {
+            ...validChunk,
+            citations: [
+              {
+                ...validCitation,
+                id: "citation-page-ref-mismatch",
+                pageRef: { objectNumber: 5, generationNumber: 0 },
+              },
+            ],
+          },
+        ],
+      }),
+    /Unresolvable knowledge citation citation-page-ref-mismatch: page reference does not match block split-block/u,
+  );
+
+  assert.throws(
+    () =>
+      assertKnowledgeCitationsResolvable(layout, {
+        ...validSplitSpan,
+        chunks: [
+          {
+            ...validChunk,
+            citations: [
+              {
+                ...validCitation,
+                id: "citation-bbox-mismatch",
+                sourceSpan: {
+                  ...validSourceSpan,
+                  bbox: { x: 1, y: 1, width: 20, height: 10 },
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    /Unresolvable knowledge citation citation-bbox-mismatch: source span bbox is outside block split-block/u,
+  );
+
+  assert.throws(
+    () =>
+      assertKnowledgeCitationsResolvable(layout, {
+        ...validSplitSpan,
+        chunks: [
+          {
+            ...validChunk,
+            citations: [
+              {
+                ...validCitation,
+                id: "citation-run-span-outside",
+                text: "Beta",
+                sourceSpan: {
+                  ...validSourceSpan,
+                  text: "Beta",
+                  blockRange: { start: 6, end: 10 },
+                  runSpans: [
+                    {
+                      runId: "run-alpha",
+                      range: { start: 0, end: 5 },
+                      text: "Alpha",
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+        ],
+      }),
+    /Unresolvable knowledge citation citation-run-span-outside: run span run-alpha is outside the source span range/u,
   );
 });
 
