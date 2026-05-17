@@ -4,6 +4,7 @@
   "version": "0.1.0",
   "exports": {
     ".": "./jsr/mod.ts",
+    "./ocr/tesseract": "./jsr/ocr/tesseract.ts",
     "./viewer": "./jsr/viewer.ts"
   },
   "exclude": [

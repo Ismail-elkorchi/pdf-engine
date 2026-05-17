@@ -571,6 +571,71 @@ test("knowledge scopes form projection to interpreted layout form-like regions b
   assert.ok(!form.blockIds.includes("outside-owner"));
 });
 
+test("knowledge projects pipe-delimited tables from interpreted layout table regions", () => {
+  const tableBlockIds = ["region-table-header", "region-table-row-1", "region-table-row-2"];
+  const knowledge = buildKnowledgeDocument(createSinglePageLayout([
+    createLayoutBlock({ id: "intro", readingOrder: 0, text: "Introductory prose before the table.", x: 72, y: 760 }),
+    createLayoutBlock({ id: "region-table-header", readingOrder: 1, text: "Item | Quantity | Status", x: 72, y: 720 }),
+    createLayoutBlock({ id: "region-table-row-1", readingOrder: 2, text: "Alpha | 10 | Active", x: 72, y: 700 }),
+    createLayoutBlock({ id: "region-table-row-2", readingOrder: 3, text: "Beta | 12 | Pending", x: 72, y: 680 }),
+    createLayoutBlock({ id: "outro", readingOrder: 4, text: "Closing prose after the table.", x: 72, y: 640 }),
+  ], [
+    createLayoutRegion("region-table-pipe", "table", tableBlockIds),
+  ]));
+
+  const [table] = knowledge.tables;
+  assert.ok(table);
+  assert.equal(table.heuristic, "layout-region-table");
+  assert.deepEqual(table.blockIds, tableBlockIds);
+  assert.deepEqual(table.headers, ["Item", "Quantity", "Status"]);
+  assert.deepEqual(
+    table.cells.map((cell) => [cell.rowIndex, cell.columnIndex, cell.text]),
+    [
+      [0, 0, "Item"],
+      [0, 1, "Quantity"],
+      [0, 2, "Status"],
+      [1, 0, "Alpha"],
+      [1, 1, "10"],
+      [1, 2, "Active"],
+      [2, 0, "Beta"],
+      [2, 1, "12"],
+      [2, 2, "Pending"],
+    ],
+  );
+  assert.ok(knowledge.markdown.indexOf("| Item | Quantity | Status |") > knowledge.markdown.indexOf("Introductory prose"));
+  assert.ok(knowledge.markdown.indexOf("| Item | Quantity | Status |") < knowledge.markdown.indexOf("Closing prose"));
+  assert.equal(table.cells.find((cell) => cell.text === "10")?.citations[0]?.sourceSpan?.text, "10");
+});
+
+test("knowledge projects region-only forms when interpreted form evidence lacks values", () => {
+  const formBlockIds = ["region-form-title", "region-form-requester", "region-form-department", "region-form-date"];
+  const knowledge = buildKnowledgeDocument(createSinglePageLayout([
+    createLayoutBlock({ id: "region-form-title", readingOrder: 0, text: "Approval Request", role: "heading", x: 72, y: 760, fontSize: 18 }),
+    createLayoutBlock({ id: "region-form-requester", readingOrder: 1, text: "Requester:", x: 72, y: 720 }),
+    createLayoutBlock({ id: "region-form-department", readingOrder: 2, text: "Department:", x: 72, y: 700 }),
+    createLayoutBlock({ id: "region-form-date", readingOrder: 3, text: "Approval Date:", x: 72, y: 680 }),
+    createLayoutBlock({ id: "outside-region", readingOrder: 4, text: "This sentence is outside the form.", x: 72, y: 640 }),
+  ], [
+    createLayoutRegion("region-form-labels", "form-like", formBlockIds),
+  ]));
+
+  const [form] = knowledge.forms;
+  assert.ok(form);
+  assert.equal(form.heuristic, "layout-region-form");
+  assert.equal(form.title, "Approval Request");
+  assert.deepEqual(form.blockIds, formBlockIds);
+  assert.deepEqual(
+    form.fields.map((field) => [field.name, field.valueState, field.value]),
+    [
+      ["Requester", "not-observed", undefined],
+      ["Department", "not-observed", undefined],
+      ["Approval Date", "not-observed", undefined],
+    ],
+  );
+  assert.ok(form.fields.every((field) => field.citations.length === 1));
+  assert.ok(!form.blockIds.includes("outside-region"));
+});
+
 test("knowledge projects field-label forms only when labels are spatially coherent", () => {
   const knowledge = buildKnowledgeDocument(
     createFieldLabelFormLayout(),

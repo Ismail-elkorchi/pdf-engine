@@ -1,6 +1,12 @@
 import { buildKnowledgeDocument } from "./knowledge.ts";
 import { buildObservedPages } from "./layout/observed.ts";
 import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts";
+import {
+  applyOcrToObservation,
+  collectOcrPageImages,
+  resolveOcrOptions,
+  type PdfResolvedOcrOptions,
+} from "./ocr.ts";
 import { evaluatePdfFeatureFindings, hasDetectedFeatureFinding } from "./pdf-feature-findings.ts";
 import { preparePdfStandardPasswordSecurity } from "./pdf-standard-security.ts";
 import { buildRenderDocument } from "./render.ts";
@@ -27,6 +33,7 @@ import type {
   PdfKnowledgeRequest,
   PdfNormalizedAdmissionPolicy,
   PdfObjectRef,
+  PdfOcrPageImage,
   PdfObservedDocument,
   PdfObservationRequest,
   PdfPipelineRequest,
@@ -86,6 +93,7 @@ interface PdfShellInspection {
  */
 export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   const defaultPolicy = mergePolicy(DEFAULT_POLICY, options.defaultPolicy);
+  const defaultOcr = resolveOcrOptions(undefined, options.defaultOcr);
   const runtime = detectRuntime();
   const capabilities = detectRuntimeCapabilities(runtime);
 
@@ -94,6 +102,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     runtime,
     capabilities,
     defaultPolicy,
+    defaultOcr,
     dispose,
     admit,
     toIr,
@@ -104,7 +113,9 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     run,
   };
 
-  async function dispose(): Promise<void> {}
+  async function dispose(): Promise<void> {
+    await defaultOcr.provider?.dispose?.();
+  }
 
   async function admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
@@ -128,6 +139,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function observe(request: PdfObservationRequest): Promise<PdfStageResult<PdfObservedDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
+    const ocr = resolveOcrOptions(defaultOcr, request.ocr);
     const inspection = await inspectSource(request.source, policy, request.passwordProvider);
     const admission = buildAdmissionStage(
       {
@@ -137,11 +149,12 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       },
       inspection,
     );
-    return buildObservationStage(inspection, admission);
+    return await buildObservationForRequest(inspection, admission, request.source, ocr);
   }
 
   async function toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
+    const ocr = resolveOcrOptions(defaultOcr, request.ocr);
     const inspection = await inspectSource(request.source, policy, request.passwordProvider);
     const admission = buildAdmissionStage(
       {
@@ -151,12 +164,13 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       },
       inspection,
     );
-    const observation = buildObservationStage(inspection, admission);
+    const observation = await buildObservationForRequest(inspection, admission, request.source, ocr);
     return buildLayoutStage(observation);
   }
 
   async function toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
+    const ocr = resolveOcrOptions(defaultOcr, request.ocr);
     const inspection = await inspectSource(request.source, policy, request.passwordProvider);
     const admission = buildAdmissionStage(
       {
@@ -166,13 +180,14 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       },
       inspection,
     );
-    const observation = buildObservationStage(inspection, admission);
+    const observation = await buildObservationForRequest(inspection, admission, request.source, ocr);
     const layout = buildLayoutStage(observation);
     return buildKnowledgeStage(observation, layout);
   }
 
   async function toRender(request: PdfRenderRequest): Promise<PdfStageResult<PdfRenderDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
+    const ocr = resolveOcrOptions(defaultOcr, request.ocr);
     const inspection = await inspectSource(request.source, policy, request.passwordProvider);
     const admission = buildAdmissionStage(
       {
@@ -182,16 +197,17 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       },
       inspection,
     );
-    const observation = buildObservationStage(inspection, admission);
+    const observation = await buildObservationForRequest(inspection, admission, request.source, ocr);
     return await buildRenderStage(inspection, observation);
   }
 
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
     const policy = mergePolicy(defaultPolicy, request.policy);
+    const ocr = resolveOcrOptions(defaultOcr, request.ocr);
     const inspection = await inspectSource(request.source, policy, request.passwordProvider);
     const admission = buildAdmissionStage(request, inspection);
     const ir = buildIrStage(inspection, admission);
-    const observation = buildObservationStage(inspection, admission);
+    const observation = await buildObservationForRequest(inspection, admission, request.source, ocr);
     const layout = buildLayoutStage(observation);
     const knowledge = buildKnowledgeStage(observation, layout);
     const render = await buildRenderStage(inspection, observation);
@@ -220,6 +236,27 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
         ...render.diagnostics,
       ]),
     };
+  }
+
+  async function buildObservationForRequest(
+    inspection: PdfShellInspection,
+    admission: PdfStageResult<PdfAdmissionArtifact>,
+    source: PdfAdmissionRequest["source"],
+    ocr: PdfResolvedOcrOptions,
+  ): Promise<PdfStageResult<PdfObservedDocument>> {
+    if (ocr.mode === "off") {
+      return await buildObservationStage(inspection, admission, source, ocr);
+    }
+
+    const baseObservation = await buildObservationStage(inspection, admission, source, withOcrDisabled(ocr));
+    const baseRender = await buildRenderStage(inspection, baseObservation);
+    return await buildObservationStage(
+      inspection,
+      admission,
+      source,
+      ocr,
+      collectOcrPageImages(baseRender.value),
+    );
   }
 }
 
@@ -591,10 +628,13 @@ function buildIrStage(
   return stageResult("ir", admission.status === "partial" || diagnostics.length > 0 ? "partial" : "completed", diagnostics, ir);
 }
 
-function buildObservationStage(
+async function buildObservationStage(
   inspection: PdfShellInspection,
   admission: PdfStageResult<PdfAdmissionArtifact>,
-): PdfStageResult<PdfObservedDocument> {
+  source: PdfAdmissionRequest["source"],
+  ocr: PdfResolvedOcrOptions,
+  pageImages?: ReadonlyMap<number, PdfOcrPageImage>,
+): Promise<PdfStageResult<PdfObservedDocument>> {
   if (!canAdvance(admission)) {
     return stageResult("observation", "blocked", admission.diagnostics);
   }
@@ -650,12 +690,19 @@ function buildObservationStage(
       extractedText.length > 0,
     ),
   };
+  const ocrResult = await applyOcrToObservation({
+    source,
+    observation,
+    options: ocr,
+    ...(pageImages !== undefined ? { pageImages } : {}),
+  });
+  diagnostics.push(...ocrResult.diagnostics);
 
   return stageResult(
     "observation",
     admission.status === "partial" || diagnostics.length > 0 ? "partial" : "completed",
     diagnostics,
-    observation,
+    ocrResult.observation,
   );
 }
 
@@ -717,6 +764,13 @@ async function buildRenderStage(
 
 function canAdvance(admission: PdfStageResult<PdfAdmissionArtifact>): boolean {
   return admission.value?.decision === "accepted" && (admission.status === "completed" || admission.status === "partial");
+}
+
+function withOcrDisabled(ocr: PdfResolvedOcrOptions): PdfResolvedOcrOptions {
+  return {
+    ...ocr,
+    mode: "off",
+  };
 }
 
 function collectAdmissionKnownLimits(inspection: PdfShellInspection): readonly PdfKnownLimitCode[] {

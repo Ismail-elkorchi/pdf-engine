@@ -180,7 +180,6 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
           primitives.push(primitive);
         }
         if (
-          command.paintState.dashPattern.segments.length > 0 ||
           command.transparencyState.softMask !== "none" ||
           !isSupportedBlendMode(command.transparencyState.blendMode)
         ) {

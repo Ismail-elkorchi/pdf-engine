@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { createPdfEngine } from "../../src/index.ts";
+import { createPdfEngine, type PdfOcrProvider } from "../../src/index.ts";
 import { loadNamedPdfFixture } from "../shared/load-fixture.ts";
 import {
   buildPdfWithPageContents,
@@ -51,6 +51,136 @@ test("public pipeline contracts expose staged artifacts with current kinds", asy
   assert.equal("featureSignals" in (result.admission.value ?? {}), false);
   assert.equal(result.render.value?.renderHash.algorithm, "sha-256");
   assert.equal(result.render.value?.renderHash.hex.length, 64);
+});
+
+test("public pipeline contracts expose opt-in OCR provenance and fusion decisions", async () => {
+  const provider: PdfOcrProvider = {
+    name: "contract-fake-ocr",
+    async recognizePage(input) {
+      assert.equal(input.pageImage?.mimeType, "image/png");
+      return {
+        pageNumber: input.pageNumber,
+        lines: [
+          {
+            text: "Scanned Approval",
+            confidence: 0.91,
+            bbox: {
+              x: 72,
+              y: 680,
+              width: 120,
+              height: 18,
+            },
+          },
+        ],
+      };
+    },
+  };
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImagery();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-ocr-fusion.pdf",
+    },
+    ocr: {
+      mode: "always",
+      provider,
+      languages: ["eng"],
+    },
+  });
+
+  assert.equal(result.observation.value?.ocr?.mode, "always");
+  assert.equal(result.observation.value?.ocr?.providerName, "contract-fake-ocr");
+  assert.equal(result.observation.value?.ocr?.pages[0]?.decision, "applied");
+  assert.equal(result.observation.value?.pages[0]?.runs.some((run) => run.origin === "ocr" && run.text === "Scanned Approval"), true);
+  assert.equal(result.layout.value?.pages[0]?.blocks.some((block) => block.text === "Scanned Approval"), true);
+  assert.equal(result.knowledge.value?.markdown.includes("Scanned Approval"), true);
+  assert.equal(result.observation.value?.knownLimits.includes("ocr-fusion-heuristic"), true);
+});
+
+test("public OCR providers receive page imagery outside full pipeline runs", async () => {
+  let sawPageImage = false;
+  const provider: PdfOcrProvider = {
+    name: "contract-stage-ocr",
+    async recognizePage(input) {
+      sawPageImage = input.pageImage?.mimeType === "image/png";
+      return {
+        pageNumber: input.pageNumber,
+        lines: [
+          {
+            text: "Stage OCR",
+            confidence: 0.95,
+          },
+        ],
+      };
+    },
+  };
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImagery();
+
+  const result = await engine.toKnowledge({
+    source: {
+      bytes,
+      fileName: "public-api-ocr-stage.pdf",
+    },
+    ocr: {
+      mode: "always",
+      provider,
+    },
+  });
+
+  assert.equal(sawPageImage, true);
+  assert.equal(result.value?.markdown.includes("Stage OCR"), true);
+});
+
+test("public OCR contracts fail closed when provider evidence is unavailable or weak", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImagery();
+
+  const missingProviderResult = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-ocr-missing-provider.pdf",
+    },
+    ocr: {
+      mode: "always",
+    },
+  });
+
+  assert.equal(missingProviderResult.observation.value?.ocr?.pages[0]?.decision, "provider-unavailable");
+  assert.equal(missingProviderResult.observation.value?.knownLimits.includes("ocr-provider-unavailable"), true);
+  assert.equal(missingProviderResult.diagnostics.some((diagnostic) => diagnostic.code === "ocr-provider-unavailable"), true);
+
+  const lowConfidenceProvider: PdfOcrProvider = {
+    name: "contract-low-confidence-ocr",
+    async recognizePage(input) {
+      return {
+        pageNumber: input.pageNumber,
+        lines: [
+          {
+            text: "Weak Scan",
+            confidence: 0.1,
+          },
+        ],
+      };
+    },
+  };
+  const lowConfidenceResult = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-ocr-low-confidence.pdf",
+    },
+    ocr: {
+      mode: "always",
+      provider: lowConfidenceProvider,
+      minConfidence: 0.8,
+    },
+  });
+
+  assert.equal(lowConfidenceResult.observation.value?.ocr?.pages[0]?.decision, "low-confidence");
+  assert.equal(lowConfidenceResult.observation.value?.knownLimits.includes("ocr-low-confidence"), true);
+  assert.equal(lowConfidenceResult.observation.value?.pages[0]?.runs.some((run) => run.text === "Weak Scan"), false);
 });
 
 test("public observation and render contracts expose path paint state", async () => {
