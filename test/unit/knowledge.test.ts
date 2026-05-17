@@ -10,6 +10,7 @@ import type {
   PdfKnowledgeSourceSpan,
   PdfKnowledgeTable,
   PdfObservedDocument,
+  PdfLayoutRegion,
   PdfObservedTextRun,
 } from "../../src/contracts.ts";
 import { assertKnowledgeCitationsResolvable, buildKnowledgeDocument } from "../../src/knowledge.ts";
@@ -284,6 +285,49 @@ test("knowledge projects anchored layout grids in row-major source order", () =>
   ]);
 });
 
+test("knowledge scopes table projection to interpreted layout table regions before page-wide fallback", () => {
+  const tableBlockIds = [
+    "grid-h1",
+    "grid-h2",
+    "grid-h3",
+    "grid-r1c1",
+    "grid-r1c2",
+    "grid-r1c3",
+    "grid-r2c1",
+    "grid-r2c2",
+    "grid-r2c3",
+  ];
+  const blocks = [
+    createLayoutBlock({ id: "grid-title", readingOrder: 0, text: "Grid Summary", role: "heading", x: 72, y: 760, fontSize: 18 }),
+    createLayoutBlock({ id: "grid-h1", readingOrder: 1, text: "Item", x: 72, y: 720 }),
+    createLayoutBlock({ id: "grid-h2", readingOrder: 2, text: "Quantity", x: 180, y: 720 }),
+    createLayoutBlock({ id: "grid-h3", readingOrder: 3, text: "Status", x: 300, y: 720 }),
+    createLayoutBlock({ id: "grid-noise-header", readingOrder: 4, text: "Comment", x: 420, y: 720 }),
+    createLayoutBlock({ id: "grid-r1c1", readingOrder: 5, text: "Alpha", x: 72, y: 700 }),
+    createLayoutBlock({ id: "grid-r1c2", readingOrder: 6, text: "10", x: 180, y: 700 }),
+    createLayoutBlock({ id: "grid-r1c3", readingOrder: 7, text: "Active", x: 300, y: 700 }),
+    createLayoutBlock({ id: "grid-noise-row", readingOrder: 8, text: "Narrative", x: 420, y: 700 }),
+    createLayoutBlock({ id: "grid-r2c1", readingOrder: 9, text: "Beta", x: 72, y: 680 }),
+    createLayoutBlock({ id: "grid-r2c2", readingOrder: 10, text: "12", x: 180, y: 680 }),
+    createLayoutBlock({ id: "grid-r2c3", readingOrder: 11, text: "Pending", x: 300, y: 680 }),
+  ];
+
+  const unscopedKnowledge = buildKnowledgeDocument(createSinglePageLayout(blocks));
+  assert.ok(unscopedKnowledge.tables[0]?.blockIds.includes("grid-noise-header"));
+
+  const knowledge = buildKnowledgeDocument(createSinglePageLayout(blocks, [
+    createLayoutRegion("region-table", "table", tableBlockIds),
+  ]));
+  const [table] = knowledge.tables;
+
+  assert.ok(table);
+  assert.equal(table.heuristic, "layout-grid");
+  assert.deepEqual(table.headers, ["Item", "Quantity", "Status"]);
+  assert.deepEqual(table.blockIds, tableBlockIds);
+  assert.ok(!table.blockIds.includes("grid-noise-header"));
+  assert.ok(!table.blockIds.includes("grid-noise-row"));
+});
+
 test("knowledge projects high-font row sequences without relying on compact line parsing", () => {
   const runs = [
     createObservedRun({ id: "run-r1c1", contentOrder: 0, text: "Alpha", fontSize: 10 }),
@@ -456,6 +500,36 @@ test("knowledge projects inline field-value rows without field-label duplication
   assert.deepEqual(form.fields[0]?.blockIds, ["fv-name"]);
   assert.equal(form.fields[0]?.citations[0]?.sourceSpan?.text, "Requester");
   assert.equal(form.fields[0]?.citations[1]?.sourceSpan?.text, "Ada Lovelace");
+});
+
+test("knowledge scopes form projection to interpreted layout form-like regions before page-wide fallback", () => {
+  const formBlockIds = ["fv-name", "fv-team", "fv-priority"];
+  const blocks = [
+    createLayoutBlock({ id: "fv-title", readingOrder: 0, text: "Request Details", role: "heading", fontSize: 20 }),
+    createLayoutBlock({ id: "fv-name", readingOrder: 1, text: "Requester: Ada Lovelace" }),
+    createLayoutBlock({ id: "fv-team", readingOrder: 2, text: "Team: Research" }),
+    createLayoutBlock({ id: "fv-priority", readingOrder: 3, text: "Priority: High" }),
+    createLayoutBlock({ id: "outside-invoice", readingOrder: 4, text: "Invoice: 100" }),
+    createLayoutBlock({ id: "outside-owner", readingOrder: 5, text: "Owner: Example" }),
+  ];
+
+  const unscopedKnowledge = buildKnowledgeDocument(createSinglePageLayout(blocks));
+  assert.ok(unscopedKnowledge.forms[0]?.blockIds.includes("outside-invoice"));
+
+  const knowledge = buildKnowledgeDocument(createSinglePageLayout(blocks, [
+    createLayoutRegion("region-form", "form-like", formBlockIds),
+  ]));
+  const [form] = knowledge.forms;
+
+  assert.ok(form);
+  assert.equal(form.heuristic, "field-value-form");
+  assert.deepEqual(form.blockIds, formBlockIds);
+  assert.deepEqual(
+    form.fields.map((field) => field.name),
+    ["Requester", "Team", "Priority"],
+  );
+  assert.ok(!form.blockIds.includes("outside-invoice"));
+  assert.ok(!form.blockIds.includes("outside-owner"));
 });
 
 test("knowledge projects field-label forms only when labels are spatially coherent", () => {
@@ -1055,7 +1129,10 @@ function createCompactRowRunLayout(texts: readonly string[]): PdfLayoutDocument 
   };
 }
 
-function createSinglePageLayout(blocks: readonly PdfLayoutBlock[]): PdfLayoutDocument {
+function createSinglePageLayout(
+  blocks: readonly PdfLayoutBlock[],
+  regions: readonly PdfLayoutRegion[] = [],
+): PdfLayoutDocument {
   return {
     kind: "pdf-layout",
     strategy: "line-blocks",
@@ -1064,10 +1141,25 @@ function createSinglePageLayout(blocks: readonly PdfLayoutBlock[]): PdfLayoutDoc
         pageNumber: 1,
         resolutionMethod: "page-tree",
         blocks,
+        ...(regions.length === 0 ? {} : { regions }),
       },
     ],
     extractedText: blocks.map((block) => block.text).join("\n"),
     knownLimits: [],
+  };
+}
+
+function createLayoutRegion(
+  id: string,
+  kind: PdfLayoutRegion["kind"],
+  blockIds: readonly string[],
+): PdfLayoutRegion {
+  return {
+    id,
+    pageNumber: 1,
+    kind,
+    blockIds,
+    confidence: 0.82,
   };
 }
 

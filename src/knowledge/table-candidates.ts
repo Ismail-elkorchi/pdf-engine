@@ -8,6 +8,7 @@ import type {
   PdfLayoutBlock,
   PdfLayoutDocument,
   PdfLayoutPage,
+  PdfLayoutRegion,
   PdfObservedDocument,
   PdfObservedPage,
   PdfObservedTextRun,
@@ -85,64 +86,124 @@ export function collectProjectedTableCandidates(
   const candidates: ProjectedTableCandidate[] = [];
 
   for (const page of layout.pages) {
-    const layoutGridCandidate = projectLayoutGridTable(page);
-    if (layoutGridCandidate) {
-      candidates.push(layoutGridCandidate);
+    const observationPage = observationPages.get(page.pageNumber);
+    for (const regionCandidate of collectRegionScopedCandidates(page, observationPage)) {
+      addCandidateIfNonOverlapping(candidates, regionCandidate);
     }
 
-    const observationPage = observationPages.get(page.pageNumber);
+    const layoutGridCandidate = projectLayoutGridTable(page);
+    addCandidateIfNonOverlapping(candidates, layoutGridCandidate);
+
     const rowSequenceCandidate =
       observationPage === undefined ? undefined : projectRowSequenceTable(page, observationPage, runToBlock);
-    if (
-      rowSequenceCandidate &&
-      !candidates.some((candidate) => projectedTableOverlap(candidate, rowSequenceCandidate))
-    ) {
-      candidates.push(rowSequenceCandidate);
-    }
+    addCandidateIfNonOverlapping(candidates, rowSequenceCandidate);
 
     const stackedHeaderCandidate =
       observationPage === undefined
         ? undefined
         : projectStackedHeaderSequenceTable(page, observationPage, runToBlock);
-    if (
-      stackedHeaderCandidate &&
-      !candidates.some((candidate) => projectedTableOverlap(candidate, stackedHeaderCandidate))
-    ) {
-      candidates.push(stackedHeaderCandidate);
-    }
+    addCandidateIfNonOverlapping(candidates, stackedHeaderCandidate);
 
     const contractAwardCandidate =
       observationPage === undefined
         ? undefined
         : projectContractAwardSequenceTable(page, observationPage, runToBlock);
-    if (
-      contractAwardCandidate &&
-      !candidates.some((candidate) => projectedTableOverlap(candidate, contractAwardCandidate))
-    ) {
-      candidates.push(contractAwardCandidate);
-    }
+    addCandidateIfNonOverlapping(candidates, contractAwardCandidate);
 
     const fieldValueCandidate = projectFieldValueFormTable(page);
-    if (
-      fieldValueCandidate &&
-      !candidates.some((candidate) => projectedTableOverlap(candidate, fieldValueCandidate))
-    ) {
-      candidates.push(fieldValueCandidate);
-    }
+    addCandidateIfNonOverlapping(candidates, fieldValueCandidate);
 
     const fieldLabelCandidate =
       observationPage === undefined
         ? undefined
         : projectFieldLabelFormTable(page, observationPage, runToBlock, fieldValueCandidate !== undefined);
-    if (
-      fieldLabelCandidate &&
-      !candidates.some((candidate) => projectedTableOverlap(candidate, fieldLabelCandidate))
-    ) {
-      candidates.push(fieldLabelCandidate);
+    addCandidateIfNonOverlapping(candidates, fieldLabelCandidate);
+  }
+
+  return candidates;
+}
+
+function collectRegionScopedCandidates(
+  page: PdfLayoutPage,
+  observationPage: PdfObservedPage | undefined,
+): readonly ProjectedTableCandidate[] {
+  const candidates: ProjectedTableCandidate[] = [];
+
+  for (const region of page.regions ?? []) {
+    const scopedPage = createRegionScopedPage(page, region);
+    if (scopedPage.blocks.length === 0) {
+      continue;
+    }
+
+    const scopedRunToBlock = buildRunToBlockIndexForBlocks(scopedPage.blocks);
+    const scopedObservationPage =
+      observationPage === undefined ? undefined : createRegionScopedObservationPage(observationPage, scopedRunToBlock);
+
+    if (region.kind === "table") {
+      addCandidateIfNonOverlapping(candidates, projectLayoutGridTable(scopedPage));
+      addCandidateIfNonOverlapping(
+        candidates,
+        scopedObservationPage === undefined
+          ? undefined
+          : projectRowSequenceTable(scopedPage, scopedObservationPage, scopedRunToBlock),
+      );
+      addCandidateIfNonOverlapping(
+        candidates,
+        scopedObservationPage === undefined
+          ? undefined
+          : projectStackedHeaderSequenceTable(scopedPage, scopedObservationPage, scopedRunToBlock),
+      );
+      addCandidateIfNonOverlapping(
+        candidates,
+        scopedObservationPage === undefined
+          ? undefined
+          : projectContractAwardSequenceTable(scopedPage, scopedObservationPage, scopedRunToBlock),
+      );
+      continue;
+    }
+
+    if (region.kind === "form-like") {
+      const fieldValueCandidate = projectFieldValueFormTable(scopedPage);
+      addCandidateIfNonOverlapping(candidates, fieldValueCandidate);
+      addCandidateIfNonOverlapping(
+        candidates,
+        scopedObservationPage === undefined
+          ? undefined
+          : projectFieldLabelFormTable(scopedPage, scopedObservationPage, scopedRunToBlock, fieldValueCandidate !== undefined),
+      );
     }
   }
 
   return candidates;
+}
+
+function addCandidateIfNonOverlapping(
+  candidates: ProjectedTableCandidate[],
+  candidate: ProjectedTableCandidate | undefined,
+): void {
+  if (candidate && !candidates.some((selectedCandidate) => projectedTableOverlap(selectedCandidate, candidate))) {
+    candidates.push(candidate);
+  }
+}
+
+function createRegionScopedPage(page: PdfLayoutPage, region: PdfLayoutRegion): PdfLayoutPage {
+  const regionBlockIds = new Set(region.blockIds);
+  return {
+    ...page,
+    blocks: page.blocks.filter((block) => regionBlockIds.has(block.id)),
+    regions: [region],
+  };
+}
+
+function createRegionScopedObservationPage(
+  observationPage: PdfObservedPage,
+  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
+): PdfObservedPage {
+  const runIds = new Set(runToBlock.keys());
+  return {
+    ...observationPage,
+    runs: observationPage.runs.filter((run) => runIds.has(run.id)),
+  };
 }
 
 function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
@@ -984,13 +1045,26 @@ function looksLikeGridHeaderRow(blocks: readonly AnchoredLayoutBlock[]): boolean
 function buildRunToBlockIndex(layout: PdfLayoutDocument): ReadonlyMap<string, PdfLayoutBlock> {
   const runToBlock = new Map<string, PdfLayoutBlock>();
   for (const page of layout.pages) {
-    for (const block of page.blocks) {
-      for (const runId of block.runIds) {
-        runToBlock.set(runId, block);
-      }
-    }
+    addBlocksToRunToBlockIndex(runToBlock, page.blocks);
   }
   return runToBlock;
+}
+
+function buildRunToBlockIndexForBlocks(blocks: readonly PdfLayoutBlock[]): ReadonlyMap<string, PdfLayoutBlock> {
+  const runToBlock = new Map<string, PdfLayoutBlock>();
+  addBlocksToRunToBlockIndex(runToBlock, blocks);
+  return runToBlock;
+}
+
+function addBlocksToRunToBlockIndex(
+  runToBlock: Map<string, PdfLayoutBlock>,
+  blocks: readonly PdfLayoutBlock[],
+): void {
+  for (const block of blocks) {
+    for (const runId of block.runIds) {
+      runToBlock.set(runId, block);
+    }
+  }
 }
 
 function toRunBlocks(
