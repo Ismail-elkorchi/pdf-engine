@@ -1,10 +1,14 @@
 import type {
+  PdfBoundingBox,
   PdfKnowledgeCitation,
   PdfKnowledgeDocument,
   PdfKnowledgeSourceSpan,
   PdfLayoutBlock,
   PdfLayoutDocument,
+  PdfObjectRef,
 } from "../contracts.ts";
+
+const BBOX_EPSILON = 0.001;
 
 export function assertKnowledgeCitationsResolvable(
   layout: PdfLayoutDocument,
@@ -96,6 +100,9 @@ function validateKnowledgeCitation(
   if (block.pageNumber !== citation.pageNumber) {
     throw new Error(`Unresolvable knowledge citation ${citation.id}: page ${citation.pageNumber} does not match block ${block.id}.`);
   }
+  if (citation.pageRef !== undefined && !objectRefsEqual(citation.pageRef, block.pageRef)) {
+    throw new Error(`Unresolvable knowledge citation ${citation.id}: page reference does not match block ${block.id}.`);
+  }
   for (const runId of citation.runIds) {
     if (!block.runIds.includes(runId)) {
       throw new Error(`Unresolvable knowledge citation ${citation.id}: run ${runId} is not part of block ${block.id}.`);
@@ -117,6 +124,10 @@ function validateKnowledgeSourceSpan(block: PdfLayoutBlock, citation: PdfKnowled
   if (sourceSpan === undefined) {
     return;
   }
+  if (sourceSpan.pageRef !== undefined && !objectRefsEqual(sourceSpan.pageRef, block.pageRef)) {
+    throw new Error(`Unresolvable knowledge citation ${citation.id}: source span page reference does not match block ${block.id}.`);
+  }
+  validateKnowledgeBoundingBox(citation.id, block, sourceSpan.bbox, "source span bbox");
   validateKnowledgeTextRange(citation.id, block, sourceSpan.blockRange, "source span");
   if (block.text.slice(sourceSpan.blockRange.start, sourceSpan.blockRange.end) !== sourceSpan.text) {
     throw new Error(`Unresolvable knowledge citation ${citation.id}: source span text is stale for block ${block.id}.`);
@@ -133,9 +144,13 @@ function validateKnowledgeSourceSpan(block: PdfLayoutBlock, citation: PdfKnowled
       throw new Error(`Unresolvable knowledge citation ${citation.id}: source span run ${runSpan.runId} is not cited.`);
     }
     validateKnowledgeTextRange(citation.id, block, runSpan.range, `run span ${runSpan.runId}`);
+    if (runSpan.range.start < sourceSpan.blockRange.start || runSpan.range.end > sourceSpan.blockRange.end) {
+      throw new Error(`Unresolvable knowledge citation ${citation.id}: run span ${runSpan.runId} is outside the source span range.`);
+    }
     if (block.text.slice(runSpan.range.start, runSpan.range.end) !== runSpan.text) {
       throw new Error(`Unresolvable knowledge citation ${citation.id}: run span ${runSpan.runId} text is stale.`);
     }
+    validateKnowledgeBoundingBox(citation.id, block, runSpan.bbox, `run span ${runSpan.runId} bbox`);
   }
 }
 
@@ -151,4 +166,47 @@ function validateKnowledgeTextRange(
   if (range.start < 0 || range.end < range.start || range.end > block.text.length) {
     throw new Error(`Unresolvable knowledge citation ${citationId}: ${label} range is outside block ${block.id}.`);
   }
+}
+
+function objectRefsEqual(left: PdfObjectRef | undefined, right: PdfObjectRef | undefined): boolean {
+  return left !== undefined &&
+    right !== undefined &&
+    left.objectNumber === right.objectNumber &&
+    left.generationNumber === right.generationNumber;
+}
+
+function validateKnowledgeBoundingBox(
+  citationId: string,
+  block: PdfLayoutBlock,
+  bbox: PdfBoundingBox | undefined,
+  label: string,
+): void {
+  if (bbox === undefined) {
+    return;
+  }
+  if (!bboxIsFinite(bbox)) {
+    throw new Error(`Unresolvable knowledge citation ${citationId}: ${label} is not finite.`);
+  }
+  if (block.bbox === undefined) {
+    throw new Error(`Unresolvable knowledge citation ${citationId}: ${label} cannot be checked without block bbox ${block.id}.`);
+  }
+  if (!bboxContainedBy(bbox, block.bbox)) {
+    throw new Error(`Unresolvable knowledge citation ${citationId}: ${label} is outside block ${block.id}.`);
+  }
+}
+
+function bboxContainedBy(inner: PdfBoundingBox, outer: PdfBoundingBox): boolean {
+  return inner.x + BBOX_EPSILON >= outer.x &&
+    inner.y + BBOX_EPSILON >= outer.y &&
+    inner.x + inner.width <= outer.x + outer.width + BBOX_EPSILON &&
+    inner.y + inner.height <= outer.y + outer.height + BBOX_EPSILON;
+}
+
+function bboxIsFinite(bbox: PdfBoundingBox): boolean {
+  return Number.isFinite(bbox.x) &&
+    Number.isFinite(bbox.y) &&
+    Number.isFinite(bbox.width) &&
+    Number.isFinite(bbox.height) &&
+    bbox.width >= 0 &&
+    bbox.height >= 0;
 }

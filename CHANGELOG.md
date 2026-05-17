@@ -29,6 +29,7 @@ All notable changes are documented in this file.
 - Breaking knowledge contract update: knowledge documents now expose deterministic Markdown in chunk order, keep projected table Markdown tied to citation-backed table cells, and hard-fail unresolvable knowledge citation anchors during projection.
 - Knowledge chunk, table, and citation identifiers now derive from source provenance instead of creation order, so unchanged projections keep stable identifiers across unrelated later content.
 - Knowledge citations now expose source-span evidence when a chunk or table cell can be tied to an exact layout-block slice, and citation validation now rejects stale text, stale spans, and table-cell citations that overreach the cell text.
+- Knowledge citation validation now also checks source page references, bounding boxes, multi-run source spans, and source-span range containment.
 - Knowledge projected table chunks now stay near their source reading position instead of being appended after later page text, while explicit field-label projections avoid pulling later prose into table cells.
 - Knowledge documents now expose typed form projections when direct field-value or field-label evidence is sufficient, while still abstaining when form evidence is too weak.
 - Knowledge Markdown now serializes from typed projection nodes, keeps projected tables at their source position, and escapes Markdown table, heading, and list separators deterministically.
