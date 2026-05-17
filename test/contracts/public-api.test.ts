@@ -134,6 +134,84 @@ test("public OCR providers receive page imagery outside full pipeline runs", asy
   assert.equal(result.value?.markdown.includes("Stage OCR"), true);
 });
 
+test("public OCR auto mode preserves native text without invoking OCR", async () => {
+  let callCount = 0;
+  const provider: PdfOcrProvider = {
+    name: "contract-auto-ocr",
+    async recognizePage(input) {
+      callCount += 1;
+      return {
+        pageNumber: input.pageNumber,
+        lines: [
+          {
+            text: "Unexpected OCR",
+            confidence: 1,
+          },
+        ],
+      };
+    },
+  };
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageContents([
+    "BT /F1 12 Tf 72 720 Td (Native Text) Tj ET",
+  ]);
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-ocr-auto-native.pdf",
+    },
+    ocr: {
+      mode: "auto",
+      provider,
+    },
+  });
+
+  assert.equal(callCount, 0);
+  assert.equal(result.observation.value?.ocr?.pages.length, 0);
+  assert.equal(result.observation.value?.extractedText.includes("Native Text"), true);
+  assert.equal(result.observation.value?.extractedText.includes("Unexpected OCR"), false);
+});
+
+test("public OCR always mode fuses OCR lines without replacing native text", async () => {
+  const provider: PdfOcrProvider = {
+    name: "contract-hybrid-ocr",
+    async recognizePage(input) {
+      assert.equal(input.pageImage?.mimeType, "image/png");
+      return {
+        pageNumber: input.pageNumber,
+        lines: [
+          {
+            text: "Supplemental OCR",
+            confidence: 0.92,
+          },
+        ],
+      };
+    },
+  };
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageContents([
+    "BT /F1 12 Tf 72 720 Td (Native Text) Tj ET",
+  ]);
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-ocr-hybrid-native.pdf",
+    },
+    ocr: {
+      mode: "always",
+      provider,
+    },
+  });
+
+  assert.equal(result.observation.value?.ocr?.pages[0]?.decision, "applied");
+  assert.equal(result.observation.value?.extractedText.includes("Native Text"), true);
+  assert.equal(result.observation.value?.extractedText.includes("Supplemental OCR"), true);
+  assert.equal(result.observation.value?.pages[0]?.runs.some((run) => run.origin === "native-text" && run.text === "Native Text"), true);
+  assert.equal(result.observation.value?.pages[0]?.runs.some((run) => run.origin === "ocr" && run.text === "Supplemental OCR"), true);
+});
+
 test("public OCR contracts fail closed when provider evidence is unavailable or weak", async () => {
   const engine = createPdfEngine();
   const bytes = buildPdfWithRenderImagery();
