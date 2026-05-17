@@ -141,6 +141,7 @@ function collectRegionScopedCandidates(
 
     if (region.kind === "table") {
       addCandidateIfNonOverlapping(candidates, projectLayoutGridTable(scopedPage));
+      addCandidateIfNonOverlapping(candidates, projectRegionTextTable(scopedPage));
       continue;
     }
 
@@ -157,6 +158,61 @@ function collectRegionScopedCandidates(
   }
 
   return candidates;
+}
+
+function projectRegionTextTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
+  const blocks = page.blocks
+    .filter((block) => block.role !== "header" && block.role !== "footer")
+    .sort((left, right) => left.readingOrder - right.readingOrder);
+  if (blocks.length < 3) {
+    return undefined;
+  }
+
+  const parsedRows = blocks
+    .map((block) => ({
+      block,
+      cells: splitRegionTableRow(block.text),
+    }))
+    .filter((row): row is { readonly block: PdfLayoutBlock; readonly cells: readonly string[] } =>
+      row.cells !== undefined && row.cells.length >= GRID_ROW_CELL_MIN_COUNT
+    );
+  if (parsedRows.length < ROW_SEQUENCE_MIN_ROWS + 1) {
+    return undefined;
+  }
+
+  const columnCount = mostCommonColumnCount(parsedRows.map((row) => row.cells.length));
+  if (columnCount < GRID_HEADER_ROW_MIN_COLUMNS) {
+    return undefined;
+  }
+
+  const alignedRows = parsedRows
+    .filter((row) => row.cells.length === columnCount)
+    .slice(0, COMPACT_ROW_SEQUENCE_MAX_ROW_TOKENS);
+  if (alignedRows.length < ROW_SEQUENCE_MIN_ROWS + 1) {
+    return undefined;
+  }
+
+  const [headerRow, ...bodyRows] = alignedRows;
+  if (headerRow === undefined || bodyRows.length < ROW_SEQUENCE_MIN_ROWS || !looksLikeRegionTableHeader(headerRow.cells)) {
+    return undefined;
+  }
+
+  const rows: ProjectedTableRowSeed[] = alignedRows.map((row) => ({
+    cells: row.cells.map((text, columnIndex) => ({
+      columnIndex,
+      text,
+      blocks: [row.block],
+    })),
+  }));
+
+  return {
+    pageNumber: page.pageNumber,
+    heuristic: "layout-region-table",
+    headers: headerRow.cells,
+    blockIds: alignedRows.map((row) => row.block.id),
+    confidence: Number(Math.min(0.75, 0.5 + bodyRows.length * 0.035 + columnCount * 0.025).toFixed(2)),
+    rows,
+  };
 }
 
 function addCandidateIfNonOverlapping(
@@ -1384,6 +1440,42 @@ function compactHeadersFitNumericEvidence(
 
 function compactCellContainsNumber(text: string): boolean {
   return /\d/u.test(text);
+}
+
+function splitRegionTableRow(text: string): readonly string[] | undefined {
+  const normalizedText = normalizeCellText(text);
+  if (normalizedText.length === 0) {
+    return undefined;
+  }
+
+  const delimiter = normalizedText.includes("|") ? /\s*\|\s*/u : /\s{2,}/u;
+  const cells = normalizedText
+    .split(delimiter)
+    .map((cell) => normalizeCellText(cell))
+    .filter((cell) => cell.length > 0);
+  return cells.length >= GRID_ROW_CELL_MIN_COUNT ? cells : undefined;
+}
+
+function mostCommonColumnCount(columnCounts: readonly number[]): number {
+  const counts = new Map<number, number>();
+  for (const columnCount of columnCounts) {
+    counts.set(columnCount, (counts.get(columnCount) ?? 0) + 1);
+  }
+
+  return [...counts.entries()].sort((left, right) => {
+    if (left[1] !== right[1]) {
+      return right[1] - left[1];
+    }
+    return right[0] - left[0];
+  })[0]?.[0] ?? 0;
+}
+
+function looksLikeRegionTableHeader(cells: readonly string[]): boolean {
+  if (cells.length < GRID_HEADER_ROW_MIN_COLUMNS) {
+    return false;
+  }
+
+  return cells.every((cell) => looksLikeCompactHeaderCell(cell));
 }
 
 function splitCompactRunTokens(text: string): readonly string[] {

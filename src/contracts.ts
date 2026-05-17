@@ -129,6 +129,10 @@ export type PdfKnownLimitCode =
   | "knowledge-markdown-heuristic"
   | "table-projection-heuristic"
   | "table-projection-not-implemented"
+  | "ocr-provider-unavailable"
+  | "ocr-timeout"
+  | "ocr-low-confidence"
+  | "ocr-fusion-heuristic"
   | "render-imagery-partial"
   | "render-resource-payloads-partial";
 
@@ -141,6 +145,155 @@ export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter
  * Observation strategy used to produce the current text and page-mark evidence.
  */
 export type PdfObservationStrategy = "content-stream-interpreter" | "heuristic-literal-scan";
+
+/**
+ * OCR execution mode. OCR is disabled by default and must be requested explicitly.
+ */
+export type PdfOcrMode = "off" | "auto" | "always";
+
+/**
+ * Why the OCR fusion layer considered one page.
+ */
+export type PdfOcrPageReason = "explicit" | "no-native-text";
+
+/**
+ * OCR fusion decision for one page.
+ */
+export type PdfOcrFusionDecision =
+  | "applied"
+  | "failed"
+  | "low-confidence"
+  | "provider-unavailable"
+  | "skipped-native-text"
+  | "timeout";
+
+/**
+ * Optional page image supplied to an OCR provider.
+ */
+export interface PdfOcrPageImage {
+  /** Image bytes supplied to the OCR provider. */
+  readonly bytes: Uint8Array;
+  /** Image media type, for example `image/png`. */
+  readonly mimeType: string;
+  /** Image width in pixels when known. */
+  readonly width?: number;
+  /** Image height in pixels when known. */
+  readonly height?: number;
+}
+
+/**
+ * Input for an OCR provider for one page.
+ */
+export interface PdfOcrPageInput {
+  /** Original document source. */
+  readonly source: PdfDocumentSource;
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Page object reference when known. */
+  readonly pageRef?: PdfObjectRef;
+  /** Reason OCR was requested for this page. */
+  readonly reason: PdfOcrPageReason;
+  /** Requested language identifiers. */
+  readonly languages: readonly string[];
+  /** Optional page image supplied by the pipeline or caller. */
+  readonly pageImage?: PdfOcrPageImage;
+  /** Abort signal for provider work when supported. */
+  readonly signal?: AbortSignal;
+}
+
+/**
+ * One OCR text line returned by a provider.
+ */
+export interface PdfOcrTextLine {
+  /** Recognized text. */
+  readonly text: string;
+  /** Provider confidence in the range 0..1 when known. */
+  readonly confidence?: number;
+  /** Approximate line bounds in page coordinates when known. */
+  readonly bbox?: PdfBoundingBox;
+  /** Language identifier when known. */
+  readonly language?: string;
+}
+
+/**
+ * OCR result for one page.
+ */
+export interface PdfOcrPageResult {
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Recognized text lines. */
+  readonly lines: readonly PdfOcrTextLine[];
+  /** Optional provider-specific diagnostic messages. */
+  readonly diagnostics?: readonly string[];
+}
+
+/**
+ * OCR provider contract used by the core engine.
+ */
+export interface PdfOcrProvider {
+  /** Provider identifier for diagnostics and provenance. */
+  readonly name: string;
+  /**
+   * Recognizes text for one page.
+   *
+   * Providers must be deterministic for identical input and configuration.
+   */
+  recognizePage(input: PdfOcrPageInput): Promise<PdfOcrPageResult>;
+  /** Releases provider-owned workers, WASM instances, or caches. */
+  dispose?(): Promise<void>;
+}
+
+/**
+ * OCR options accepted by pipeline requests and engine defaults.
+ */
+export interface PdfOcrOptions {
+  /** OCR mode. Defaults to `off`. */
+  readonly mode?: PdfOcrMode;
+  /** Provider used when OCR is enabled. */
+  readonly provider?: PdfOcrProvider;
+  /** Language identifiers passed to the provider. Defaults to English. */
+  readonly languages?: readonly string[];
+  /** Minimum accepted line confidence. Defaults to `0.5`. */
+  readonly minConfidence?: number;
+  /** Maximum pages OCR may process for one request. Defaults to `25`. */
+  readonly maxPages?: number;
+  /** Provider timeout per page in milliseconds. Defaults to `30000`. */
+  readonly timeoutMilliseconds?: number;
+}
+
+/**
+ * OCR fusion evidence for one page.
+ */
+export interface PdfOcrPageEvidence {
+  /** One-based page number. */
+  readonly pageNumber: number;
+  /** Provider identifier when a provider was invoked. */
+  readonly providerName?: string;
+  /** Fusion decision for the page. */
+  readonly decision: PdfOcrFusionDecision;
+  /** Reason OCR was considered for this page. */
+  readonly reason: PdfOcrPageReason;
+  /** Number of OCR lines accepted into observation evidence. */
+  readonly acceptedLineCount: number;
+  /** Number of OCR lines rejected by confidence or empty-text policy. */
+  readonly rejectedLineCount: number;
+  /** Provider or fusion diagnostic messages. */
+  readonly diagnostics: readonly string[];
+}
+
+/**
+ * OCR evidence attached to an observation document when OCR is requested.
+ */
+export interface PdfOcrDocumentEvidence {
+  /** OCR mode used for the request. */
+  readonly mode: PdfOcrMode;
+  /** Provider identifier when available. */
+  readonly providerName?: string;
+  /** Languages requested from the provider. */
+  readonly languages: readonly string[];
+  /** Page-level OCR fusion evidence. */
+  readonly pages: readonly PdfOcrPageEvidence[];
+}
 
 /**
  * Visibility state recovered for marked content or other observed page evidence.
@@ -1225,6 +1378,8 @@ export interface PdfObservedDocument {
   readonly extractedText: string;
   /** Observed pages in source order. */
   readonly pages: readonly PdfObservedPage[];
+  /** OCR evidence when OCR was requested for this observation. */
+  readonly ocr?: PdfOcrDocumentEvidence;
   /** Known implementation limits that materially affect this observation result. */
   readonly knownLimits: readonly PdfKnownLimitCode[];
 }
@@ -1379,6 +1534,7 @@ export type PdfKnowledgeStrategy = "layout-chunks" | "layout-chunks-and-heuristi
  */
 export type PdfKnowledgeTableHeuristic =
   | "layout-grid"
+  | "layout-region-table"
   | "row-sequence"
   | "stacked-header-sequence"
   | "field-value-form"
@@ -1502,7 +1658,7 @@ export interface PdfKnowledgeTable {
 /**
  * Heuristic used to project one knowledge form.
  */
-export type PdfKnowledgeFormHeuristic = "field-value-form" | "field-label-form";
+export type PdfKnowledgeFormHeuristic = "field-value-form" | "field-label-form" | "layout-region-form";
 
 /**
  * Whether a projected form field has direct value evidence.
@@ -2072,6 +2228,8 @@ export interface PdfObservationRequest {
   readonly policy?: PdfAdmissionPolicy;
   /** Optional password provider for encrypted documents. */
   readonly passwordProvider?: PdfPasswordProvider;
+  /** Optional OCR configuration for this request. */
+  readonly ocr?: PdfOcrOptions;
 }
 
 /**
@@ -2084,6 +2242,8 @@ export interface PdfLayoutRequest {
   readonly policy?: PdfAdmissionPolicy;
   /** Optional password provider for encrypted documents. */
   readonly passwordProvider?: PdfPasswordProvider;
+  /** Optional OCR configuration for this request. */
+  readonly ocr?: PdfOcrOptions;
 }
 
 /**
@@ -2096,6 +2256,8 @@ export interface PdfKnowledgeRequest {
   readonly policy?: PdfAdmissionPolicy;
   /** Optional password provider for encrypted documents. */
   readonly passwordProvider?: PdfPasswordProvider;
+  /** Optional OCR configuration for this request. */
+  readonly ocr?: PdfOcrOptions;
 }
 
 /**
@@ -2108,6 +2270,8 @@ export interface PdfRenderRequest {
   readonly policy?: PdfAdmissionPolicy;
   /** Optional password provider for encrypted documents. */
   readonly passwordProvider?: PdfPasswordProvider;
+  /** Optional OCR configuration for this request. */
+  readonly ocr?: PdfOcrOptions;
 }
 
 /**
@@ -2122,6 +2286,8 @@ export interface PdfPipelineRequest {
   readonly policy?: PdfAdmissionPolicy;
   /** Optional password provider for encrypted documents. */
   readonly passwordProvider?: PdfPasswordProvider;
+  /** Optional OCR configuration for this request. */
+  readonly ocr?: PdfOcrOptions;
 }
 
 /**
@@ -2170,6 +2336,8 @@ export interface PdfPipelineResult {
 export interface PdfEngineOptions {
   /** Default policy overrides applied to every request unless a request supplies its own overrides. */
   readonly defaultPolicy?: PdfAdmissionPolicy;
+  /** Default OCR options applied to every request unless a request supplies its own OCR options. */
+  readonly defaultOcr?: PdfOcrOptions;
 }
 
 /**
@@ -2184,6 +2352,8 @@ export interface PdfEngine {
   readonly capabilities: PdfRuntimeCapabilities;
   /** Normalized default policy used by the engine instance. */
   readonly defaultPolicy: PdfNormalizedAdmissionPolicy;
+  /** Default OCR options used by the engine instance. */
+  readonly defaultOcr: PdfOcrOptions;
   /**
    * Releases engine-owned resources.
    *

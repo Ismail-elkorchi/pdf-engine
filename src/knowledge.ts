@@ -19,7 +19,7 @@ export function buildKnowledgeDocument(
   observation?: PdfObservedDocument,
 ): PdfKnowledgeDocument {
   const tables = buildKnowledgeTables(layout, observation);
-  const forms = buildKnowledgeForms(tables);
+  const forms = buildKnowledgeForms(layout, tables);
   const { chunks, projectionItems } = buildKnowledgeChunksWithProjectionItems(layout, tables);
   const strategy: PdfKnowledgeStrategy =
     tables.length === 0 ? "layout-chunks" : "layout-chunks-and-heuristic-tables";

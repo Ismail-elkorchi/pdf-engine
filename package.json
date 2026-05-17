@@ -30,6 +30,10 @@
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
     },
+    "./ocr/tesseract": {
+      "types": "./dist/ocr/tesseract.d.ts",
+      "import": "./dist/ocr/tesseract.js"
+    },
     "./viewer": {
       "types": "./dist/viewer.d.ts",
       "import": "./dist/viewer.js"
@@ -55,8 +59,8 @@
     "verify:runtimes": "node scripts/verify-runtime-versions.mjs",
     "verify:runtimes:pinned": "node scripts/verify-runtime-versions.mjs --mode=pinned",
     "runtime:staleness": "node scripts/runtime-staleness-check.mjs",
-    "docs:lint:jsr": "deno doc --lint jsr/mod.ts",
-    "docs:test:jsr": "deno test --doc --no-check jsr/mod.ts",
+    "docs:lint:jsr": "deno doc --lint jsr/mod.ts jsr/ocr/tesseract.ts",
+    "docs:test:jsr": "deno test --doc --no-check jsr/mod.ts jsr/ocr/tesseract.ts",
     "docs:check:jsr": "npm run docs:lint:jsr && npm run docs:test:jsr",
     "check": "npm run lint && npm run typecheck && npm run verify:runtimes && npm run docs:check:jsr",
     "deps:freshness": "node scripts/check-dependency-freshness.mjs",

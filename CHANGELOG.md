@@ -34,3 +34,7 @@ All notable changes are documented in this file.
 - Knowledge documents now expose typed form projections when direct field-value or field-label evidence is sufficient, while still abstaining when form evidence is too weak.
 - Knowledge table and form projection now scopes candidates through interpreted layout regions before using page-wide fallback heuristics.
 - Knowledge Markdown now serializes from typed projection nodes, keeps projected tables at their source position, and escapes Markdown table, heading, and list separators deterministically.
+- Knowledge projection now uses interpreted table regions to recover pipe-delimited region tables and uses interpreted form-like regions to emit no-value form fields with citation-backed label provenance.
+- Observation requests now accept explicit OCR options and providers; OCR is off by default, fuses accepted lines into observation evidence only when requested, and records provider-unavailable, timeout, low-confidence, and fusion diagnostics without replacing native text silently.
+- An optional `./ocr/tesseract` helper creates a Tesseract.js-compatible OCR provider from a caller-supplied module loader without bundling trained data or fetching models automatically.
+- Render imagery no longer reports dashed vector paths as partial imagery when the page otherwise stays within supported vector imagery semantics.

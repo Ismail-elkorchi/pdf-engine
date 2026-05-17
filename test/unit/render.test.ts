@@ -6,6 +6,7 @@ import { createPdfEngine } from "../../src/index.ts";
 import {
   buildPdfWithDenseVectorImagery,
   buildPdfWithOverscaledImageImagery,
+  buildPdfWithPageSpecs,
   buildPdfWithRenderImagery,
   buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
@@ -419,6 +420,33 @@ test("buildRenderDocument keeps dense rectangle imagery deterministic", async ()
     assert.deepEqual(firstPage.imagery.raster.bytes, secondPage.imagery.raster.bytes);
     assert.equal(firstPage.renderHash.hex, secondPage.renderHash.hex);
   }
+});
+
+test("buildRenderDocument treats dashed vector paths as supported imagery", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageSpecs([
+    {
+      mediaBox: [0, 0, 200, 120],
+      content: [
+        "0 0 0 RG",
+        "2 w",
+        "[6 3] 0 d",
+        "20 60 m",
+        "180 60 l",
+        "S",
+      ].join("\n"),
+    },
+  ]);
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "render-dashed-vector-path.pdf",
+    },
+  });
+
+  assert.ok(result.render.value?.pages[0]?.imagery?.svg?.markup.includes("stroke-dasharray=\"6 3\""));
+  assert.equal(result.render.value?.knownLimits.includes("render-imagery-partial"), false);
 });
 
 test("buildRenderDocument clips overscaled image raster work to the visible page box", async () => {
