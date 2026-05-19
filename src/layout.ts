@@ -1833,6 +1833,16 @@ function classifyLayoutBlock(
       );
     }
 
+    if (shouldTreatRepeatedTableBoundaryAsHeading(block, blockIndex, blocks)) {
+      return withStructuralRoleInference(
+        block,
+        "heading",
+        0.66,
+        "repeated-boundary-table-heading",
+        "Repeated top text also matched table-header evidence, so it was kept as a heading.",
+      );
+    }
+
     return withStructuralRoleInference(
       block,
       "header",
@@ -1843,6 +1853,16 @@ function classifyLayoutBlock(
   }
 
   if (key && repeatedBoundarySets.footers.has(key) && blockIndex === blocks.length - 1) {
+    if (shouldTreatRepeatedTableBoundaryAsHeading(block, blockIndex, blocks)) {
+      return withStructuralRoleInference(
+        block,
+        "heading",
+        0.66,
+        "repeated-boundary-table-heading",
+        "Repeated bottom text also matched table-header evidence, so it was kept as a heading.",
+      );
+    }
+
     if (shouldTreatRepeatedBoundaryAsBody(block, blockIndex, blocks)) {
       return withStructuralRoleInference(
         block,
@@ -3212,7 +3232,36 @@ function shouldTreatRepeatedHeaderAsHeading(
       looksLikeSectionHeading(normalized) ||
       looksLikeStandaloneQuestionHeading(normalized) ||
       /\b(?:abstract|acknowledg(?:e)?ments|appendix|contents|foreword|index|introduction|notes?|preface)\b/iu.test(normalized)
-    );
+  );
+}
+
+function shouldTreatRepeatedTableBoundaryAsHeading(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (blockIndex !== 0 && blockIndex !== blocks.length - 1) {
+    return false;
+  }
+
+  const normalized = normalizeBlockText(block.text);
+  if (normalized.length === 0 || countContractAwardHeaderSignals(normalized) === 0) {
+    return false;
+  }
+
+  const pageText = blocks.map((candidate) => candidate.text).join(" ");
+  const contractHeaderSignals = countContractAwardHeaderSignals(pageText);
+  const contractRowCount = blocks.filter((candidate) => looksLikeContractAwardDataBlock(candidate.text)).length;
+  if (contractHeaderSignals >= 4 && contractRowCount >= 2) {
+    return true;
+  }
+
+  const headerCount = blocks.filter((candidate) => looksLikeTableHeaderLabel(candidate, blocks)).length;
+  const dataCount = blocks.filter((candidate, candidateIndex) =>
+    looksLikeTableRowDescriptor(candidate, candidateIndex, blocks) ||
+    looksLikeTabularDataText(candidate.text)
+  ).length;
+  return headerCount >= 3 && dataCount >= 2;
 }
 
 function shouldTreatRepeatedBoundaryAsBody(

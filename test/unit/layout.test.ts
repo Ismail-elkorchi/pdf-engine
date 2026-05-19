@@ -176,6 +176,43 @@ test("layout separates repeated page boundaries from body flow without dropping 
   );
 });
 
+test("layout keeps repeated table header boundaries out of footer role", () => {
+  const layout = buildLayoutDocument({
+    kind: "pdf-observation",
+    strategy: "content-stream-interpreter",
+    extractedText: "",
+    knownLimits: [],
+    pages: [1, 2].map((pageNumber) => ({
+      pageNumber,
+      resolutionMethod: "page-tree",
+      glyphs: [],
+      runs: [
+        run(`run-p${String(pageNumber)}-contractor`, 0, "Contractor/Suppliers /Consultant", 84, 150, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-method`, 1, "Method of Procurement", 96, 132, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-amount`, 2, "Contract Amount", 108, 114, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-remarks`, 3, "Estimated completion date Remarks", 120, 96, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-row-1`, 4, "24 Procurement of traffic signals", 132, 76, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-row-2`, 5, "23 Procurement of software licenses", 144, 56, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-serial`, 6, "Serial No. Contract Description", 156, 36, 10, pageNumber),
+      ],
+      marks: [],
+    })),
+  });
+
+  assert.ok(
+    layout.pages.every((page) => {
+      const repeatedHeader = page.blocks.find((block) => block.text === "Serial No. Contract Description");
+      return repeatedHeader?.role === "heading" &&
+        repeatedHeader.inferences?.some((inference) =>
+          inference.kind === "structural-role" &&
+          inference.method === "repeated-boundary-table-heading"
+        );
+    }),
+  );
+  assert.match(layout.extractedText, /Serial No\. Contract Description/u);
+  assert.doesNotMatch(layout.pages.map((page) => page.blocks.at(-1)?.role).join(" "), /footer/u);
+});
+
 test("layout emits a provenance-backed table region from anchored header and row evidence", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-header-specimen", 0, "Specimen", 72, 700),
