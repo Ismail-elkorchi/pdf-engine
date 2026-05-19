@@ -1701,6 +1701,14 @@ function classifyLayoutBlock(
     };
   }
 
+  if (looksLikeNumberedSectionHeadingBeforeBody(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "heading",
+      roleConfidence: 0.68,
+    };
+  }
+
   if (looksLikeTableRowDescriptor(block, blockIndex, blocks)) {
     return {
       ...block,
@@ -2682,6 +2690,60 @@ function looksLikeTableRowDescriptor(
   });
 
   return dataNeighbor;
+}
+
+function looksLikeNumberedSectionHeadingBeforeBody(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  const normalized = normalizeBlockText(block.text);
+  if (
+    !block.anchor ||
+    !looksLikeSectionHeading(normalized) ||
+    normalized.length > 64 ||
+    countLabelMarkers(normalized) > 0
+  ) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 6) {
+    return false;
+  }
+
+  const fontSize = block.fontSize ?? 12;
+  return blocks
+    .slice(blockIndex + 1, Math.min(blocks.length, blockIndex + 5))
+    .some((candidate) => {
+      const candidateText = normalizeBlockText(candidate.text);
+      if (!candidate.anchor || candidateText.length < 40 || !startsLikeSentence(candidateText)) {
+        return false;
+      }
+
+      const verticalGap = block.anchor!.y - candidate.anchor.y;
+      if (verticalGap <= Math.max(4, fontSize * 0.35) || verticalGap > Math.max(72, fontSize * 7)) {
+        return false;
+      }
+
+      const horizontalDrift = Math.abs(block.anchor!.x - candidate.anchor.x);
+      if (horizontalDrift > Math.max(20, fontSize * 2)) {
+        return false;
+      }
+
+      return !looksLikeHeadingLikeText(candidateText, candidate.fontSize) && looksLikeNarrativeBodyText(candidateText);
+    });
+}
+
+function looksLikeNarrativeBodyText(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (!/^[\p{Lu}\p{Lt}]/u.test(normalized) || !/[\p{Ll}]/u.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  return words.length >= 8 &&
+    /\b(?:a|an|and|as|for|in|of|on|that|the|to|which|with)\b/iu.test(normalized);
 }
 
 function looksLikeTableHeaderLabel(

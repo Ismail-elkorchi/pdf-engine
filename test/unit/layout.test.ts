@@ -204,6 +204,49 @@ test("layout emits a provenance-backed table region from anchored header and row
   ));
 });
 
+test("layout classifies numbered section headings before table-row evidence", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Dense Retrieval Paper", 72, 760, 16),
+    run("run-metadata", 1, "CIKM 2021", 330, 700, 9),
+    run("run-section", 2, "1 INTRODUCTION", 72, 700, 11),
+    run(
+      "run-body",
+      3,
+      "Search engine architectures often follow a cascading architecture [10, 18] with BM25 candidate retrieval.",
+      72,
+      680,
+      9,
+    ),
+  ]));
+
+  const sectionBlock = layout.pages[0]?.blocks.find((block) => block.text === "1 INTRODUCTION");
+  const bodyBlock = layout.pages[0]?.blocks.find((block) => block.text.startsWith("Search engine architectures"));
+
+  assert.equal(sectionBlock?.role, "heading");
+  assert.equal(bodyBlock?.role, "body");
+  assert.match(layout.extractedText, /1 INTRODUCTION\n\nSearch engine architectures/u);
+});
+
+test("layout keeps numbered table row descriptors as body evidence", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-header-item", 0, "Item", 72, 700),
+    run("run-header-amount", 1, "Amount", 200, 700),
+    run("run-header-status", 2, "Status", 320, 700),
+    run("run-row-label", 3, "1 Hardware", 72, 676),
+    run("run-row-amount", 4, "$1200", 200, 676),
+    run("run-row-status", 5, "paid", 320, 676),
+    run("run-row-label-2", 6, "2 Services", 72, 652),
+    run("run-row-amount-2", 7, "$900", 200, 652),
+    run("run-row-status-2", 8, "pending", 320, 652),
+  ]));
+
+  const firstRowLabel = layout.pages[0]?.blocks.find((block) => block.text === "1 Hardware");
+  const tableRegion = layout.pages[0]?.regions?.find((region) => region.kind === "table");
+
+  assert.equal(firstRowLabel?.role, "body");
+  assert.ok(tableRegion);
+});
+
 test("layout does not emit a table region from incidental numeric prose", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-title", 0, "Quarterly Amount Review", 72, 700, 16),
