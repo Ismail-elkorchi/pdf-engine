@@ -1207,6 +1207,10 @@ function shouldMergeAdjacentBlocks(
     return false;
   }
 
+  if (shouldKeepLedgerRowsSeparate(previousBlock, currentBlock)) {
+    return false;
+  }
+
   if (isSameLineBlockContinuation(previousBlock, currentBlock, writingMode)) {
     return true;
   }
@@ -1341,6 +1345,10 @@ function shouldStartParagraph(
     return false;
   }
 
+  if (shouldStartLedgerRowParagraph(blocks, blockIndex)) {
+    return true;
+  }
+
   if (shouldKeepCompactBlocksInParagraph(previousBlock, currentBlock, previousText, currentText)) {
     return false;
   }
@@ -1431,6 +1439,65 @@ function shouldStartParagraph(
   }
 
   return hasShortTail;
+}
+
+function shouldStartLedgerRowParagraph(
+  blocks: readonly GroupedBlockSeed[],
+  blockIndex: number,
+): boolean {
+  const currentBlock = blocks[blockIndex];
+  if (!currentBlock?.anchor || !looksLikeLedgerRowLabelText(currentBlock.text)) {
+    return false;
+  }
+
+  const fontSize = currentBlock.fontSize ?? 12;
+  const sameColumnRows = blocks.filter((candidate) =>
+    candidate.anchor !== undefined &&
+    Math.abs(candidate.anchor.x - currentBlock.anchor!.x) <= Math.max(12, fontSize * 1.2) &&
+    Math.abs(candidate.anchor.y - currentBlock.anchor!.y) <= Math.max(120, fontSize * 12) &&
+    looksLikeLedgerRowLabelText(candidate.text)
+  );
+  if (sameColumnRows.length < 3) {
+    return false;
+  }
+
+  const previousBlock = blocks[blockIndex - 1];
+  const nextBlock = blocks[blockIndex + 1];
+  return [previousBlock, nextBlock].some((candidate) =>
+    candidate?.anchor !== undefined &&
+    Math.abs(candidate.anchor.x - currentBlock.anchor!.x) <= Math.max(12, fontSize * 1.2) &&
+    looksLikeLedgerRowLabelText(candidate.text)
+  );
+}
+
+function looksLikeLedgerRowLabelText(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0 || normalized.length > 80 || /[.!?]$/u.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 8) {
+    return false;
+  }
+
+  return /[*]{2,}/u.test(normalized) ||
+    /\d+(?:[.,]\d+)?\s*%/u.test(normalized) ||
+    /\b(?:allowance|base|brut|cong[eé]s|contribution|deduction|d[eé]pan|gross|hours?|hrs?|imp[oô]t|net|premium|rate|remuneration|r[eé]mun[eé]ration|retenue|salary|salaire|sant[eé]|suppl|tax|taux|total|wage)\b/iu.test(normalized);
+}
+
+function shouldKeepLedgerRowsSeparate(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+): boolean {
+  if (!previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  return looksLikeLedgerRowLabelText(previousBlock.text) &&
+    looksLikeLedgerRowLabelText(currentBlock.text) &&
+    Math.abs(previousBlock.anchor.x - currentBlock.anchor.x) <= Math.max(12, fontSize * 1.2);
 }
 
 function shouldKeepLeadingCarryOverTailWithPrevious(
@@ -1895,6 +1962,14 @@ function classifyLayoutBlock(
       ...block,
       role: "list",
       roleConfidence: 0.66,
+    };
+  }
+
+  if (looksLikeDocumentRetentionNotice(block.text)) {
+    return {
+      ...block,
+      role: "footer",
+      roleConfidence: 0.58,
     };
   }
 
@@ -2617,6 +2692,18 @@ function hasLeafletProductionMetadataLeadIn(
 
   return metadataSignalCount >= 3 &&
     precedingBlocks.every((block) => normalizeBlockText(block.text).length <= 140);
+}
+
+function looksLikeDocumentRetentionNotice(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length < 36 || normalized.length > 220) {
+    return false;
+  }
+
+  const hasRetentionCue = /\b(?:conserver|conservez|keep|preserve|retain)\b/iu.test(normalized);
+  const hasReferenceCue = /\b(?:available|disponible|refer|reportez[-\s]?vous|rubrique|section|see)\b/iu.test(normalized);
+  const hasDocumentCue = /\b(?:bulletin|document|paie|payslip|record|statement)\b/iu.test(normalized);
+  return hasDocumentCue && (hasRetentionCue || hasReferenceCue);
 }
 
 function looksLikeSimpleFieldLabelBody(
