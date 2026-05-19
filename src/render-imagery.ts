@@ -107,6 +107,8 @@ const IDENTITY_TRANSFORM: PdfTransformMatrix = {
 const WHITE_PIXEL = [255, 255, 255, 255] as const;
 const BLACK_PIXEL: RgbaColor = { r: 0, g: 0, b: 0, a: 1 };
 const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const ADLER32_CHUNK_SIZE = 5_552;
+const CRC32_TABLE = buildCrc32Table();
 const BITMAP_FONT = new Map<string, readonly string[]>([
   [" ", ["00000", "00000", "00000", "00000", "00000", "00000", "00000"]],
   ["-", ["00000", "00000", "00000", "11111", "00000", "00000", "00000"]],
@@ -1245,39 +1247,40 @@ function encodePngRgba(width: number, height: number, rgbaBytes: Uint8Array): Ui
 }
 
 function encodeZlibStoredBlocks(bytes: Uint8Array): Uint8Array {
-  const parts: Uint8Array[] = [Uint8Array.from([0x78, 0x01])];
-  let offset = 0;
+  const blockCount = Math.ceil(bytes.length / 0xffff);
+  const output = new Uint8Array(2 + (blockCount * 5) + bytes.length + 4);
+  output[0] = 0x78;
+  output[1] = 0x01;
 
-  while (offset < bytes.length) {
-    const remaining = bytes.length - offset;
+  let sourceOffset = 0;
+  let outputOffset = 2;
+  while (sourceOffset < bytes.length) {
+    const remaining = bytes.length - sourceOffset;
     const blockLength = Math.min(remaining, 0xffff);
-    const isFinalBlock = offset + blockLength >= bytes.length;
-    const block = new Uint8Array(5 + blockLength);
-    block[0] = isFinalBlock ? 1 : 0;
-    block[1] = blockLength & 0xff;
-    block[2] = (blockLength >> 8) & 0xff;
+    const isFinalBlock = sourceOffset + blockLength >= bytes.length;
+    output[outputOffset] = isFinalBlock ? 1 : 0;
+    output[outputOffset + 1] = blockLength & 0xff;
+    output[outputOffset + 2] = (blockLength >> 8) & 0xff;
     const complement = (~blockLength) & 0xffff;
-    block[3] = complement & 0xff;
-    block[4] = (complement >> 8) & 0xff;
-    block.set(bytes.subarray(offset, offset + blockLength), 5);
-    parts.push(block);
-    offset += blockLength;
+    output[outputOffset + 3] = complement & 0xff;
+    output[outputOffset + 4] = (complement >> 8) & 0xff;
+    output.set(bytes.subarray(sourceOffset, sourceOffset + blockLength), outputOffset + 5);
+    sourceOffset += blockLength;
+    outputOffset += 5 + blockLength;
   }
 
   const adler = adler32(bytes);
-  parts.push(Uint8Array.from([
-    (adler >>> 24) & 0xff,
-    (adler >>> 16) & 0xff,
-    (adler >>> 8) & 0xff,
-    adler & 0xff,
-  ]));
-  return concatUint8Arrays(parts);
+  output[outputOffset] = (adler >>> 24) & 0xff;
+  output[outputOffset + 1] = (adler >>> 16) & 0xff;
+  output[outputOffset + 2] = (adler >>> 8) & 0xff;
+  output[outputOffset + 3] = adler & 0xff;
+  return output;
 }
 
 function createPngChunk(type: string, data: Uint8Array): Uint8Array {
   const typeBytes = new TextEncoder().encode(type);
   const lengthBytes = Uint8Array.from(toBigEndianBytes(data.length));
-  const crc = crc32(concatUint8Arrays([typeBytes, data]));
+  const crc = crc32ForParts(typeBytes, data);
   const crcBytes = Uint8Array.from([
     (crc >>> 24) & 0xff,
     (crc >>> 16) & 0xff,
@@ -1311,22 +1314,39 @@ function concatUint8Arrays(parts: readonly Uint8Array[]): Uint8Array {
 function adler32(bytes: Uint8Array): number {
   let s1 = 1;
   let s2 = 0;
-  for (const value of bytes) {
-    s1 = (s1 + value) % 65521;
-    s2 = (s2 + s1) % 65521;
+  for (let index = 0; index < bytes.length; index += 1) {
+    s1 += bytes[index] ?? 0;
+    s2 += s1;
+    if (index % ADLER32_CHUNK_SIZE === ADLER32_CHUNK_SIZE - 1) {
+      s1 %= 65521;
+      s2 %= 65521;
+    }
   }
-  return (s2 << 16) | s1;
+  s1 %= 65521;
+  s2 %= 65521;
+  return ((s2 << 16) | s1) >>> 0;
 }
 
-function crc32(bytes: Uint8Array): number {
+function crc32ForParts(...parts: readonly Uint8Array[]): number {
   let crc = 0xffffffff;
-  for (const value of bytes) {
-    crc ^= value;
-    for (let bit = 0; bit < 8; bit += 1) {
-      crc = (crc & 1) !== 0 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+  for (const bytes of parts) {
+    for (let index = 0; index < bytes.length; index += 1) {
+      crc = (crc >>> 8) ^ (CRC32_TABLE[(crc ^ (bytes[index] ?? 0)) & 0xff] ?? 0);
     }
   }
   return (crc ^ 0xffffffff) >>> 0;
+}
+
+function buildCrc32Table(): readonly number[] {
+  const table: number[] = [];
+  for (let value = 0; value < 256; value += 1) {
+    let crc = value;
+    for (let bit = 0; bit < 8; bit += 1) {
+      crc = (crc & 1) !== 0 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+    }
+    table.push(crc >>> 0);
+  }
+  return table;
 }
 
 function encodeBase64(bytes: Uint8Array): string {
