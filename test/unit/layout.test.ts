@@ -344,6 +344,25 @@ test("layout keeps uppercase section labels as headings beside narrative text", 
   assert.equal(body?.role, "body");
 });
 
+test("layout classifies leaflet titles after production metadata as headings", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-diecut", 0, "1-DIECUT", 72, 760, 1),
+    run("run-revision", 1, "1 01.01.2026 124X640 GI-100-2026-01-P", 72, 744, 1),
+    run("run-name", 2, "Pr. Name: Examplemed 6mg/ml Concentrate", 72, 728, 1),
+    run("run-code", 3, "ACME PACKAGE LEAFLET EXAMPLEMED", 72, 712, 1),
+    run("run-colours", 4, "Non Printing colours:", 72, 696, 1),
+    run("run-component", 5, "Min. Pt. Size: Text Font: Braille Text: PZN: Supplier: Component: INN:", 72, 680, 1),
+    run("run-title", 6, "PATIENT INFORMATION: Examplemed 6 mg/ml", 72, 640, 10),
+    run("run-body", 7, "Read all of this leaflet carefully before you start using this medicine.", 72, 612, 10),
+  ]));
+
+  const title = layout.pages[0]?.blocks.find((block) => block.text === "PATIENT INFORMATION: Examplemed 6 mg/ml");
+  const body = layout.pages[0]?.blocks.find((block) => block.text.startsWith("Read all of this leaflet"));
+
+  assert.equal(title?.role, "heading");
+  assert.equal(body?.role, "body");
+});
+
 test("layout keeps title-case table row descriptors as body with row evidence", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-header-qty", 0, "Qty", 72, 720, 16),
