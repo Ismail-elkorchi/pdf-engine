@@ -2627,6 +2627,7 @@ function looksLikeCoverTitleHeading(
 
   if (
     /^[-*•]\s+/u.test(normalized) ||
+    !/\p{L}/u.test(normalized) ||
     looksLikeDateLine(normalized) ||
     looksLikeProductionMetadata(normalized) ||
     looksLikeNumberedBodyParagraph(normalized)
@@ -2666,7 +2667,8 @@ function looksLikeTableRowDescriptor(
   const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
   const looksLikeRowLabel =
     (/^\d+\s+/u.test(normalized) && !/^\d+\.\d+/u.test(normalized)) ||
-    (words.length === 1 && /[\p{Ll}]/u.test(normalized));
+    (words.length === 1 && /[\p{Ll}]/u.test(normalized)) ||
+    looksLikeUppercaseTableRowLabel(normalized, words);
   if (!looksLikeRowLabel) {
     return false;
   }
@@ -2690,6 +2692,23 @@ function looksLikeTableRowDescriptor(
   });
 
   return dataNeighbor;
+}
+
+function looksLikeUppercaseTableRowLabel(normalized: string, words: readonly string[]): boolean {
+  if (words.length === 0 || words.length > 5 || normalized.length > 80 || countLabelMarkers(normalized) > 0) {
+    return false;
+  }
+
+  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized)) {
+    return false;
+  }
+
+  const letters = Array.from(normalized).filter((character) => /\p{L}/u.test(character));
+  if (letters.length === 0 || letters.some((character) => character !== character.toUpperCase())) {
+    return false;
+  }
+
+  return /^[*_\s\p{Lu}\p{Lt}\p{N}&/'’().+-]+$/u.test(normalized);
 }
 
 function looksLikeNumberedSectionHeadingBeforeBody(
@@ -2802,6 +2821,10 @@ function looksLikeShortTabularHeaderText(text: string): boolean {
 
   const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
   if (words.length === 0 || words.length > 4) {
+    return false;
+  }
+
+  if (!/\p{L}/u.test(normalized)) {
     return false;
   }
 
