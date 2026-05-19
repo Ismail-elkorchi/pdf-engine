@@ -378,6 +378,34 @@ test("layout emits a conservative form-like region from repeated field evidence"
   ));
 });
 
+test("layout orders compact form field labels by geometry when producer order is unstable", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Registration Form", 72, 760, 18),
+    run("run-city", 1, "City: Preferred City:", 310, 700),
+    run("run-name-date", 2, "First Name: Last Name: Birth Date:", 72, 724),
+    run("run-prompt", 3, "1) Please tell us about yourself:", 72, 660),
+    run("run-gender", 4, "female male non-binary Gender:", 72, 700),
+  ]));
+
+  const firstNameIndex = layout.extractedText.indexOf("First Name:");
+  const genderIndex = layout.extractedText.indexOf("Gender:");
+  const cityIndex = layout.extractedText.indexOf("City:");
+
+  assert.ok(firstNameIndex >= 0);
+  assert.ok(genderIndex > firstNameIndex);
+  assert.ok(cityIndex > genderIndex);
+  assert.ok(
+    layout.pages[0]?.blocks.some((block) =>
+      block.text === "First Name: Last Name: Birth Date:" &&
+      block.inferences?.some((inference) =>
+        inference.kind === "reading-order" &&
+        inference.method === "geometry-form-order" &&
+        inference.status === "inferred"
+      )
+    ),
+  );
+});
+
 function createObservation(runs: readonly PdfObservedTextRun[]): PdfObservedDocument {
   return {
     kind: "pdf-observation",
