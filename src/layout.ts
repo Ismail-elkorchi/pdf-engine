@@ -370,6 +370,17 @@ function orderPageBlocks(
 }
 
 function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
+  const formOrderedBlocks = orderCompactFormBlocksWhenSupported(blocks);
+  if (formOrderedBlocks) {
+    return assignReadingOrderInference(
+      formOrderedBlocks,
+      "geometry-form-order",
+      0.66,
+      "Compact form fields had stable page anchors, so field-label order was inferred from page geometry.",
+      "inferred",
+    );
+  }
+
   const columnOrderedBlocks = orderHorizontalColumnsWhenSupported(blocks);
   if (columnOrderedBlocks) {
     return assignReadingOrderInference(
@@ -423,6 +434,60 @@ function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly Gr
     "A later anchored heading was promoted ahead of body text using page-space anchors.",
     "inferred",
   );
+}
+
+function orderCompactFormBlocksWhenSupported(
+  blocks: readonly GroupedBlockSeed[],
+): readonly GroupedBlockSeed[] | undefined {
+  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
+  if (anchoredBlocks.length < 4 || anchoredBlocks.length !== blocks.length || !hasCompactFormOrderingContext(blocks)) {
+    return undefined;
+  }
+
+  const fieldBlocks = anchoredBlocks.filter(looksLikeCompactFormOrderingFieldBlock);
+  if (fieldBlocks.length < 3 || !fieldOrderDiffersFromGeometry(fieldBlocks)) {
+    return undefined;
+  }
+
+  return [...anchoredBlocks].sort(compareHorizontalBlocks);
+}
+
+function hasCompactFormOrderingContext(blocks: readonly GroupedBlockSeed[]): boolean {
+  const pageText = normalizeBlockText(blocks.map((block) => block.text).join(" ")).toLowerCase();
+  if (!/\b(?:application|applicant|claimant|consent|form|gender|patient|signature|signed|authorized)\b/u.test(pageText)) {
+    return false;
+  }
+
+  const fieldLabelCount = blocks.filter(looksLikeCompactFormOrderingFieldBlock).length;
+  if (fieldLabelCount < 3) {
+    return false;
+  }
+
+  return blocks.some((block) => looksLikeNumberedListPrompt(normalizeBlockText(block.text))) ||
+    blocks.some((block) => looksLikeFormBoundaryMetadata(normalizeBlockText(block.text))) ||
+    /\b(?:form|gender)\b/u.test(pageText);
+}
+
+function looksLikeCompactFormOrderingFieldBlock(block: GroupedBlockSeed): boolean {
+  if (block.anchor === undefined) {
+    return false;
+  }
+
+  const normalized = normalizeBlockText(block.text);
+  if (countLabelMarkers(normalized) === 0) {
+    return false;
+  }
+
+  return looksLikeFieldChoiceParagraphStart(normalized) ||
+    looksLikeFormFooterFieldClusterText(normalized) ||
+    looksLikeShortFieldLabel(normalized, block.fontSize) ||
+    looksLikeFieldLikeClusterText(normalized, block.fontSize);
+}
+
+function fieldOrderDiffersFromGeometry(blocks: readonly GroupedBlockSeed[]): boolean {
+  const observedIds = blocks.map((block) => block.id).join("\u001f");
+  const geometryIds = [...blocks].sort(compareHorizontalBlocks).map((block) => block.id).join("\u001f");
+  return observedIds !== geometryIds;
 }
 
 function orderHorizontalColumnsWhenSupported(
