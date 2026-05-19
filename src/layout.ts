@@ -25,6 +25,7 @@ interface GroupedBlockSeed {
   readonly pageNumber: number;
   readonly readingOrder: number;
   readonly text: string;
+  readonly lastLineText?: string;
   readonly startsParagraph: boolean;
   readonly runIds: readonly string[];
   readonly glyphIds: readonly string[];
@@ -92,8 +93,9 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
 }
 
 function toPublicLayoutBlock(block: GroupedLayoutBlock): PdfLayoutBlock {
-  const { hasGeneratorPathTrace, ...publicBlock } = block;
+  const { hasGeneratorPathTrace, lastLineText, ...publicBlock } = block as GroupedLayoutBlock & { readonly lastLineText?: string };
   void hasGeneratorPathTrace;
+  void lastLineText;
   return publicBlock;
 }
 
@@ -129,11 +131,13 @@ function groupPageIntoBlocks(page: PdfObservedPage): GroupedLayoutPage {
     const firstRun = currentRuns[0] as PdfObservedTextRun;
     const blockIndex = lineBlocks.length + 1;
     const bbox = mergeRunBoundingBoxes(currentRuns);
+    const text = currentRuns.map((run) => run.text).join(" ").replaceAll(/\s+/g, " ").trim();
     lineBlocks.push({
       id: `block-${page.pageNumber}-${blockIndex}`,
       pageNumber: page.pageNumber,
       readingOrder: blockIndex - 1,
-      text: currentRuns.map((run) => run.text).join(" ").replaceAll(/\s+/g, " ").trim(),
+      text,
+      lastLineText: text,
       startsParagraph: blockIndex === 1,
       runIds: currentRuns.map((run) => run.id),
       glyphIds: currentRuns.flatMap((run) => run.glyphIds),
@@ -186,6 +190,10 @@ function shouldStartNewBlock(
   currentRun: PdfObservedTextRun,
   writingMode: PdfWritingMode | undefined,
 ): boolean {
+  if (shouldPreserveShortTailRunBoundary(previousRun, currentRun, writingMode)) {
+    return true;
+  }
+
   if (continuesRunOnSameLine(previousRun, currentRun, writingMode)) {
     return false;
   }
@@ -215,6 +223,35 @@ function shouldStartNewBlock(
   }
 
   return false;
+}
+
+function shouldPreserveShortTailRunBoundary(
+  previousRun: PdfObservedTextRun,
+  currentRun: PdfObservedTextRun,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousRun.anchor || !currentRun.anchor) {
+    return false;
+  }
+
+  const previousText = normalizeBlockText(previousRun.text);
+  const currentText = normalizeBlockText(currentRun.text);
+  if (
+    previousText.length === 0 ||
+    currentText.length === 0 ||
+    previousText.length > 8 ||
+    !/[.!?]["')\]]*$/u.test(previousText) ||
+    !startsLikeSentence(currentText) ||
+    endsWithHyphenatedContinuation(previousText) ||
+    startsWithContinuation(currentText)
+  ) {
+    return false;
+  }
+
+  const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
+  const baselineGap = Math.abs(previousRun.anchor.y - currentRun.anchor.y);
+  const forwardAdvance = currentRun.anchor.x - previousRun.anchor.x;
+  return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(3, fontSize * 0.35);
 }
 
 function continuesRunOnSameLine(
@@ -269,6 +306,7 @@ function mergeAdjacentBlocks(
     mergedBlocks[mergedBlocks.length - 1] = {
       ...previousBlock,
       text: joinBlockText(previousBlock, block, writingMode),
+      ...(block.lastLineText !== undefined ? { lastLineText: block.lastLineText } : {}),
       startsParagraph: previousBlock.startsParagraph,
       runIds: [...previousBlock.runIds, ...block.runIds],
       glyphIds: [...previousBlock.glyphIds, ...block.glyphIds],
@@ -570,11 +608,13 @@ function splitStructuredBlock(
       ...block,
       id: `${block.id}-noise`,
       text: generatorNoiseSplit.noise,
+      lastLineText: generatorNoiseSplit.noise,
     };
     const bodyBlock: GroupedBlockSeed = {
       ...block,
       id: `${block.id}-body`,
       text: generatorNoiseSplit.body,
+      lastLineText: generatorNoiseSplit.body,
       startsParagraph: true,
     };
 
@@ -590,11 +630,13 @@ function splitStructuredBlock(
     ...block,
     id: `${block.id}-heading`,
     text: split.heading,
+    lastLineText: split.heading,
   };
   const bodyBlock: GroupedBlockSeed = {
     ...block,
     id: `${block.id}-body`,
     text: split.body,
+    lastLineText: split.body,
     startsParagraph: true,
   };
 
@@ -882,6 +924,10 @@ function shouldMergeAdjacentBlocks(
     return false;
   }
 
+  if (shouldPreserveShortTailParagraphBoundary(previousBlock, currentBlock, previousText, currentText, writingMode)) {
+    return false;
+  }
+
   if (isSameLineBlockContinuation(previousBlock, currentBlock, writingMode)) {
     return true;
   }
@@ -933,6 +979,47 @@ function shouldMergeAdjacentBlocks(
   }
 
   return previousText.length < 60 || !/[.!?:]$/.test(previousText);
+}
+
+function shouldPreserveShortTailParagraphBoundary(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  previousText: string,
+  currentText: string,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  if (!/[.!?]["')\]]*$/u.test(previousText) || !startsLikeSentence(currentText)) {
+    return false;
+  }
+
+  if (
+    endsWithHyphenatedContinuation(previousText) ||
+    startsWithContinuation(currentText)
+  ) {
+    return false;
+  }
+
+  const previousLineText = normalizeBlockText(previousBlock.lastLineText ?? previousText);
+  if (
+    previousLineText.length > 8 ||
+    !/[.!?]["')\]]*$/u.test(previousLineText) ||
+    looksLikeStandaloneBulletText(previousLineText)
+  ) {
+    return false;
+  }
+
+  const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
+  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
+  const horizontalDrift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
+  const forwardAdvance = currentBlock.anchor.x - previousBlock.anchor.x;
+  if (verticalGap <= Math.max(1.5, previousFontSize * 0.18) && forwardAdvance > Math.max(3, previousFontSize * 0.35)) {
+    return true;
+  }
+  return verticalGap <= Math.max(12, previousFontSize * 1.1) && horizontalDrift <= Math.max(14, previousFontSize);
 }
 
 function shouldStartParagraph(
@@ -987,6 +1074,10 @@ function shouldStartParagraph(
   }
 
   if (looksLikeExplicitParagraphBoundaryText(previousText, previousBlock.fontSize)) {
+    return true;
+  }
+
+  if (shouldPreserveShortTailParagraphBoundary(previousBlock, currentBlock, previousText, currentText, writingMode)) {
     return true;
   }
 

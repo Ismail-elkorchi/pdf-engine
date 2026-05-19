@@ -43,6 +43,33 @@ test("layout orders anchored multi-column text by column and records inference e
   assert.match(layout.extractedText, /Left column begins[\s\S]*continues in the left column[\s\S]*Right column starts/u);
 });
 
+test("layout preserves a paragraph break after a short sentence-ending tail line", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-tail", 0, "at.", 72, 700),
+    run("run-next", 1, "This paper provides a historical overview of the model and later usage.", 96, 700),
+  ]));
+
+  assert.match(layout.extractedText, /at\.\n\nThis paper provides/u);
+  assert.equal(layout.pages[0]?.blocks[1]?.startsParagraph, true);
+  assert.ok(
+    layout.pages[0]?.blocks[1]?.inferences?.some((inference) =>
+      inference.kind === "paragraph-flow" &&
+      inference.status === "inferred" &&
+      inference.method === "paragraph-geometry"
+    ),
+  );
+});
+
+test("layout keeps ordinary sentence continuation lines in the same paragraph", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-previous", 0, "The first sentence ends here after a substantial line of context.", 72, 700),
+    run("run-current", 1, "The same paragraph continues with another sentence on the next line.", 72, 688),
+  ]));
+
+  assert.doesNotMatch(layout.extractedText, /context\.\n\nThe same paragraph continues/u);
+  assert.match(layout.extractedText, /context\. The same paragraph continues/u);
+});
+
 test("layout separates repeated page boundaries from body flow without dropping source blocks", () => {
   const layout = buildLayoutDocument({
     kind: "pdf-observation",
