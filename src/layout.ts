@@ -1399,6 +1399,20 @@ function looksLikeFieldChoiceParagraphStart(text: string): boolean {
   return /\bgender:/iu.test(normalized) && /\b(?:female|male|non-binary)\b/iu.test(normalized);
 }
 
+function looksLikeConsentOptionClusterText(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0 || normalized.length > 80 || /[.!?:]$/u.test(normalized) || /\d/u.test(normalized)) {
+    return false;
+  }
+
+  const words = normalized.split(/\s+/u).filter((word) => /\p{L}/u.test(word));
+  if (words.length < 3 || words.length > 8) {
+    return false;
+  }
+
+  return /^(?:accept|acknowledge|agree|authorize|certify|confirm|consent|verify)\b/iu.test(normalized);
+}
+
 function shouldKeepCompactBlocksInParagraph(
   previousBlock: GroupedBlockSeed,
   currentBlock: GroupedBlockSeed,
@@ -1993,6 +2007,7 @@ function inferFormLikeLayoutRegion(
 
     const text = normalizeBlockText(block.text);
     return looksLikeFieldChoiceParagraphStart(text) ||
+      looksLikeConsentOptionClusterText(text) ||
       looksLikeShortFieldLabel(text, block.fontSize) ||
       looksLikeFieldLikeClusterText(text, block.fontSize) ||
       looksLikeFieldLabelBody(block, blockIndex, blocks) ||
