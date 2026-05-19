@@ -323,6 +323,15 @@ function orderPageBlocks(
   blocks: readonly GroupedBlockSeed[],
   writingMode: PdfWritingMode | undefined,
 ): readonly GroupedBlockSeed[] {
+  if (writingMode === "vertical") {
+    const semanticFormOrderedBlocks = orderCompactFormBlocksBySemanticSequenceWhenSupported(blocks, {
+      preserveExistingOrder: true,
+    });
+    if (semanticFormOrderedBlocks) {
+      return assignSemanticFormOrderInference(semanticFormOrderedBlocks);
+    }
+  }
+
   if (writingMode !== "vertical") {
     return orderHorizontalBlocks(blocks);
   }
@@ -370,6 +379,11 @@ function orderPageBlocks(
 }
 
 function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
+  const semanticFormOrderedBlocks = orderCompactFormBlocksBySemanticSequenceWhenSupported(blocks);
+  if (semanticFormOrderedBlocks) {
+    return assignSemanticFormOrderInference(semanticFormOrderedBlocks);
+  }
+
   const formOrderedBlocks = orderCompactFormBlocksWhenSupported(blocks);
   if (formOrderedBlocks) {
     return assignReadingOrderInference(
@@ -436,6 +450,58 @@ function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly Gr
   );
 }
 
+interface SemanticFormFieldBlock {
+  readonly block: GroupedBlockSeed;
+  readonly rank: number;
+}
+
+function assignSemanticFormOrderInference(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
+  return assignReadingOrderInference(
+    blocks,
+    "semantic-form-order",
+    0.58,
+    "Compact form field labels had compressed anchors, so ordering used explicit field-label sequence evidence.",
+    "inferred",
+  );
+}
+
+function orderCompactFormBlocksBySemanticSequenceWhenSupported(
+  blocks: readonly GroupedBlockSeed[],
+  options: { readonly preserveExistingOrder?: boolean } = {},
+): readonly GroupedBlockSeed[] | undefined {
+  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
+  if (anchoredBlocks.length < 4 || anchoredBlocks.length !== blocks.length || !hasCompactFormOrderingContext(blocks)) {
+    return undefined;
+  }
+
+  const fieldBlocks = blocks
+    .map((block) => {
+      const rank = semanticFormFieldRank(block.text);
+      return rank === undefined ? undefined : { block, rank };
+    })
+    .filter((entry): entry is SemanticFormFieldBlock => entry !== undefined);
+  if (fieldBlocks.length < 3 || !hasCompressedFormFieldAnchors(fieldBlocks) || !hasSemanticFormFieldSequenceEvidence(fieldBlocks)) {
+    return undefined;
+  }
+
+  const orderedFieldBlocks = [...fieldBlocks].sort(compareSemanticFormFieldBlocks);
+  if (fieldBlockIds(fieldBlocks) === fieldBlockIds(orderedFieldBlocks)) {
+    return options.preserveExistingOrder === true ? blocks : undefined;
+  }
+
+  const fieldBlockIdSet = new Set(fieldBlocks.map((entry) => entry.block.id));
+  const firstFieldIndex = blocks.findIndex((block) => fieldBlockIdSet.has(block.id));
+  if (firstFieldIndex < 0) {
+    return undefined;
+  }
+
+  return [
+    ...blocks.slice(0, firstFieldIndex),
+    ...orderedFieldBlocks.map((entry) => entry.block),
+    ...blocks.slice(firstFieldIndex).filter((block) => !fieldBlockIdSet.has(block.id)),
+  ];
+}
+
 function orderCompactFormBlocksWhenSupported(
   blocks: readonly GroupedBlockSeed[],
 ): readonly GroupedBlockSeed[] | undefined {
@@ -488,6 +554,62 @@ function fieldOrderDiffersFromGeometry(blocks: readonly GroupedBlockSeed[]): boo
   const observedIds = blocks.map((block) => block.id).join("\u001f");
   const geometryIds = [...blocks].sort(compareHorizontalBlocks).map((block) => block.id).join("\u001f");
   return observedIds !== geometryIds;
+}
+
+function hasCompressedFormFieldAnchors(fields: readonly SemanticFormFieldBlock[]): boolean {
+  const yValues = fields.map((entry) => entry.block.anchor?.y).filter((value): value is number => value !== undefined);
+  if (yValues.length < 3) {
+    return false;
+  }
+
+  const fontSizes = fields.map((entry) => entry.block.fontSize ?? 12).sort((left, right) => left - right);
+  const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] ?? 12;
+  const ySpan = Math.max(...yValues) - Math.min(...yValues);
+  return ySpan <= Math.max(22, medianFontSize * 1.85);
+}
+
+function hasSemanticFormFieldSequenceEvidence(fields: readonly SemanticFormFieldBlock[]): boolean {
+  const hasIdentity = fields.some((entry) => entry.rank < 20);
+  const hasChoice = fields.some((entry) => entry.rank >= 20 && entry.rank < 30);
+  const hasLocation = fields.some((entry) => entry.rank >= 30);
+  return hasIdentity && hasChoice && hasLocation;
+}
+
+function compareSemanticFormFieldBlocks(left: SemanticFormFieldBlock, right: SemanticFormFieldBlock): number {
+  if (left.rank !== right.rank) {
+    return left.rank - right.rank;
+  }
+
+  return left.block.readingOrder - right.block.readingOrder;
+}
+
+function fieldBlockIds(fields: readonly SemanticFormFieldBlock[]): string {
+  return fields.map((entry) => entry.block.id).join("\u001f");
+}
+
+function semanticFormFieldRank(text: string): number | undefined {
+  const normalized = normalizeBlockText(text).toLowerCase();
+  if (countLabelMarkers(normalized) === 0) {
+    return undefined;
+  }
+
+  if (/\b(?:first\s+name|last\s+name|full\s+name|given\s+name|family\s+name|name)\b/u.test(normalized)) {
+    return 10;
+  }
+
+  if (/\b(?:birth\s+date|date\s+of\s+birth|dob|date)\b/u.test(normalized)) {
+    return 12;
+  }
+
+  if (/\b(?:gender|female|male|non-binary)\b/u.test(normalized)) {
+    return 20;
+  }
+
+  if (/\b(?:address|city|country|postal|postcode|region|state|zip)\b/u.test(normalized)) {
+    return 30;
+  }
+
+  return undefined;
 }
 
 function orderHorizontalColumnsWhenSupported(
@@ -3074,6 +3196,10 @@ function shouldTreatRepeatedHeaderAsHeading(
     return false;
   }
 
+  if (looksLikeRepeatedCompactFormTitle(block, blockIndex, blocks)) {
+    return true;
+  }
+
   const normalized = normalizeBlockText(block.text);
   if (normalized.length === 0 || normalized.length > 48) {
     return false;
@@ -3098,6 +3224,10 @@ function shouldTreatRepeatedBoundaryAsBody(
     return false;
   }
 
+  if (looksLikeRepeatedCompactFormTitle(block, blockIndex, blocks)) {
+    return false;
+  }
+
   const normalized = normalizeBlockText(block.text);
   if (blockIndex === 0) {
     return looksLikeFormBoundaryMetadata(normalized) ||
@@ -3112,6 +3242,18 @@ function shouldTreatRepeatedBoundaryAsBody(
   }
 
   return false;
+}
+
+function looksLikeRepeatedCompactFormTitle(
+  block: PdfLayoutBlock,
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  return blockIndex === 0 &&
+    (block.fontSize ?? 0) >= 16 &&
+    countLabelMarkers(normalizeBlockText(block.text)) === 0 &&
+    hasCompactFormBoundaryContext(blockIndex, blocks) &&
+    looksLikeCoverTitleHeading(block, blockIndex, blocks);
 }
 
 function hasCompactFormBoundaryContext(
