@@ -14,6 +14,7 @@ import type {
   PdfObservedTextRun,
 } from "../../src/contracts.ts";
 import { assertKnowledgeCitationsResolvable, buildKnowledgeDocument } from "../../src/knowledge.ts";
+import { buildLayoutDocument } from "../../src/layout.ts";
 import { buildKnowledgeMarkdownFromProjectionItems } from "../../src/knowledge/markdown.ts";
 
 test("knowledge projects compact row-run tables with citation-backed cells", () => {
@@ -569,6 +570,41 @@ test("knowledge scopes form projection to interpreted layout form-like regions b
   );
   assert.ok(!form.blockIds.includes("outside-invoice"));
   assert.ok(!form.blockIds.includes("outside-owner"));
+});
+
+test("knowledge projects consent option labels from interpreted form regions", () => {
+  const observation = createSinglePageObservation([
+    createObservedRun({ id: "form-title", contentOrder: 0, text: "Example Form", x: 72, y: 740, fontSize: 20 }),
+    createObservedRun({ id: "gender", contentOrder: 1, text: "Gender:", x: 72, y: 700 }),
+    createObservedRun({ id: "nationality", contentOrder: 2, text: "Nationality:", x: 180, y: 700 }),
+    createObservedRun({ id: "first-name", contentOrder: 3, text: "First Name", x: 72, y: 630 }),
+    createObservedRun({ id: "last-name", contentOrder: 4, text: "Last Name", x: 180, y: 630 }),
+    createObservedRun({ id: "birthday", contentOrder: 5, text: "Birthday", x: 300, y: 630 }),
+    createObservedRun({ id: "female", contentOrder: 6, text: "Female", x: 72, y: 560 }),
+    createObservedRun({ id: "male", contentOrder: 7, text: "Male", x: 180, y: 560 }),
+    createObservedRun({ id: "consent", contentOrder: 8, text: "Agree to privacy policy", x: 72, y: 490 }),
+    createObservedRun({ id: "other", contentOrder: 9, text: "Other", x: 300, y: 490 }),
+  ]);
+  const layout = buildLayoutDocument(observation);
+  const formRegion = layout.pages[0]?.regions?.find((region) => region.kind === "form-like");
+
+  assert.ok(formRegion);
+  assert.ok(
+    formRegion.blockIds.some((blockId) =>
+      layout.pages[0]?.blocks.find((block) => block.id === blockId)?.text.includes("Agree to privacy policy")
+    ),
+  );
+
+  const knowledge = buildKnowledgeDocument(layout, observation);
+  const [table] = knowledge.tables;
+  assert.ok(table);
+  assert.equal(table.heuristic, "field-label-form");
+  assert.deepEqual(
+    table.cells.filter((cell) => cell.rowIndex > 0).map((cell) => cell.text),
+    ["Gender:", "Nationality:", "First Name", "Last Name", "Birthday", "Agree to privacy policy", "Other"],
+  );
+  assert.equal(table.cells.find((cell) => cell.text === "Agree to privacy policy")?.citations[0]?.sourceSpan?.text, "Agree to privacy policy");
+  assert.equal(table.cells.find((cell) => cell.text === "Other")?.citations[0]?.sourceSpan?.text, "Other");
 });
 
 test("knowledge projects pipe-delimited tables from interpreted layout table regions", () => {
