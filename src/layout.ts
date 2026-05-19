@@ -1693,14 +1693,6 @@ function classifyLayoutBlock(
     };
   }
 
-  if (looksLikePromotedHeading(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "heading",
-      roleConfidence: 0.65,
-    };
-  }
-
   if (looksLikeNumberedSectionHeadingBeforeBody(block, blockIndex, blocks)) {
     return {
       ...block,
@@ -1709,11 +1701,19 @@ function classifyLayoutBlock(
     };
   }
 
-  if (looksLikeTableRowDescriptor(block, blockIndex, blocks)) {
+  if (looksLikeTableRowDescriptor(block, blockIndex, blocks, "pre-heading")) {
     return {
       ...block,
       role: "body",
       roleConfidence: 0.6,
+    };
+  }
+
+  if (looksLikePromotedHeading(block, blockIndex, blocks)) {
+    return {
+      ...block,
+      role: "heading",
+      roleConfidence: 0.65,
     };
   }
 
@@ -2658,6 +2658,7 @@ function looksLikeTableRowDescriptor(
   block: PdfLayoutBlock,
   blockIndex: number,
   blocks: readonly PdfLayoutBlock[],
+  mode: "any" | "pre-heading" = "any",
 ): boolean {
   const normalized = normalizeBlockText(block.text);
   if (normalized.length === 0 || normalized.length > 220 || !block.anchor) {
@@ -2665,17 +2666,20 @@ function looksLikeTableRowDescriptor(
   }
 
   const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  const numberedRowLabel = /^\d+\s+/u.test(normalized) && !/^\d+\.\d+/u.test(normalized);
+  const uppercaseRowLabel = looksLikeUppercaseTableRowLabel(normalized, words);
+  const weakSingleWordRowLabel = words.length === 1 && /[\p{Ll}]/u.test(normalized);
   const looksLikeRowLabel =
-    (/^\d+\s+/u.test(normalized) && !/^\d+\.\d+/u.test(normalized)) ||
-    (words.length === 1 && /[\p{Ll}]/u.test(normalized)) ||
-    looksLikeUppercaseTableRowLabel(normalized, words);
+    (mode === "any" &&
+      (numberedRowLabel || uppercaseRowLabel || weakSingleWordRowLabel)) ||
+    (mode === "pre-heading" && (numberedRowLabel || uppercaseRowLabel || weakSingleWordRowLabel));
   if (!looksLikeRowLabel) {
     return false;
   }
 
   const fontSize = block.fontSize ?? 12;
   const rowTolerance = Math.max(10, fontSize * 0.9);
-  const dataNeighbor = blocks.some((candidate, candidateIndex) => {
+  const dataNeighbors = blocks.filter((candidate, candidateIndex) => {
     if (candidateIndex === blockIndex || candidate.anchor === undefined) {
       return false;
     }
@@ -2688,10 +2692,16 @@ function looksLikeTableRowDescriptor(
       return false;
     }
 
-    return looksLikeTabularDataText(candidate.text);
+    return uppercaseRowLabel ? looksLikeCompactTabularDataText(candidate.text) : looksLikeTabularDataText(candidate.text);
   });
 
-  return dataNeighbor;
+  if (weakSingleWordRowLabel && !numberedRowLabel && !uppercaseRowLabel) {
+    const hasLeftNeighbor = dataNeighbors.some((candidate) => candidate.anchor && candidate.anchor.x < block.anchor!.x);
+    const hasRightNeighbor = dataNeighbors.some((candidate) => candidate.anchor && candidate.anchor.x > block.anchor!.x);
+    return dataNeighbors.length >= 2 && hasLeftNeighbor && hasRightNeighbor;
+  }
+
+  return dataNeighbors.length > 0;
 }
 
 function looksLikeUppercaseTableRowLabel(normalized: string, words: readonly string[]): boolean {
@@ -2709,6 +2719,20 @@ function looksLikeUppercaseTableRowLabel(normalized: string, words: readonly str
   }
 
   return /^[*_\s\p{Lu}\p{Lt}\p{N}&/'’().+-]+$/u.test(normalized);
+}
+
+function looksLikeCompactTabularDataText(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0 || normalized.length > 64 || /[.!?][\s)]*$/u.test(normalized)) {
+    return false;
+  }
+
+  const hasLetter = /\p{L}/u.test(normalized);
+  if (/[$€£¥]?\d/u.test(normalized) && (!hasLetter || !startsLikeSentence(normalized))) {
+    return true;
+  }
+
+  return /^(?:completed|failed|paid|pending|received|rejected|total)$/iu.test(normalized);
 }
 
 function looksLikeNumberedSectionHeadingBeforeBody(
