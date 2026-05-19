@@ -278,6 +278,73 @@ test("layout keeps uppercase table row labels as body evidence", () => {
   assert.ok(tableRegion);
 });
 
+test("layout keeps uppercase section labels as headings beside narrative text", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Dense Retrieval Paper", 72, 740, 16),
+    run("run-section", 1, "ABSTRACT", 72, 700, 11),
+    run(
+      "run-other-column",
+      2,
+      "A related paragraph mentions results [11] while sharing a similar baseline in another column.",
+      330,
+      700,
+      10,
+    ),
+    run(
+      "run-body",
+      3,
+      "This paragraph introduces the topic and should remain body text under the section label.",
+      72,
+      680,
+      10,
+    ),
+  ]));
+
+  const section = layout.pages[0]?.blocks.find((block) => block.text === "ABSTRACT");
+  const body = layout.pages[0]?.blocks.find((block) => block.text.startsWith("This paragraph introduces"));
+
+  assert.equal(section?.role, "heading");
+  assert.equal(body?.role, "body");
+});
+
+test("layout keeps title-case table row descriptors as body with row evidence", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-header-qty", 0, "Qty", 72, 720, 16),
+    run("run-header-description", 1, "Description", 180, 720, 16),
+    run("run-header-amount", 2, "Amount", 320, 720, 16),
+    run("run-row-qty", 3, "1", 72, 692),
+    run("run-row-description", 4, "Mouse", 180, 692),
+    run("run-row-amount", 5, "$115.00", 320, 692),
+    run("run-row-qty-2", 6, "3", 72, 670),
+    run("run-row-description-2", 7, "Unicorn", 180, 670),
+    run("run-row-amount-2", 8, "$750,000.00", 320, 670),
+  ]));
+
+  const header = layout.pages[0]?.blocks.find((block) => block.text === "Qty");
+  const firstRowLabel = layout.pages[0]?.blocks.find((block) => block.text === "Mouse");
+  const secondRowLabel = layout.pages[0]?.blocks.find((block) => block.text === "Unicorn");
+
+  assert.equal(header?.role, "heading");
+  assert.equal(firstRowLabel?.role, "body");
+  assert.equal(secondRowLabel?.role, "body");
+});
+
+test("layout keeps contents entry labels as headings beside page references", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Contents", 72, 720, 18),
+    run("run-entry-introduction", 1, "Introduction", 72, 688),
+    run("run-page-introduction", 2, "1", 300, 688),
+    run("run-entry-installation", 3, "Installation", 72, 664),
+    run("run-page-installation", 4, "2", 300, 664),
+  ]));
+
+  const introduction = layout.pages[0]?.blocks.find((block) => block.text === "Introduction");
+  const installation = layout.pages[0]?.blocks.find((block) => block.text === "Installation");
+
+  assert.equal(introduction?.role, "heading");
+  assert.equal(installation?.role, "heading");
+});
+
 test("layout does not emit a table region from incidental numeric prose", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-title", 0, "Quarterly Amount Review", 72, 700, 16),
