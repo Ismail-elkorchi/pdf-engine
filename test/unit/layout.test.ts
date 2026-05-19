@@ -406,6 +406,68 @@ test("layout orders compact form field labels by geometry when producer order is
   );
 });
 
+test("layout orders compact form field labels by semantic sequence when anchors are local", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Registration Form", 0, 6, 18, 1, "vertical"),
+    run("run-prompt", 1, "1) Please tell us about yourself:", 0, -16, 12, 1, "vertical"),
+    run("run-choice-prompt", 2, "2) Select the matching option:", 0, -16, 12, 1, "vertical"),
+    run("run-city", 3, "City: Preferred City:", 0, 8, 12, 1, "vertical"),
+    run("run-name-date", 4, "First Name: Last Name: Birth Date:", 0, -14, 10, 1, "vertical"),
+    run("run-gender", 5, "female male non-binary Gender:", 0, -13, 10, 1, "vertical"),
+  ]));
+
+  const firstNameIndex = layout.extractedText.indexOf("First Name:");
+  const genderIndex = layout.extractedText.indexOf("Gender:");
+  const cityIndex = layout.extractedText.indexOf("City:");
+
+  assert.ok(firstNameIndex >= 0);
+  assert.ok(genderIndex > firstNameIndex);
+  assert.ok(cityIndex > genderIndex);
+  assert.ok(
+    layout.pages[0]?.blocks.some((block) =>
+      block.text === "First Name: Last Name: Birth Date:" &&
+      block.inferences?.some((inference) =>
+        inference.kind === "reading-order" &&
+        inference.method === "semantic-form-order" &&
+        inference.status === "inferred"
+      )
+    ),
+  );
+});
+
+test("layout keeps repeated compact form titles as headings", () => {
+  const layout = buildLayoutDocument({
+    kind: "pdf-observation",
+    strategy: "content-stream-interpreter",
+    extractedText: "",
+    knownLimits: [],
+    pages: [1, 2].map((pageNumber) => ({
+      pageNumber,
+      resolutionMethod: "page-tree",
+      glyphs: [],
+      runs: [
+        run(`run-p${String(pageNumber)}-title`, 0, "Registration Form", 0, 6, 20, pageNumber, "vertical"),
+        run(`run-p${String(pageNumber)}-prompt`, 1, "1) Applicant details:", 0, 3, 14, pageNumber, "vertical"),
+        run(`run-p${String(pageNumber)}-first-name`, 2, "First Name:", 0, 4.2, 10, pageNumber, "vertical"),
+        run(`run-p${String(pageNumber)}-gender`, 3, "Gender:", 0, 3, 12, pageNumber, "vertical"),
+        run(`run-p${String(pageNumber)}-city`, 4, "City:", 0, 8, 10, pageNumber, "vertical"),
+      ],
+      marks: [],
+    })),
+  });
+
+  assert.ok(
+    layout.pages.every((page) => {
+      const titleBlock = page.blocks.find((block) => block.text === "Registration Form");
+      return titleBlock?.role === "heading" &&
+        titleBlock.inferences?.some((inference) =>
+          inference.kind === "structural-role" &&
+          inference.method === "repeated-boundary-heading"
+        );
+    }),
+  );
+});
+
 function createObservation(runs: readonly PdfObservedTextRun[]): PdfObservedDocument {
   return {
     kind: "pdf-observation",
@@ -432,6 +494,7 @@ function run(
   y: number,
   fontSize = 12,
   pageNumber = 1,
+  writingMode?: PdfObservedTextRun["writingMode"],
 ): PdfObservedTextRun {
   return {
     id,
@@ -449,5 +512,6 @@ function run(
     },
     fontSize,
     startsNewLine: true,
+    ...(writingMode !== undefined ? { writingMode } : {}),
   };
 }
