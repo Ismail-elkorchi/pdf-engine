@@ -70,6 +70,61 @@ test("layout keeps ordinary sentence continuation lines in the same paragraph", 
   assert.match(layout.extractedText, /context\. The same paragraph continues/u);
 });
 
+test("layout moves a leading carry-over tail before the next paragraph boundary", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-previous", 0, "The preceding line wraps at the final key term", 72, 700),
+    run("run-tail-next", 1, "Model. This paper provides a separate overview of the subject.", 72, 660),
+  ]));
+
+  assert.match(layout.extractedText, /key term Model\.\n\nThis paper provides/u);
+  assert.deepEqual(
+    layout.pages[0]?.blocks.map((block) => ({
+      text: block.text,
+      startsParagraph: block.startsParagraph,
+    })),
+    [
+      {
+        text: "The preceding line wraps at the final key term",
+        startsParagraph: true,
+      },
+      {
+        text: "Model.",
+        startsParagraph: false,
+      },
+      {
+        text: "This paper provides a separate overview of the subject.",
+        startsParagraph: true,
+      },
+    ],
+  );
+});
+
+test("layout does not split abbreviation-like leading text as a carry-over tail", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-previous", 0, "The preceding line introduces the reviewer", 72, 700),
+    run("run-abbreviation", 1, "Dr. Smith provides a separate overview of the subject.", 72, 660),
+  ]));
+
+  assert.match(layout.extractedText, /reviewer\n\nDr\. Smith provides/u);
+  assert.deepEqual(layout.pages[0]?.blocks.map((block) => block.text), [
+    "The preceding line introduces the reviewer",
+    "Dr. Smith provides a separate overview of the subject.",
+  ]);
+});
+
+test("layout does not split a leading tail when geometry does not support continuation", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-previous", 0, "The preceding line wraps at the final key term", 72, 700),
+    run("run-other-column", 1, "Model. This paper provides a separate overview of the subject.", 300, 660),
+  ]));
+
+  assert.match(layout.extractedText, /key term\n\nModel\. This paper provides/u);
+  assert.deepEqual(layout.pages[0]?.blocks.map((block) => block.text), [
+    "The preceding line wraps at the final key term",
+    "Model. This paper provides a separate overview of the subject.",
+  ]);
+});
+
 test("layout separates repeated page boundaries from body flow without dropping source blocks", () => {
   const layout = buildLayoutDocument({
     kind: "pdf-observation",

@@ -168,7 +168,10 @@ function groupPageIntoBlocks(page: PdfObservedPage): GroupedLayoutPage {
   flushCurrentRuns();
   const mergedBlocks = mergeAdjacentBlocks(lineBlocks, pageWritingMode);
   const structuredBlocks = splitStructuredBlocks(mergedBlocks, pageWritingMode);
-  const orderedBlocks = orderPageBlocks(structuredBlocks, pageWritingMode);
+  const orderedBlocks = splitLeadingCarryOverTailBlocks(
+    orderPageBlocks(structuredBlocks, pageWritingMode),
+    pageWritingMode,
+  );
   const filteredBlocks = filterPeripheralBlocks(orderedBlocks);
   const paragraphBlocks = annotateParagraphStarts(filteredBlocks, pageWritingMode);
 
@@ -643,6 +646,95 @@ function splitStructuredBlock(
   return [headingBlock, bodyBlock];
 }
 
+function splitLeadingCarryOverTailBlocks(
+  blocks: readonly GroupedBlockSeed[],
+  writingMode: PdfWritingMode | undefined,
+): readonly GroupedBlockSeed[] {
+  if (writingMode === "vertical") {
+    return blocks;
+  }
+
+  const splitBlocks: GroupedBlockSeed[] = [];
+  for (const block of blocks) {
+    const previousBlock = splitBlocks.at(-1);
+    const split = previousBlock ? splitLeadingCarryOverTail(block, previousBlock) : undefined;
+    if (!split) {
+      splitBlocks.push(block);
+      continue;
+    }
+
+    splitBlocks.push(split.tailBlock, split.bodyBlock);
+  }
+
+  return splitBlocks.map((block, blockIndex) => ({
+    ...block,
+    readingOrder: blockIndex,
+  }));
+}
+
+function splitLeadingCarryOverTail(
+  block: GroupedBlockSeed,
+  previousBlock: GroupedBlockSeed,
+): {
+  readonly tailBlock: GroupedBlockSeed;
+  readonly bodyBlock: GroupedBlockSeed;
+} | undefined {
+  const previousText = normalizeBlockText(previousBlock.text);
+  const normalized = normalizeBlockText(block.text);
+  const leadingTailSplit = splitLeadingSentenceTail(normalized);
+  const tail = leadingTailSplit?.tail;
+  const body = leadingTailSplit?.body;
+  if (
+    !tail ||
+    !body ||
+    !shouldKeepLeadingCarryOverTailWithPrevious(previousBlock, block, previousText, tail, block.writingMode) ||
+    looksLikeEnumeratedLeadingTail(tail) ||
+    startsWithContinuation(body) ||
+    !startsLikeSentence(body)
+  ) {
+    return undefined;
+  }
+
+  return {
+    tailBlock: {
+      ...block,
+      id: `${block.id}-tail`,
+      text: tail,
+      lastLineText: tail,
+      startsParagraph: false,
+    },
+    bodyBlock: {
+      ...block,
+      id: `${block.id}-body`,
+      text: body,
+      lastLineText: body,
+      startsParagraph: true,
+    },
+  };
+}
+
+function splitLeadingSentenceTail(
+  text: string,
+): { readonly tail: string; readonly body: string } | undefined {
+  for (let index = 0; index < text.length - 1; index += 1) {
+    const current = text[index];
+    if (current !== "." && current !== "!" && current !== "?") {
+      continue;
+    }
+
+    const next = text[index + 1];
+    if (next !== " ") {
+      continue;
+    }
+
+    const tail = text.slice(0, index + 1).trim();
+    const body = text.slice(index + 2).trim();
+    return tail.length > 0 && body.length > 0 ? { tail, body } : undefined;
+  }
+
+  return undefined;
+}
+
 function splitLeadingGeneratorStatusAndBody(
   text: string,
 ): { readonly noise: string; readonly body: string } | undefined {
@@ -1054,6 +1146,10 @@ function shouldStartParagraph(
     return false;
   }
 
+  if (shouldKeepLeadingCarryOverTailWithPrevious(previousBlock, currentBlock, previousText, currentText, writingMode)) {
+    return false;
+  }
+
   if (shouldKeepParagraphContinuation(previousBlock, currentBlock, previousText, currentText, writingMode)) {
     return false;
   }
@@ -1148,6 +1244,52 @@ function shouldStartParagraph(
   }
 
   return hasShortTail;
+}
+
+function shouldKeepLeadingCarryOverTailWithPrevious(
+  previousBlock: GroupedBlockSeed,
+  currentBlock: GroupedBlockSeed,
+  previousText: string,
+  currentText: string,
+  writingMode: PdfWritingMode | undefined,
+): boolean {
+  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
+    return false;
+  }
+
+  if (
+    previousText.length < 24 ||
+    /[.!?]["')\]]*$/u.test(previousText) ||
+    !/[.!?]["')\]]*$/u.test(currentText) ||
+    currentText.length > 18 ||
+    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) ||
+    looksLikeStandaloneBulletText(currentText) ||
+    looksLikeAbbreviatedLeadingTail(currentText)
+  ) {
+    return false;
+  }
+
+  const words = currentText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
+  if (words.length === 0 || words.length > 3) {
+    return false;
+  }
+
+  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
+  const horizontalDrift = Math.abs(currentBlock.anchor.x - previousBlock.anchor.x);
+  return horizontalDrift <= Math.max(18, fontSize * 1.5);
+}
+
+function looksLikeAbbreviatedLeadingTail(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (/^(?:dr|mr|mrs|ms|prof|sr|jr|st|fig|eq|ref|no|etc|vs|cf|e\.g|i\.e)\.$/iu.test(normalized)) {
+    return true;
+  }
+
+  return /^(?:\p{Lu}\.){2,}$/u.test(normalized);
+}
+
+function looksLikeEnumeratedLeadingTail(text: string): boolean {
+  return /^(?:\d+|[ivxlcdm]+)[.)]$/iu.test(normalizeBlockText(text));
 }
 
 function shouldKeepHeadingLeadInParagraph(
