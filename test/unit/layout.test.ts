@@ -247,6 +247,37 @@ test("layout keeps numbered table row descriptors as body evidence", () => {
   assert.ok(tableRegion);
 });
 
+test("layout keeps uppercase table row labels as body evidence", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-header-code", 0, "Code", 72, 700),
+    run("run-header-description", 1, "Description", 160, 700),
+    run("run-header-amount", 2, "Amount", 320, 700),
+    run("run-row-code", 3, "100040", 72, 676),
+    run("run-row-label", 4, "BASE SALARY", 160, 676),
+    run("run-row-amount", 5, "1200.00", 320, 676),
+    run("run-row-code-2", 6, "109510", 72, 652),
+    run("run-row-label-2", 7, "OVERTIME PAY", 160, 652),
+    run("run-row-amount-2", 8, "85.50", 320, 652),
+    run("run-row-code-3", 9, "699500", 72, 628),
+    run("run-row-label-3", 10, "***TOTAL DUE***", 160, 628),
+    run("run-row-amount-3", 11, "1285.50", 320, 628),
+  ]));
+
+  const firstRowCode = layout.pages[0]?.blocks.find((block) => block.text === "100040");
+  const firstRowLabel = layout.pages[0]?.blocks.find((block) => block.text === "BASE SALARY");
+  const secondRowLabel = layout.pages[0]?.blocks.find((block) => block.text === "OVERTIME PAY");
+  const totalRowLabel = layout.pages[0]?.blocks.find((block) => block.text === "***TOTAL DUE***");
+  const header = layout.pages[0]?.blocks.find((block) => block.text === "Amount");
+  const tableRegion = layout.pages[0]?.regions?.find((region) => region.kind === "table");
+
+  assert.notEqual(firstRowCode?.role, "heading");
+  assert.equal(firstRowLabel?.role, "body");
+  assert.equal(secondRowLabel?.role, "body");
+  assert.equal(totalRowLabel?.role, "body");
+  assert.equal(header?.role, "heading");
+  assert.ok(tableRegion);
+});
+
 test("layout does not emit a table region from incidental numeric prose", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-title", 0, "Quarterly Amount Review", 72, 700, 16),
