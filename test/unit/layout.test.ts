@@ -315,6 +315,34 @@ test("layout keeps uppercase table row labels as body evidence", () => {
   assert.ok(tableRegion);
 });
 
+test("layout preserves ledger row boundaries and separates retention notices", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-header-code", 0, "Rub", 72, 720),
+    run("run-header-label", 1, "Label", 160, 720),
+    run("run-header-base", 2, "Base or Count", 300, 720),
+    run("run-notice-retain", 3, "Please retain this statement without limitation for your records.", 72, 680, 9),
+    run("run-notice-reference", 4, "Refer to the document section available online for payroll details.", 72, 660, 9),
+    run("run-row-base", 5, "BASE SALARY", 72, 620),
+    run("run-row-overtime", 6, "Hrs overtime 25%", 72, 604),
+    run("run-row-allowance", 7, "Allowance total", 72, 588),
+    run("run-row-total", 8, "***TOTAL PAY***", 72, 572),
+  ]));
+
+  const retentionNotice = layout.pages[0]?.blocks.find((block) => block.text.startsWith("Please retain"));
+  const referenceNotice = layout.pages[0]?.blocks.find((block) => block.text.startsWith("Refer to the document"));
+  const baseRow = layout.pages[0]?.blocks.find((block) => block.text === "BASE SALARY");
+  const overtimeRow = layout.pages[0]?.blocks.find((block) => block.text === "Hrs overtime 25%");
+  const totalRow = layout.pages[0]?.blocks.find((block) => block.text === "***TOTAL PAY***");
+
+  assert.equal(retentionNotice?.role, "footer");
+  assert.equal(referenceNotice?.role, "footer");
+  assert.equal(baseRow?.startsParagraph, true);
+  assert.equal(overtimeRow?.startsParagraph, true);
+  assert.equal(totalRow?.startsParagraph, true);
+  assert.match(layout.extractedText, /BASE SALARY\n\nHrs overtime 25%/u);
+  assert.doesNotMatch(layout.extractedText, /retain this statement|available online/u);
+});
+
 test("layout keeps uppercase section labels as headings beside narrative text", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-title", 0, "Dense Retrieval Paper", 72, 740, 16),
