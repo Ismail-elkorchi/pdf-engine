@@ -2578,7 +2578,11 @@ function looksLikeLeafletTitleHeading(
   blocks: readonly PdfLayoutBlock[],
 ): boolean {
   const normalized = normalizeBlockText(block.text);
-  if (normalized.length < 24 || normalized.length > 160 || !isEarlyPageHeadingContext(blockIndex, blocks)) {
+  if (
+    normalized.length < 24 ||
+    normalized.length > 160 ||
+    (!isEarlyPageHeadingContext(blockIndex, blocks) && !hasLeafletProductionMetadataLeadIn(blockIndex, blocks))
+  ) {
     return false;
   }
 
@@ -2594,6 +2598,25 @@ function looksLikeLeafletTitleHeading(
   const hasDosePattern = /\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml)(?:\/(?:ml|l|g))?\b/iu.test(normalized);
   const hasInstructionTitle = /^[\p{Lu}\s&/'’().-]+:/u.test(normalized) && /[\p{Ll}]/u.test(normalized);
   return hasDosePattern && hasInstructionTitle;
+}
+
+function hasLeafletProductionMetadataLeadIn(
+  blockIndex: number,
+  blocks: readonly PdfLayoutBlock[],
+): boolean {
+  if (blockIndex < 3 || blockIndex > 10) {
+    return false;
+  }
+
+  const precedingBlocks = blocks.slice(0, blockIndex);
+  const metadataSignalCount = precedingBlocks.filter((block) => {
+    const normalized = normalizeBlockText(block.text);
+    return looksLikeProductionMetadata(normalized) ||
+      /^(?:\d+-?diecut|non printing colours:?|min\.\s*pt\.\s*size:|pr\.\s*name:)/iu.test(normalized);
+  }).length;
+
+  return metadataSignalCount >= 3 &&
+    precedingBlocks.every((block) => normalizeBlockText(block.text).length <= 140);
 }
 
 function looksLikeSimpleFieldLabelBody(
