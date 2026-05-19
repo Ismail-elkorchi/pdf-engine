@@ -355,6 +355,7 @@ test("buildRenderDocument emits page-box-aware SVG and PNG imagery", async () =>
     Array.from(renderPage.imagery.raster.bytes.subarray(0, 8)),
     [137, 80, 78, 71, 13, 10, 26, 10],
   );
+  assertValidPngWithStoredZlib(renderPage.imagery.raster.bytes);
   assert.ok(renderDocument?.knownLimits.includes("render-imagery-partial"));
 });
 
@@ -513,3 +514,123 @@ test("canonicalizeRenderHashValue compacts large strings into deterministic dige
   assert.ok(first.includes(`"byteLength":${String(new TextEncoder().encode(largeString).byteLength)}`));
   assert.equal(first.includes(largeString.slice(0, 24)), false);
 });
+
+function assertValidPngWithStoredZlib(bytes: Uint8Array): void {
+  assert.deepEqual(
+    Array.from(bytes.subarray(0, 8)),
+    [137, 80, 78, 71, 13, 10, 26, 10],
+  );
+
+  let offset = 8;
+  const idatParts: Uint8Array[] = [];
+  let sawIhdr = false;
+  let sawIend = false;
+
+  while (offset < bytes.length) {
+    const length = readUint32(bytes, offset);
+    const typeStart = offset + 4;
+    const dataStart = typeStart + 4;
+    const dataEnd = dataStart + length;
+    const crcOffset = dataEnd;
+    assert.ok(crcOffset + 4 <= bytes.length, "PNG chunk extends beyond the byte buffer.");
+
+    const typeBytes = bytes.subarray(typeStart, dataStart);
+    const data = bytes.subarray(dataStart, dataEnd);
+    const type = new TextDecoder().decode(typeBytes);
+    assert.equal(crc32ForTest(typeBytes, data), readUint32(bytes, crcOffset));
+
+    if (type === "IHDR") {
+      sawIhdr = true;
+    } else if (type === "IDAT") {
+      idatParts.push(data);
+    } else if (type === "IEND") {
+      sawIend = true;
+      offset = crcOffset + 4;
+      break;
+    }
+
+    offset = crcOffset + 4;
+  }
+
+  assert.equal(sawIhdr, true);
+  assert.equal(sawIend, true);
+  assert.equal(offset, bytes.length);
+
+  const compressed = concatForTest(idatParts);
+  assert.equal(compressed[0], 0x78);
+  assert.equal(compressed[1], 0x01);
+  assertStoredZlibBlocks(compressed);
+}
+
+function assertStoredZlibBlocks(compressed: Uint8Array): void {
+  let offset = 2;
+  const rawParts: Uint8Array[] = [];
+
+  while (offset < compressed.length - 4) {
+    const blockHeader = compressed[offset] ?? 0;
+    const isFinal = (blockHeader & 1) === 1;
+    const blockType = (blockHeader >> 1) & 0b11;
+    assert.equal(blockType, 0);
+
+    const length = (compressed[offset + 1] ?? 0) | ((compressed[offset + 2] ?? 0) << 8);
+    const complement = (compressed[offset + 3] ?? 0) | ((compressed[offset + 4] ?? 0) << 8);
+    assert.equal((length ^ complement) & 0xffff, 0xffff);
+
+    const dataStart = offset + 5;
+    const dataEnd = dataStart + length;
+    assert.ok(dataEnd <= compressed.length - 4, "Stored zlib block extends beyond the byte buffer.");
+    rawParts.push(compressed.subarray(dataStart, dataEnd));
+    offset = dataEnd;
+
+    if (isFinal) {
+      break;
+    }
+  }
+
+  assert.equal(offset, compressed.length - 4);
+  const rawBytes = concatForTest(rawParts);
+  assert.equal(adler32ForTest(rawBytes), readUint32(compressed, compressed.length - 4));
+}
+
+function readUint32(bytes: Uint8Array, offset: number): number {
+  return (
+    ((bytes[offset] ?? 0) * 0x1000000) +
+    (((bytes[offset + 1] ?? 0) << 16) >>> 0) +
+    (((bytes[offset + 2] ?? 0) << 8) >>> 0) +
+    (bytes[offset + 3] ?? 0)
+  ) >>> 0;
+}
+
+function concatForTest(parts: readonly Uint8Array[]): Uint8Array {
+  const totalLength = parts.reduce((sum, part) => sum + part.length, 0);
+  const output = new Uint8Array(totalLength);
+  let offset = 0;
+  for (const part of parts) {
+    output.set(part, offset);
+    offset += part.length;
+  }
+  return output;
+}
+
+function adler32ForTest(bytes: Uint8Array): number {
+  let s1 = 1;
+  let s2 = 0;
+  for (const value of bytes) {
+    s1 = (s1 + value) % 65521;
+    s2 = (s2 + s1) % 65521;
+  }
+  return ((s2 << 16) | s1) >>> 0;
+}
+
+function crc32ForTest(...parts: readonly Uint8Array[]): number {
+  let crc = 0xffffffff;
+  for (const bytes of parts) {
+    for (const value of bytes) {
+      crc ^= value;
+      for (let bit = 0; bit < 8; bit += 1) {
+        crc = (crc & 1) !== 0 ? (crc >>> 1) ^ 0xedb88320 : crc >>> 1;
+      }
+    }
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
