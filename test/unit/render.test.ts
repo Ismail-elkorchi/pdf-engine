@@ -2,7 +2,9 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import { buildRenderDocument, canonicalizeRenderHashValue } from "../../src/render.ts";
+import { buildRenderPageImagery } from "../../src/render-imagery.ts";
 import { createPdfEngine } from "../../src/index.ts";
+import type { PdfObservedPage } from "../../src/contracts.ts";
 import {
   buildPdfWithDenseVectorImagery,
   buildPdfWithOverscaledImageImagery,
@@ -274,91 +276,176 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
   assert.equal(renderDocument.renderHash.hex.length, 64);
 });
 
-test("buildRenderDocument skips raster when eager raster work exceeds the document budget", async () => {
+test("buildRenderPageImagery downscales raster when eager raster work exceeds the page budget", () => {
+  const imagery = buildRenderPageImagery({
+    pageBox: {
+      x: 0,
+      y: 0,
+      width: 1_000,
+      height: 1_000,
+    },
+    resourcePayloads: [],
+    rasterBudgetBytes: 100_000,
+    displayList: {
+      commands: [
+        {
+          id: "large-path-1",
+          kind: "path",
+          contentOrder: 0,
+          paintOperator: "f",
+          paintState: {
+            lineWidth: 1,
+            lineCapStyle: "butt",
+            lineJoinStyle: "miter",
+            miterLimit: 10,
+            dashPattern: {
+              segments: [],
+              phase: 0,
+            },
+          },
+          colorState: {
+            strokeColorSpace: {
+              kind: "device-rgb",
+            },
+            fillColorSpace: {
+              kind: "device-rgb",
+            },
+            strokeColor: {
+              colorSpace: {
+                kind: "device-rgb",
+              },
+              components: [0, 0, 0],
+            },
+            fillColor: {
+              colorSpace: {
+                kind: "device-rgb",
+              },
+              components: [0.8, 0.8, 0.8],
+            },
+          },
+          transparencyState: {
+            strokeAlpha: 1,
+            fillAlpha: 1,
+            blendMode: "normal",
+            softMask: "none",
+          },
+          segments: [
+            {
+              kind: "rectangle",
+              x: 0,
+              y: 0,
+              width: 1_000,
+              height: 1_000,
+            },
+          ],
+          pointCount: 4,
+          closed: true,
+          bbox: {
+            x: 0,
+            y: 0,
+            width: 1_000,
+            height: 1_000,
+          },
+        },
+      ],
+    },
+  });
+
+  assert.ok(imagery.imagery?.svg);
+  assert.ok(imagery.imagery?.raster);
+  assert.equal(imagery.imagery?.svg.width, 1_000);
+  assert.equal(imagery.imagery?.svg.height, 1_000);
+  assert.ok((imagery.imagery?.raster?.width ?? 1_000) < 1_000);
+  assert.ok((imagery.imagery?.raster?.height ?? 1_000) < 1_000);
+  assert.ok((imagery.imagery?.raster?.bytes.byteLength ?? 0) <= 100_000);
+  assert.equal(imagery.knownLimits.includes("render-imagery-partial"), true);
+});
+
+test("buildRenderDocument preserves raster page coverage when the document raster budget is shared", async () => {
+  const pages: PdfObservedPage[] = Array.from({ length: 3 }, (_, pageIndex) => ({
+    pageNumber: pageIndex + 1,
+    resolutionMethod: "page-tree",
+    glyphs: [],
+    runs: [],
+    marks: [
+      {
+        id: `large-path-${pageIndex + 1}`,
+        kind: "path",
+        pageNumber: pageIndex + 1,
+        contentOrder: 0,
+        paintOperator: "f",
+        paintState: {
+          lineWidth: 1,
+          lineCapStyle: "butt",
+          lineJoinStyle: "miter",
+          miterLimit: 10,
+          dashPattern: {
+            segments: [],
+            phase: 0,
+          },
+        },
+        colorState: {
+          strokeColorSpace: {
+            kind: "device-rgb",
+          },
+          fillColorSpace: {
+            kind: "device-rgb",
+          },
+          strokeColor: {
+            colorSpace: {
+              kind: "device-rgb",
+            },
+            components: [0, 0, 0],
+          },
+          fillColor: {
+            colorSpace: {
+              kind: "device-rgb",
+            },
+            components: [0.8, 0.8, 0.8],
+          },
+        },
+        transparencyState: {
+          strokeAlpha: 1,
+          fillAlpha: 1,
+          blendMode: "normal",
+          softMask: "none",
+        },
+        segments: [
+          {
+            kind: "rectangle",
+            x: 0,
+            y: 0,
+            width: 10_000,
+            height: 3_000,
+          },
+        ],
+        pointCount: 4,
+        closed: true,
+        bbox: {
+          x: 0,
+          y: 0,
+          width: 10_000,
+          height: 3_000,
+        },
+      },
+    ],
+  }));
   const renderDocument = await buildRenderDocument({
     kind: "pdf-observation",
     strategy: "content-stream-interpreter",
     extractedText: "",
     knownLimits: [],
-    pages: [
-      {
-        pageNumber: 1,
-        resolutionMethod: "page-tree",
-        glyphs: [],
-        runs: [],
-        marks: [
-          {
-            id: "large-path-1",
-            kind: "path",
-            pageNumber: 1,
-            contentOrder: 0,
-            paintOperator: "f",
-            paintState: {
-              lineWidth: 1,
-              lineCapStyle: "butt",
-              lineJoinStyle: "miter",
-              miterLimit: 10,
-              dashPattern: {
-                segments: [],
-                phase: 0,
-              },
-            },
-            colorState: {
-              strokeColorSpace: {
-                kind: "device-rgb",
-              },
-              fillColorSpace: {
-                kind: "device-rgb",
-              },
-              strokeColor: {
-                colorSpace: {
-                  kind: "device-rgb",
-                },
-                components: [0, 0, 0],
-              },
-              fillColor: {
-                colorSpace: {
-                  kind: "device-rgb",
-                },
-                components: [0.8, 0.8, 0.8],
-              },
-            },
-            transparencyState: {
-              strokeAlpha: 1,
-              fillAlpha: 1,
-              blendMode: "normal",
-              softMask: "none",
-            },
-            segments: [
-              {
-                kind: "rectangle",
-                x: 0,
-                y: 0,
-                width: 20_000,
-                height: 1_000,
-              },
-            ],
-            pointCount: 4,
-            closed: true,
-            bbox: {
-              x: 0,
-              y: 0,
-              width: 20_000,
-              height: 1_000,
-            },
-          },
-        ],
-      },
-    ],
+    pages,
   });
 
-  const renderPage = renderDocument.pages[0];
-  assert.ok(renderPage?.imagery?.svg);
-  assert.equal(renderPage?.imagery?.raster, undefined);
+  assert.equal(renderDocument.pages.length, 3);
+  for (const renderPage of renderDocument.pages) {
+    assert.ok(renderPage.imagery?.svg);
+    assert.ok(renderPage.imagery?.raster);
+    assert.ok(renderPage.imagery.raster.width < 10_000);
+    assert.ok(renderPage.imagery.raster.height < 3_000);
+  }
   assert.equal(renderDocument.knownLimits.includes("render-imagery-partial"), true);
-  assert.equal(renderPage?.displayList.commands.length, 1);
-  assert.equal(renderPage?.renderHash.algorithm, "sha-256");
-  assert.equal(renderPage?.renderHash.hex.length, 64);
 });
 
 test("buildRenderDocument exposes font and image resource payloads for later imagery work", async () => {

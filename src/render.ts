@@ -70,7 +70,9 @@ export async function buildRenderDocument(
   const cachedImageDataByPayloadId = new Map<string, CachedImageData>();
   const pages: Awaited<ReturnType<typeof buildRenderPage>>[] = [];
   let remainingRasterBudgetBytes = DEFAULT_RENDER_RASTER_BUDGET_BYTES;
-  for (const page of observation.pages) {
+  for (const [pageIndex, page] of observation.pages.entries()) {
+    const remainingPageCount = Math.max(1, observation.pages.length - pageIndex);
+    const pageRasterBudgetBytes = Math.max(4 + 1024, Math.floor(remainingRasterBudgetBytes / remainingPageCount));
     const renderPage = await buildRenderPage(
       page.pageNumber,
       page.resolutionMethod,
@@ -79,7 +81,7 @@ export async function buildRenderDocument(
       payloadCatalog,
       pageEntryByPageNumber.get(page.pageNumber),
       cachedImageDataByPayloadId,
-      remainingRasterBudgetBytes,
+      pageRasterBudgetBytes,
     );
     remainingRasterBudgetBytes = Math.max(
       0,
