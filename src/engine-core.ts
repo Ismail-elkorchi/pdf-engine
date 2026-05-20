@@ -188,7 +188,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   async function toRender(request: PdfRenderRequest): Promise<PdfStageResult<PdfRenderDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const ocr = resolveOcrOptions(defaultOcr, request.ocr);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider, "all");
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, "render");
     const admission = buildAdmissionStage(
       {
         source: request.source,
@@ -374,7 +374,7 @@ async function inspectSource(
 }
 
 function streamDecodeScopeForObservation(ocr: PdfResolvedOcrOptions): PdfShellStreamDecodeScope {
-  return ocr.mode === "off" ? "text" : "all";
+  return ocr.mode === "off" ? "text" : "render";
 }
 
 function streamDecodeScopeForPipeline(
@@ -382,14 +382,14 @@ function streamDecodeScopeForPipeline(
   ocr: PdfResolvedOcrOptions,
 ): PdfShellStreamDecodeScope {
   if (ocr.mode !== "off") {
-    return "all";
+    return "render";
   }
 
   if (request.intent === "admission") {
     return "structure";
   }
 
-  return request.intent === undefined || request.intent === "render" ? "all" : "text";
+  return request.intent === undefined || request.intent === "render" ? "render" : "text";
 }
 
 function buildInspection(
@@ -970,6 +970,10 @@ function isParserRelevantStream(
   }
 
   if (objectShell.typeName === "EmbeddedFile") {
+    return false;
+  }
+
+  if (objectShell.typeName === "Metadata" || objectShell.dictionaryEntries.get("Subtype")?.trim() === "/XML") {
     return false;
   }
 
