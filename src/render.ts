@@ -55,6 +55,7 @@ interface RenderXObjectUsage {
 }
 
 const DEFAULT_RENDER_RASTER_BUDGET_BYTES = 64 * 1024 * 1024;
+const DEFAULT_RENDER_SVG_BUDGET_CHARACTERS = 4 * 1024 * 1024;
 
 export async function buildRenderDocument(
   observation: PdfObservedDocument,
@@ -70,9 +71,11 @@ export async function buildRenderDocument(
   const cachedImageDataByPayloadId = new Map<string, CachedImageData>();
   const pages: Awaited<ReturnType<typeof buildRenderPage>>[] = [];
   let remainingRasterBudgetBytes = DEFAULT_RENDER_RASTER_BUDGET_BYTES;
+  let remainingSvgBudgetCharacters = DEFAULT_RENDER_SVG_BUDGET_CHARACTERS;
   for (const [pageIndex, page] of observation.pages.entries()) {
     const remainingPageCount = Math.max(1, observation.pages.length - pageIndex);
     const pageRasterBudgetBytes = Math.max(4 + 1024, Math.floor(remainingRasterBudgetBytes / remainingPageCount));
+    const pageSvgBudgetCharacters = Math.max(0, Math.floor(remainingSvgBudgetCharacters / remainingPageCount));
     const renderPage = await buildRenderPage(
       page.pageNumber,
       page.resolutionMethod,
@@ -82,10 +85,15 @@ export async function buildRenderDocument(
       pageEntryByPageNumber.get(page.pageNumber),
       cachedImageDataByPayloadId,
       pageRasterBudgetBytes,
+      pageSvgBudgetCharacters,
     );
     remainingRasterBudgetBytes = Math.max(
       0,
       remainingRasterBudgetBytes - (renderPage.imagery?.raster?.bytes.byteLength ?? 0),
+    );
+    remainingSvgBudgetCharacters = Math.max(
+      0,
+      remainingSvgBudgetCharacters - (renderPage.imagery?.svg?.markup.length ?? 0),
     );
     pages.push(renderPage);
   }
@@ -131,6 +139,7 @@ async function buildRenderPage(
   pageEntry: ParsedPageEntry | undefined,
   cachedImageDataByPayloadId: Map<string, CachedImageData>,
   rasterBudgetBytes: number,
+  svgBudgetCharacters: number,
 ): Promise<PdfRenderPage & { readonly knownLimits: readonly PdfRenderDocument["knownLimits"][number][] }> {
   const displayList: PdfDisplayList = {
     commands: marks.map((mark) => toDisplayCommand(mark, payloadCatalog)),
@@ -144,6 +153,7 @@ async function buildRenderPage(
     resourcePayloads: pageResourcePayloads,
     cachedImageDataByPayloadId,
     rasterBudgetBytes,
+    svgBudgetCharacters,
   });
   const renderHash = await buildRenderHash({
     pageNumber,
