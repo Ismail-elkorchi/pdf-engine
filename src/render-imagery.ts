@@ -1896,7 +1896,7 @@ function toPixelDimension(value: number): number {
   return Math.max(1, Math.round(value));
 }
 
-function estimateRasterWorkBytes(width: number, height: number): number {
+export function estimateRenderRasterWorkBytes(width: number, height: number): number {
   const rawByteLength = height * ((width * 4) + 1);
   const storedBlockCount = Math.ceil(rawByteLength / 0xffff);
   return rawByteLength + (storedBlockCount * 5) + 63;
@@ -1907,7 +1907,7 @@ function resolveRasterDimensions(
   height: number,
   rasterBudgetBytes: number | undefined,
 ): { readonly width: number; readonly height: number; readonly scale: number } {
-  if (rasterBudgetBytes === undefined || estimateRasterWorkBytes(width, height) <= rasterBudgetBytes) {
+  if (rasterBudgetBytes === undefined || estimateRenderRasterWorkBytes(width, height) <= rasterBudgetBytes) {
     return { width, height, scale: 1 };
   }
 
@@ -1915,10 +1915,10 @@ function resolveRasterDimensions(
   const scale = Math.min(1, Math.sqrt(maximumPixels / Math.max(1, width * height)));
   let rasterWidth = Math.max(1, Math.floor(width * scale));
   let rasterHeight = Math.max(1, Math.floor(height * scale));
-  while (rasterWidth > 1 && estimateRasterWorkBytes(rasterWidth, rasterHeight) > rasterBudgetBytes) {
+  while (rasterWidth > 1 && estimateRenderRasterWorkBytes(rasterWidth, rasterHeight) > rasterBudgetBytes) {
     rasterWidth -= 1;
   }
-  while (rasterHeight > 1 && estimateRasterWorkBytes(rasterWidth, rasterHeight) > rasterBudgetBytes) {
+  while (rasterHeight > 1 && estimateRenderRasterWorkBytes(rasterWidth, rasterHeight) > rasterBudgetBytes) {
     rasterHeight -= 1;
   }
 
