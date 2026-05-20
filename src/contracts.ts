@@ -2198,7 +2198,7 @@ export interface PdfStageResult<T> {
 export interface PdfAdmissionRequest {
   /** Source document. */
   readonly source: PdfDocumentSource;
-  /** Optional caller intent. */
+  /** Optional caller intent; `run()` skips downstream stages beyond the requested artifact. */
   readonly intent?: PdfExecutionIntent;
   /** Optional request-specific policy overrides. */
   readonly policy?: PdfAdmissionPolicy;
@@ -2280,7 +2280,7 @@ export interface PdfRenderRequest {
 export interface PdfPipelineRequest {
   /** Source document. */
   readonly source: PdfDocumentSource;
-  /** Optional caller intent. */
+  /** Optional caller intent; downstream stages beyond the requested artifact are returned as skipped. */
   readonly intent?: PdfExecutionIntent;
   /** Optional request-specific policy overrides. */
   readonly policy?: PdfAdmissionPolicy;
