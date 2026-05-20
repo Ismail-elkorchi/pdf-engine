@@ -1,4 +1,8 @@
-import { buildRenderPageImagery, type CachedImageData } from "./render-imagery.ts";
+import {
+  buildRenderPageImagery,
+  estimateRenderRasterWorkBytes,
+  type CachedImageData,
+} from "./render-imagery.ts";
 import {
   keyOfObjectRef,
   readNameValue,
@@ -87,9 +91,14 @@ export async function buildRenderDocument(
       pageRasterBudgetBytes,
       pageSvgBudgetCharacters,
     );
+    const pageRaster = renderPage.imagery?.raster;
     remainingRasterBudgetBytes = Math.max(
       0,
-      remainingRasterBudgetBytes - (renderPage.imagery?.raster?.bytes.byteLength ?? 0),
+      remainingRasterBudgetBytes - (
+        pageRaster !== undefined
+          ? estimateRenderRasterWorkBytes(pageRaster.width, pageRaster.height)
+          : 0
+      ),
     );
     remainingSvgBudgetCharacters = Math.max(
       0,

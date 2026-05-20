@@ -473,7 +473,7 @@ test("buildRenderPageImagery omits oversized SVG while preserving raster imagery
   assert.equal(imagery.knownLimits.includes("render-imagery-partial"), true);
 });
 
-test("buildRenderDocument preserves raster page coverage when the document raster budget is shared", async () => {
+test("buildRenderDocument preserves raster coverage and stable work accounting when the budget is shared", async () => {
   const pages: PdfObservedPage[] = Array.from({ length: 3 }, (_, pageIndex) => ({
     pageNumber: pageIndex + 1,
     resolutionMethod: "page-tree",
@@ -551,11 +551,27 @@ test("buildRenderDocument preserves raster page coverage when the document raste
   });
 
   assert.equal(renderDocument.pages.length, 3);
+  const rasterDimensions: Array<{ readonly width: number; readonly height: number; readonly bytes: number }> = [];
   for (const renderPage of renderDocument.pages) {
     assert.ok(renderPage.imagery?.svg);
     assert.ok(renderPage.imagery?.raster);
-    assert.ok(renderPage.imagery.raster.width < 10_000);
-    assert.ok(renderPage.imagery.raster.height < 3_000);
+    const raster = renderPage.imagery?.raster;
+    assert.ok(raster);
+    assert.ok(raster.width < 10_000);
+    assert.ok(raster.height < 3_000);
+    rasterDimensions.push({
+      width: raster.width,
+      height: raster.height,
+      bytes: raster.bytes.byteLength,
+    });
+  }
+
+  const first = rasterDimensions[0];
+  assert.ok(first);
+  for (const dimension of rasterDimensions) {
+    assert.ok(Math.abs(dimension.width - first.width) <= 1);
+    assert.ok(Math.abs(dimension.height - first.height) <= 1);
+    assert.ok(dimension.bytes < dimension.height * ((dimension.width * 4) + 1));
   }
   assert.equal(renderDocument.knownLimits.includes("render-imagery-partial"), true);
 });
