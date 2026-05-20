@@ -97,6 +97,29 @@ interface RasterSubpath {
   readonly axisAlignedRectangle?: PdfBoundingBox;
 }
 
+interface ByteSource {
+  readonly length: number;
+  byteAt(index: number): number;
+}
+
+interface DeflateMatch {
+  readonly length: number;
+  readonly distance: number;
+}
+
+interface DeflateLengthCode {
+  readonly code: number;
+  readonly baseLength: number;
+  readonly extraBits: number;
+  readonly maxLength: number;
+}
+
+interface DeflateDistanceCode {
+  readonly code: number;
+  readonly baseDistance: number;
+  readonly extraBits: number;
+}
+
 const IDENTITY_TRANSFORM: PdfTransformMatrix = {
   a: 1,
   b: 0,
@@ -110,7 +133,74 @@ const WHITE_PIXEL = [255, 255, 255, 255] as const;
 const BLACK_PIXEL: RgbaColor = { r: 0, g: 0, b: 0, a: 1 };
 const BASE64_ALPHABET = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
 const ADLER32_CHUNK_SIZE = 5_552;
+const DEFLATE_HASH_SIZE = 1 << 15;
+const DEFLATE_MIN_MATCH_LENGTH = 3;
+const DEFLATE_MAX_MATCH_LENGTH = 258;
+const DEFLATE_MAX_DISTANCE = 32_768;
 const CRC32_TABLE = buildCrc32Table();
+const DEFLATE_LENGTH_CODES: readonly DeflateLengthCode[] = [
+  { code: 257, baseLength: 3, extraBits: 0, maxLength: 3 },
+  { code: 258, baseLength: 4, extraBits: 0, maxLength: 4 },
+  { code: 259, baseLength: 5, extraBits: 0, maxLength: 5 },
+  { code: 260, baseLength: 6, extraBits: 0, maxLength: 6 },
+  { code: 261, baseLength: 7, extraBits: 0, maxLength: 7 },
+  { code: 262, baseLength: 8, extraBits: 0, maxLength: 8 },
+  { code: 263, baseLength: 9, extraBits: 0, maxLength: 9 },
+  { code: 264, baseLength: 10, extraBits: 0, maxLength: 10 },
+  { code: 265, baseLength: 11, extraBits: 1, maxLength: 12 },
+  { code: 266, baseLength: 13, extraBits: 1, maxLength: 14 },
+  { code: 267, baseLength: 15, extraBits: 1, maxLength: 16 },
+  { code: 268, baseLength: 17, extraBits: 1, maxLength: 18 },
+  { code: 269, baseLength: 19, extraBits: 2, maxLength: 22 },
+  { code: 270, baseLength: 23, extraBits: 2, maxLength: 26 },
+  { code: 271, baseLength: 27, extraBits: 2, maxLength: 30 },
+  { code: 272, baseLength: 31, extraBits: 2, maxLength: 34 },
+  { code: 273, baseLength: 35, extraBits: 3, maxLength: 42 },
+  { code: 274, baseLength: 43, extraBits: 3, maxLength: 50 },
+  { code: 275, baseLength: 51, extraBits: 3, maxLength: 58 },
+  { code: 276, baseLength: 59, extraBits: 3, maxLength: 66 },
+  { code: 277, baseLength: 67, extraBits: 4, maxLength: 82 },
+  { code: 278, baseLength: 83, extraBits: 4, maxLength: 98 },
+  { code: 279, baseLength: 99, extraBits: 4, maxLength: 114 },
+  { code: 280, baseLength: 115, extraBits: 4, maxLength: 130 },
+  { code: 281, baseLength: 131, extraBits: 5, maxLength: 162 },
+  { code: 282, baseLength: 163, extraBits: 5, maxLength: 194 },
+  { code: 283, baseLength: 195, extraBits: 5, maxLength: 226 },
+  { code: 284, baseLength: 227, extraBits: 5, maxLength: 257 },
+  { code: 285, baseLength: 258, extraBits: 0, maxLength: 258 },
+];
+const DEFLATE_DISTANCE_CODES: readonly DeflateDistanceCode[] = [
+  { code: 0, baseDistance: 1, extraBits: 0 },
+  { code: 1, baseDistance: 2, extraBits: 0 },
+  { code: 2, baseDistance: 3, extraBits: 0 },
+  { code: 3, baseDistance: 4, extraBits: 0 },
+  { code: 4, baseDistance: 5, extraBits: 1 },
+  { code: 5, baseDistance: 7, extraBits: 1 },
+  { code: 6, baseDistance: 9, extraBits: 2 },
+  { code: 7, baseDistance: 13, extraBits: 2 },
+  { code: 8, baseDistance: 17, extraBits: 3 },
+  { code: 9, baseDistance: 25, extraBits: 3 },
+  { code: 10, baseDistance: 33, extraBits: 4 },
+  { code: 11, baseDistance: 49, extraBits: 4 },
+  { code: 12, baseDistance: 65, extraBits: 5 },
+  { code: 13, baseDistance: 97, extraBits: 5 },
+  { code: 14, baseDistance: 129, extraBits: 6 },
+  { code: 15, baseDistance: 193, extraBits: 6 },
+  { code: 16, baseDistance: 257, extraBits: 7 },
+  { code: 17, baseDistance: 385, extraBits: 7 },
+  { code: 18, baseDistance: 513, extraBits: 8 },
+  { code: 19, baseDistance: 769, extraBits: 8 },
+  { code: 20, baseDistance: 1_025, extraBits: 9 },
+  { code: 21, baseDistance: 1_537, extraBits: 9 },
+  { code: 22, baseDistance: 2_049, extraBits: 10 },
+  { code: 23, baseDistance: 3_073, extraBits: 10 },
+  { code: 24, baseDistance: 4_097, extraBits: 11 },
+  { code: 25, baseDistance: 6_145, extraBits: 11 },
+  { code: 26, baseDistance: 8_193, extraBits: 12 },
+  { code: 27, baseDistance: 12_289, extraBits: 12 },
+  { code: 28, baseDistance: 16_385, extraBits: 13 },
+  { code: 29, baseDistance: 24_577, extraBits: 13 },
+];
 const BITMAP_FONT = new Map<string, readonly string[]>([
   [" ", ["00000", "00000", "00000", "00000", "00000", "00000", "00000"]],
   ["-", ["00000", "00000", "00000", "11111", "00000", "00000", "00000"]],
@@ -1255,14 +1345,8 @@ function decodeImagePayload(payload: Extract<PdfRenderResourcePayload, { readonl
 }
 
 function encodePngRgba(width: number, height: number, rgbaBytes: Uint8Array): Uint8Array {
-  const rawBytes = new Uint8Array(height * (width * 4 + 1));
-  for (let row = 0; row < height; row += 1) {
-    const rawOffset = row * (width * 4 + 1);
-    rawBytes[rawOffset] = 0;
-    rawBytes.set(rgbaBytes.subarray(row * width * 4, (row + 1) * width * 4), rawOffset + 1);
-  }
-
-  const compressed = encodeZlibStoredBlocks(rawBytes);
+  const scanlines = createPngScanlineSource(width, height, rgbaBytes);
+  const compressed = encodeZlibDeflate(scanlines);
   const signature = Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10]);
   const ihdr = createPngChunk(
     "IHDR",
@@ -1282,35 +1366,296 @@ function encodePngRgba(width: number, height: number, rgbaBytes: Uint8Array): Ui
   return concatUint8Arrays([signature, ihdr, idat, iend]);
 }
 
-function encodeZlibStoredBlocks(bytes: Uint8Array): Uint8Array {
-  const blockCount = Math.ceil(bytes.length / 0xffff);
-  const output = new Uint8Array(2 + (blockCount * 5) + bytes.length + 4);
+function createPngScanlineSource(width: number, height: number, rgbaBytes: Uint8Array): ByteSource {
+  const rowByteLength = width * 4;
+  const scanlineByteLength = rowByteLength + 1;
+  return {
+    length: height * scanlineByteLength,
+    byteAt(index: number): number {
+      const column = index % scanlineByteLength;
+      if (column === 0) {
+        return 0;
+      }
+      const row = Math.floor(index / scanlineByteLength);
+      return rgbaBytes[(row * rowByteLength) + column - 1] ?? 0;
+    },
+  };
+}
+
+function encodeZlibDeflate(source: ByteSource): Uint8Array {
+  const compressed = encodeZlibFixedHuffman(source);
+  const storedLength = estimateZlibStoredBlockLength(source.length);
+  return compressed.byteLength <= storedLength ? compressed : encodeZlibStoredBlocks(source);
+}
+
+function encodeZlibFixedHuffman(source: ByteSource): Uint8Array {
+  const hashTable = new Int32Array(DEFLATE_HASH_SIZE);
+  hashTable.fill(-1);
+
+  const writer = new DeflateBitWriter();
+  const adler = new Adler32State();
+  writer.writeBits(1, 1);
+  writer.writeBits(0b01, 2);
+
+  let position = 0;
+  while (position < source.length) {
+    const match = findDeflateMatch(source, hashTable, position);
+    if (match.length >= DEFLATE_MIN_MATCH_LENGTH) {
+      writeDeflateLengthDistance(writer, match);
+      for (let offset = 0; offset < match.length; offset += 1) {
+        const sourcePosition = position + offset;
+        adler.update(source.byteAt(sourcePosition));
+        rememberDeflatePosition(source, hashTable, sourcePosition);
+      }
+      position += match.length;
+      continue;
+    }
+
+    const value = source.byteAt(position);
+    writeFixedHuffmanSymbol(writer, value);
+    adler.update(value);
+    rememberDeflatePosition(source, hashTable, position);
+    position += 1;
+  }
+
+  writeFixedHuffmanSymbol(writer, 256);
+  return writer.finish(adler.digest());
+}
+
+function findDeflateMatch(
+  source: ByteSource,
+  hashTable: Int32Array,
+  position: number,
+): DeflateMatch {
+  if (position + DEFLATE_MIN_MATCH_LENGTH > source.length) {
+    return { length: 0, distance: 0 };
+  }
+
+  const previousPosition = hashTable[hashDeflateTriple(source, position)] ?? -1;
+  if (previousPosition < 0) {
+    return { length: 0, distance: 0 };
+  }
+
+  const distance = position - previousPosition;
+  if (distance <= 0 || distance > DEFLATE_MAX_DISTANCE) {
+    return { length: 0, distance: 0 };
+  }
+
+  const maximumLength = Math.min(DEFLATE_MAX_MATCH_LENGTH, source.length - position);
+  let length = 0;
+  while (
+    length < maximumLength &&
+    source.byteAt(previousPosition + length) === source.byteAt(position + length)
+  ) {
+    length += 1;
+  }
+
+  return length >= DEFLATE_MIN_MATCH_LENGTH ? { length, distance } : { length: 0, distance: 0 };
+}
+
+function rememberDeflatePosition(source: ByteSource, hashTable: Int32Array, position: number): void {
+  if (position + DEFLATE_MIN_MATCH_LENGTH > source.length) {
+    return;
+  }
+  hashTable[hashDeflateTriple(source, position)] = position;
+}
+
+function hashDeflateTriple(source: ByteSource, position: number): number {
+  return (
+    ((source.byteAt(position) * 257) ^
+      (source.byteAt(position + 1) * 17) ^
+      source.byteAt(position + 2)) &
+    (DEFLATE_HASH_SIZE - 1)
+  );
+}
+
+function writeDeflateLengthDistance(writer: DeflateBitWriter, match: DeflateMatch): void {
+  const lengthCode = resolveDeflateLengthCode(match.length);
+  writeFixedHuffmanSymbol(writer, lengthCode.code);
+  writer.writeBits(match.length - lengthCode.baseLength, lengthCode.extraBits);
+
+  const distanceCode = resolveDeflateDistanceCode(match.distance);
+  writer.writeBits(reverseBits(distanceCode.code, 5), 5);
+  writer.writeBits(match.distance - distanceCode.baseDistance, distanceCode.extraBits);
+}
+
+function resolveDeflateLengthCode(length: number): DeflateLengthCode {
+  for (const lengthCode of DEFLATE_LENGTH_CODES) {
+    if (length >= lengthCode.baseLength && length <= lengthCode.maxLength) {
+      return lengthCode;
+    }
+  }
+  throw new Error(`Unsupported deflate length: ${String(length)}.`);
+}
+
+function resolveDeflateDistanceCode(distance: number): DeflateDistanceCode {
+  for (const distanceCode of DEFLATE_DISTANCE_CODES) {
+    const maximumDistance = distanceCode.baseDistance + (1 << distanceCode.extraBits) - 1;
+    if (distance >= distanceCode.baseDistance && distance <= maximumDistance) {
+      return distanceCode;
+    }
+  }
+  throw new Error(`Unsupported deflate distance: ${String(distance)}.`);
+}
+
+function writeFixedHuffmanSymbol(writer: DeflateBitWriter, symbol: number): void {
+  if (symbol >= 0 && symbol <= 143) {
+    writer.writeBits(reverseBits(0x30 + symbol, 8), 8);
+    return;
+  }
+  if (symbol <= 255) {
+    writer.writeBits(reverseBits(0x190 + symbol - 144, 9), 9);
+    return;
+  }
+  if (symbol <= 279) {
+    writer.writeBits(reverseBits(symbol - 256, 7), 7);
+    return;
+  }
+  writer.writeBits(reverseBits(0xc0 + symbol - 280, 8), 8);
+}
+
+function reverseBits(value: number, bitCount: number): number {
+  let reversed = 0;
+  for (let bit = 0; bit < bitCount; bit += 1) {
+    reversed = (reversed << 1) | ((value >> bit) & 1);
+  }
+  return reversed;
+}
+
+function encodeZlibStoredBlocks(source: ByteSource): Uint8Array {
+  const blockCount = Math.ceil(source.length / 0xffff);
+  const output = new Uint8Array(2 + (blockCount * 5) + source.length + 4);
+  const adler = new Adler32State();
   output[0] = 0x78;
   output[1] = 0x01;
 
   let sourceOffset = 0;
   let outputOffset = 2;
-  while (sourceOffset < bytes.length) {
-    const remaining = bytes.length - sourceOffset;
+  while (sourceOffset < source.length) {
+    const remaining = source.length - sourceOffset;
     const blockLength = Math.min(remaining, 0xffff);
-    const isFinalBlock = sourceOffset + blockLength >= bytes.length;
+    const isFinalBlock = sourceOffset + blockLength >= source.length;
     output[outputOffset] = isFinalBlock ? 1 : 0;
     output[outputOffset + 1] = blockLength & 0xff;
     output[outputOffset + 2] = (blockLength >> 8) & 0xff;
     const complement = (~blockLength) & 0xffff;
     output[outputOffset + 3] = complement & 0xff;
     output[outputOffset + 4] = (complement >> 8) & 0xff;
-    output.set(bytes.subarray(sourceOffset, sourceOffset + blockLength), outputOffset + 5);
+    for (let blockOffset = 0; blockOffset < blockLength; blockOffset += 1) {
+      const value = source.byteAt(sourceOffset + blockOffset);
+      output[outputOffset + 5 + blockOffset] = value;
+      adler.update(value);
+    }
     sourceOffset += blockLength;
     outputOffset += 5 + blockLength;
   }
 
-  const adler = adler32(bytes);
-  output[outputOffset] = (adler >>> 24) & 0xff;
-  output[outputOffset + 1] = (adler >>> 16) & 0xff;
-  output[outputOffset + 2] = (adler >>> 8) & 0xff;
-  output[outputOffset + 3] = adler & 0xff;
+  const checksum = adler.digest();
+  output[outputOffset] = (checksum >>> 24) & 0xff;
+  output[outputOffset + 1] = (checksum >>> 16) & 0xff;
+  output[outputOffset + 2] = (checksum >>> 8) & 0xff;
+  output[outputOffset + 3] = checksum & 0xff;
   return output;
+}
+
+function estimateZlibStoredBlockLength(byteLength: number): number {
+  const blockCount = Math.ceil(byteLength / 0xffff);
+  return 2 + (blockCount * 5) + byteLength + 4;
+}
+
+class DeflateBitWriter {
+  readonly #bytes = new ByteAccumulator();
+  #bitBuffer = 0;
+  #bitCount = 0;
+
+  constructor() {
+    this.#bytes.pushByte(0x78);
+    this.#bytes.pushByte(0x01);
+  }
+
+  writeBits(value: number, bitCount: number): void {
+    if (bitCount === 0) {
+      return;
+    }
+
+    this.#bitBuffer |= value << this.#bitCount;
+    this.#bitCount += bitCount;
+    while (this.#bitCount >= 8) {
+      this.#bytes.pushByte(this.#bitBuffer & 0xff);
+      this.#bitBuffer >>>= 8;
+      this.#bitCount -= 8;
+    }
+  }
+
+  finish(adler: number): Uint8Array {
+    if (this.#bitCount > 0) {
+      this.#bytes.pushByte(this.#bitBuffer & 0xff);
+      this.#bitBuffer = 0;
+      this.#bitCount = 0;
+    }
+
+    return this.#bytes.toUint8Array([
+      (adler >>> 24) & 0xff,
+      (adler >>> 16) & 0xff,
+      (adler >>> 8) & 0xff,
+      adler & 0xff,
+    ]);
+  }
+}
+
+class ByteAccumulator {
+  static readonly #chunkSize = 65_536;
+  readonly #chunks: Uint8Array[] = [];
+  #current = new Uint8Array(ByteAccumulator.#chunkSize);
+  #currentOffset = 0;
+  #length = 0;
+
+  pushByte(value: number): void {
+    if (this.#currentOffset >= this.#current.byteLength) {
+      this.#chunks.push(this.#current);
+      this.#current = new Uint8Array(ByteAccumulator.#chunkSize);
+      this.#currentOffset = 0;
+    }
+
+    this.#current[this.#currentOffset] = value;
+    this.#currentOffset += 1;
+    this.#length += 1;
+  }
+
+  toUint8Array(tail: readonly number[]): Uint8Array {
+    const output = new Uint8Array(this.#length + tail.length);
+    let outputOffset = 0;
+    for (const chunk of this.#chunks) {
+      output.set(chunk, outputOffset);
+      outputOffset += chunk.byteLength;
+    }
+    output.set(this.#current.subarray(0, this.#currentOffset), outputOffset);
+    outputOffset += this.#currentOffset;
+    output.set(tail, outputOffset);
+    return output;
+  }
+}
+
+class Adler32State {
+  #s1 = 1;
+  #s2 = 0;
+  #byteCount = 0;
+
+  update(value: number): void {
+    this.#s1 += value;
+    this.#s2 += this.#s1;
+    this.#byteCount += 1;
+    if (this.#byteCount % ADLER32_CHUNK_SIZE === 0) {
+      this.#s1 %= 65521;
+      this.#s2 %= 65521;
+    }
+  }
+
+  digest(): number {
+    this.#s1 %= 65521;
+    this.#s2 %= 65521;
+    return ((this.#s2 << 16) | this.#s1) >>> 0;
+  }
 }
 
 function createPngChunk(type: string, data: Uint8Array): Uint8Array {
@@ -1345,22 +1690,6 @@ function concatUint8Arrays(parts: readonly Uint8Array[]): Uint8Array {
     offset += part.length;
   }
   return combined;
-}
-
-function adler32(bytes: Uint8Array): number {
-  let s1 = 1;
-  let s2 = 0;
-  for (let index = 0; index < bytes.length; index += 1) {
-    s1 += bytes[index] ?? 0;
-    s2 += s1;
-    if (index % ADLER32_CHUNK_SIZE === ADLER32_CHUNK_SIZE - 1) {
-      s1 %= 65521;
-      s2 %= 65521;
-    }
-  }
-  s1 %= 65521;
-  s2 %= 65521;
-  return ((s2 << 16) | s1) >>> 0;
 }
 
 function crc32ForParts(...parts: readonly Uint8Array[]): number {

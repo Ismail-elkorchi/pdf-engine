@@ -1,5 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
+import { inflateSync } from "node:zlib";
 
 import { buildRenderDocument, canonicalizeRenderHashValue } from "../../src/render.ts";
 import { buildRenderPageImagery } from "../../src/render-imagery.ts";
@@ -361,6 +362,41 @@ test("buildRenderPageImagery downscales raster when eager raster work exceeds th
   assert.equal(imagery.knownLimits.includes("render-imagery-partial"), true);
 });
 
+test("buildRenderPageImagery emits compressed valid PNG raster scanlines", () => {
+  const imagery = buildRenderPageImagery({
+    pageBox: {
+      x: 0,
+      y: 0,
+      width: 128,
+      height: 128,
+    },
+    resourcePayloads: [],
+    displayList: {
+      commands: [],
+    },
+  });
+
+  const raster = imagery.imagery?.raster;
+  assert.ok(raster);
+  if (!raster) {
+    return;
+  }
+
+  const decoded = assertValidPng(raster.bytes);
+  const rawScanlineLength = 128 * ((128 * 4) + 1);
+  assert.equal(decoded.width, 128);
+  assert.equal(decoded.height, 128);
+  assert.equal(decoded.scanlines.byteLength, rawScanlineLength);
+  assert.ok(raster.bytes.byteLength < rawScanlineLength / 8);
+  for (let row = 0; row < decoded.height; row += 1) {
+    assert.equal(decoded.scanlines[row * ((decoded.width * 4) + 1)], 0);
+  }
+  assert.deepEqual(
+    Array.from(decoded.scanlines.subarray(1, 5)),
+    [255, 255, 255, 255],
+  );
+});
+
 test("buildRenderPageImagery omits oversized SVG while preserving raster imagery", () => {
   const imagery = buildRenderPageImagery({
     pageBox: {
@@ -605,7 +641,7 @@ test("buildRenderDocument emits page-box-aware SVG and PNG imagery", async () =>
     Array.from(renderPage.imagery.raster.bytes.subarray(0, 8)),
     [137, 80, 78, 71, 13, 10, 26, 10],
   );
-  assertValidPngWithStoredZlib(renderPage.imagery.raster.bytes);
+  assertValidPng(renderPage.imagery.raster.bytes);
   assert.ok(renderDocument?.knownLimits.includes("render-imagery-partial"));
 });
 
@@ -765,7 +801,11 @@ test("canonicalizeRenderHashValue compacts large strings into deterministic dige
   assert.equal(first.includes(largeString.slice(0, 24)), false);
 });
 
-function assertValidPngWithStoredZlib(bytes: Uint8Array): void {
+function assertValidPng(bytes: Uint8Array): {
+  readonly width: number;
+  readonly height: number;
+  readonly scanlines: Uint8Array;
+} {
   assert.deepEqual(
     Array.from(bytes.subarray(0, 8)),
     [137, 80, 78, 71, 13, 10, 26, 10],
@@ -775,6 +815,8 @@ function assertValidPngWithStoredZlib(bytes: Uint8Array): void {
   const idatParts: Uint8Array[] = [];
   let sawIhdr = false;
   let sawIend = false;
+  let width = 0;
+  let height = 0;
 
   while (offset < bytes.length) {
     const length = readUint32(bytes, offset);
@@ -791,6 +833,13 @@ function assertValidPngWithStoredZlib(bytes: Uint8Array): void {
 
     if (type === "IHDR") {
       sawIhdr = true;
+      width = readUint32(data, 0);
+      height = readUint32(data, 4);
+      assert.equal(data[8], 8);
+      assert.equal(data[9], 6);
+      assert.equal(data[10], 0);
+      assert.equal(data[11], 0);
+      assert.equal(data[12], 0);
     } else if (type === "IDAT") {
       idatParts.push(data);
     } else if (type === "IEND") {
@@ -807,39 +856,9 @@ function assertValidPngWithStoredZlib(bytes: Uint8Array): void {
   assert.equal(offset, bytes.length);
 
   const compressed = concatForTest(idatParts);
-  assert.equal(compressed[0], 0x78);
-  assert.equal(compressed[1], 0x01);
-  assertStoredZlibBlocks(compressed);
-}
-
-function assertStoredZlibBlocks(compressed: Uint8Array): void {
-  let offset = 2;
-  const rawParts: Uint8Array[] = [];
-
-  while (offset < compressed.length - 4) {
-    const blockHeader = compressed[offset] ?? 0;
-    const isFinal = (blockHeader & 1) === 1;
-    const blockType = (blockHeader >> 1) & 0b11;
-    assert.equal(blockType, 0);
-
-    const length = (compressed[offset + 1] ?? 0) | ((compressed[offset + 2] ?? 0) << 8);
-    const complement = (compressed[offset + 3] ?? 0) | ((compressed[offset + 4] ?? 0) << 8);
-    assert.equal((length ^ complement) & 0xffff, 0xffff);
-
-    const dataStart = offset + 5;
-    const dataEnd = dataStart + length;
-    assert.ok(dataEnd <= compressed.length - 4, "Stored zlib block extends beyond the byte buffer.");
-    rawParts.push(compressed.subarray(dataStart, dataEnd));
-    offset = dataEnd;
-
-    if (isFinal) {
-      break;
-    }
-  }
-
-  assert.equal(offset, compressed.length - 4);
-  const rawBytes = concatForTest(rawParts);
-  assert.equal(adler32ForTest(rawBytes), readUint32(compressed, compressed.length - 4));
+  const scanlines = Uint8Array.from(inflateSync(compressed));
+  assert.equal(scanlines.byteLength, height * ((width * 4) + 1));
+  return { width, height, scanlines };
 }
 
 function readUint32(bytes: Uint8Array, offset: number): number {
@@ -860,16 +879,6 @@ function concatForTest(parts: readonly Uint8Array[]): Uint8Array {
     offset += part.length;
   }
   return output;
-}
-
-function adler32ForTest(bytes: Uint8Array): number {
-  let s1 = 1;
-  let s2 = 0;
-  for (const value of bytes) {
-    s1 = (s1 + value) % 65521;
-    s2 = (s2 + s1) % 65521;
-  }
-  return ((s2 << 16) | s1) >>> 0;
 }
 
 function crc32ForTest(...parts: readonly Uint8Array[]): number {
