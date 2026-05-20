@@ -277,6 +277,66 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
   assert.equal(renderDocument.renderHash.hex.length, 64);
 });
 
+test("buildRenderDocument document hash tracks page hash changes without relying on duplicate page payloads", async () => {
+  const baseObservation = {
+    kind: "pdf-observation" as const,
+    strategy: "content-stream-interpreter" as const,
+    extractedText: "Stable page text",
+    knownLimits: [],
+    pages: [
+      {
+        pageNumber: 1,
+        resolutionMethod: "page-tree" as const,
+        glyphs: [],
+        runs: [],
+        marks: [
+          {
+            id: "text-1",
+            kind: "text" as const,
+            pageNumber: 1,
+            contentOrder: 0,
+            runId: "run-1",
+            glyphIds: ["glyph-1"],
+            text: "Stable page text",
+            origin: "native-text" as const,
+            bbox: {
+              x: 10,
+              y: 20,
+              width: 120,
+              height: 12,
+            },
+          },
+        ],
+      },
+    ],
+  };
+
+  const changedObservation = {
+    ...baseObservation,
+    extractedText: "Changed page text",
+    pages: [
+      {
+        ...baseObservation.pages[0]!,
+        marks: [
+          {
+            ...baseObservation.pages[0]!.marks[0]!,
+            text: "Changed page text",
+          },
+        ],
+      },
+    ],
+  };
+
+  const first = await buildRenderDocument(baseObservation);
+  const repeat = await buildRenderDocument(baseObservation);
+  const changed = await buildRenderDocument(changedObservation);
+
+  assert.equal(first.pages[0]?.renderHash.hex, repeat.pages[0]?.renderHash.hex);
+  assert.equal(first.renderHash.hex, repeat.renderHash.hex);
+  assert.notEqual(first.pages[0]?.renderHash.hex, changed.pages[0]?.renderHash.hex);
+  assert.notEqual(first.renderHash.hex, changed.renderHash.hex);
+});
+
 test("buildRenderPageImagery downscales raster when eager raster work exceeds the page budget", () => {
   const imagery = buildRenderPageImagery({
     pageBox: {
