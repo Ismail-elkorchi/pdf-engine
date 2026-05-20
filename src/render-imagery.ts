@@ -219,17 +219,19 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
   const svgWidth = toPixelDimension(pageBox.width);
   const svgHeight = toPixelDimension(pageBox.height);
   const svg = buildSvgImagery(orderedPrimitives, svgWidth, svgHeight);
-  const rasterWorkBytes = estimateRasterWorkBytes(svgWidth, svgHeight);
-  const canBuildRaster = input.rasterBudgetBytes === undefined || rasterWorkBytes <= input.rasterBudgetBytes;
-  const raster = canBuildRaster ? buildRasterImagery(orderedPrimitives, svgWidth, svgHeight) : undefined;
+  const rasterDimensions = resolveRasterDimensions(svgWidth, svgHeight, input.rasterBudgetBytes);
+  const rasterPrimitives = rasterDimensions.scale === 1
+    ? orderedPrimitives
+    : orderedPrimitives.map((primitive) => scalePrimitiveForRaster(primitive, rasterDimensions.scale));
+  const raster = buildRasterImagery(rasterPrimitives, rasterDimensions.width, rasterDimensions.height);
 
   return {
     pageBox,
     imagery: {
       svg,
-      ...(raster !== undefined ? { raster } : {}),
+      raster,
     },
-    knownLimits: hasPartialImagery || raster === undefined ? ["render-imagery-partial"] : [],
+    knownLimits: hasPartialImagery || rasterDimensions.scale !== 1 ? ["render-imagery-partial"] : [],
   };
 }
 
@@ -1535,7 +1537,82 @@ function toPixelDimension(value: number): number {
 }
 
 function estimateRasterWorkBytes(width: number, height: number): number {
-  return width * height * 4 + 1024;
+  const rawByteLength = height * ((width * 4) + 1);
+  const storedBlockCount = Math.ceil(rawByteLength / 0xffff);
+  return rawByteLength + (storedBlockCount * 5) + 63;
+}
+
+function resolveRasterDimensions(
+  width: number,
+  height: number,
+  rasterBudgetBytes: number | undefined,
+): { readonly width: number; readonly height: number; readonly scale: number } {
+  if (rasterBudgetBytes === undefined || estimateRasterWorkBytes(width, height) <= rasterBudgetBytes) {
+    return { width, height, scale: 1 };
+  }
+
+  const maximumPixels = Math.max(1, Math.floor((rasterBudgetBytes - 1024) / 4));
+  const scale = Math.min(1, Math.sqrt(maximumPixels / Math.max(1, width * height)));
+  let rasterWidth = Math.max(1, Math.floor(width * scale));
+  let rasterHeight = Math.max(1, Math.floor(height * scale));
+  while (rasterWidth > 1 && estimateRasterWorkBytes(rasterWidth, rasterHeight) > rasterBudgetBytes) {
+    rasterWidth -= 1;
+  }
+  while (rasterHeight > 1 && estimateRasterWorkBytes(rasterWidth, rasterHeight) > rasterBudgetBytes) {
+    rasterHeight -= 1;
+  }
+
+  return {
+    width: rasterWidth,
+    height: rasterHeight,
+    scale: Math.min(rasterWidth / width, rasterHeight / height),
+  };
+}
+
+function scalePrimitiveForRaster(primitive: RenderPrimitive, scale: number): RenderPrimitive {
+  switch (primitive.kind) {
+    case "text":
+      return {
+        ...primitive,
+        bbox: scaleBoundingBox(primitive.bbox, scale),
+        fontSize: primitive.fontSize * scale,
+      };
+    case "path":
+      return {
+        ...primitive,
+        rasterSubpaths: primitive.rasterSubpaths.map((subpath) => ({
+          points: subpath.points.map((point) => scalePoint(point, scale)),
+          closed: subpath.closed,
+          ...(subpath.axisAlignedRectangle !== undefined
+            ? { axisAlignedRectangle: scaleBoundingBox(subpath.axisAlignedRectangle, scale) }
+            : {}),
+        })),
+        strokeWidth: Math.max(0.5, primitive.strokeWidth * scale),
+        dashPattern: primitive.dashPattern.map((value) => value * scale),
+        dashPhase: primitive.dashPhase * scale,
+      };
+    case "image":
+      return {
+        ...primitive,
+        bbox: scaleBoundingBox(primitive.bbox, scale),
+      };
+  }
+}
+
+function scaleBoundingBox(bbox: PdfBoundingBox, scale: number): PdfBoundingBox {
+  return {
+    x: bbox.x * scale,
+    y: bbox.y * scale,
+    width: bbox.width * scale,
+    height: bbox.height * scale,
+  };
+}
+
+function scalePoint(point: NormalizedPoint, scale: number): NormalizedPoint {
+  return {
+    x: point.x * scale,
+    y: point.y * scale,
+  };
 }
 
 function isAxisAlignedTransform(transform: PdfTransformMatrix): boolean {
