@@ -197,3 +197,76 @@ test("analyzePdfShell preserves direct objects when object-stream expansion reus
   assert.equal(contentObject?.streamText, contentText);
   assert.equal(analysis.pageEntries[0]?.contentStreamRefs[0]?.objectNumber, 4);
 });
+
+test("analyzePdfShell can skip non-text payload stream decoding for text-oriented stages", async () => {
+  const contentText = [
+    "BT",
+    "/F1 12 Tf",
+    "72 720 Td",
+    "(Payload skip keeps text) Tj",
+    "ET",
+  ].join("\n");
+  const imageBytes = "IMAG";
+  const embeddedBytes = "FILE";
+  const bytes = buildPdfFromObjects([
+    {
+      objectNumber: 1,
+      body: "<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(f) 8 0 R] >> >> >>",
+    },
+    {
+      objectNumber: 2,
+      body: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    },
+    {
+      objectNumber: 3,
+      body:
+        "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 6 0 R >> /XObject << /Im1 5 0 R >> >> /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+    },
+    {
+      objectNumber: 4,
+      body: `<< /Length ${String(textEncoder.encode(contentText).byteLength)} >>\nstream\n${contentText}\nendstream`,
+    },
+    {
+      objectNumber: 5,
+      body:
+        `<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${String(imageBytes.length)} >>\nstream\n${imageBytes}\nendstream`,
+    },
+    {
+      objectNumber: 6,
+      body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    },
+    {
+      objectNumber: 7,
+      body: `<< /Type /EmbeddedFile /Length ${String(embeddedBytes.length)} >>\nstream\n${embeddedBytes}\nendstream`,
+    },
+    {
+      objectNumber: 8,
+      body: "<< /Type /Filespec /EF << /F 7 0 R >> >>",
+    },
+  ]);
+
+  const textAnalysis = await analyzePdfShell(
+    { bytes, fileName: "payload-skip.pdf" },
+    defaultPolicy,
+    { streamDecodeScope: "text" },
+  );
+  const contentObject = textAnalysis.objectIndex.get("4:0");
+  const imageObject = textAnalysis.objectIndex.get("5:0");
+  const embeddedObject = textAnalysis.objectIndex.get("7:0");
+
+  assert.equal(contentObject?.streamText, contentText);
+  assert.equal(imageObject?.streamText, undefined);
+  assert.equal(imageObject?.decodedStreamBytes, undefined);
+  assert.equal(imageObject?.streamByteLength, imageBytes.length);
+  assert.equal(embeddedObject?.streamText, undefined);
+  assert.equal(embeddedObject?.decodedStreamBytes, undefined);
+  assert.equal(embeddedObject?.streamByteLength, embeddedBytes.length);
+
+  const renderAnalysis = await analyzePdfShell(
+    { bytes, fileName: "payload-render.pdf" },
+    defaultPolicy,
+    { streamDecodeScope: "all" },
+  );
+  assert.equal(renderAnalysis.objectIndex.get("5:0")?.streamText, imageBytes);
+  assert.equal(renderAnalysis.objectIndex.get("7:0")?.streamText, embeddedBytes);
+});
