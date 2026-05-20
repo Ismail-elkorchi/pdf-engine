@@ -54,6 +54,8 @@ interface RenderXObjectUsage {
   readonly resourceNames: Set<string>;
 }
 
+const DEFAULT_RENDER_RASTER_BUDGET_BYTES = 64 * 1024 * 1024;
+
 export async function buildRenderDocument(
   observation: PdfObservedDocument,
   analysis?: PdfShellAnalysis,
@@ -67,18 +69,23 @@ export async function buildRenderDocument(
     : [];
   const cachedImageDataByPayloadId = new Map<string, CachedImageData>();
   const pages: Awaited<ReturnType<typeof buildRenderPage>>[] = [];
+  let remainingRasterBudgetBytes = DEFAULT_RENDER_RASTER_BUDGET_BYTES;
   for (const page of observation.pages) {
-    pages.push(
-      await buildRenderPage(
-        page.pageNumber,
-        page.resolutionMethod,
-        page.pageRef,
-        page.marks,
-        payloadCatalog,
-        pageEntryByPageNumber.get(page.pageNumber),
-        cachedImageDataByPayloadId,
-      ),
+    const renderPage = await buildRenderPage(
+      page.pageNumber,
+      page.resolutionMethod,
+      page.pageRef,
+      page.marks,
+      payloadCatalog,
+      pageEntryByPageNumber.get(page.pageNumber),
+      cachedImageDataByPayloadId,
+      remainingRasterBudgetBytes,
     );
+    remainingRasterBudgetBytes = Math.max(
+      0,
+      remainingRasterBudgetBytes - (renderPage.imagery?.raster?.bytes.byteLength ?? 0),
+    );
+    pages.push(renderPage);
   }
   const imageryKnownLimits = dedupeKnownLimits(
     pages.flatMap((page) => page.knownLimits),
@@ -121,6 +128,7 @@ async function buildRenderPage(
   payloadCatalog: RenderResourcePayloadCatalog,
   pageEntry: ParsedPageEntry | undefined,
   cachedImageDataByPayloadId: Map<string, CachedImageData>,
+  rasterBudgetBytes: number,
 ): Promise<PdfRenderPage & { readonly knownLimits: readonly PdfRenderDocument["knownLimits"][number][] }> {
   const displayList: PdfDisplayList = {
     commands: marks.map((mark) => toDisplayCommand(mark, payloadCatalog)),
@@ -133,6 +141,7 @@ async function buildRenderPage(
     ...(pageEntry?.pageBox !== undefined ? { pageBox: pageEntry.pageBox } : {}),
     resourcePayloads: pageResourcePayloads,
     cachedImageDataByPayloadId,
+    rasterBudgetBytes,
   });
   const renderHash = await buildRenderHash({
     pageNumber,
