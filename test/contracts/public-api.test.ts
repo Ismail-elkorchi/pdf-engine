@@ -53,6 +53,62 @@ test("public pipeline contracts expose staged artifacts with current kinds", asy
   assert.equal(result.render.value?.renderHash.hex.length, 64);
 });
 
+test("public pipeline intent skips downstream stages without changing the default full run", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithPageContents([
+    "BT /F1 12 Tf 1 0 0 1 72 720 Tm (Intent stage skipping) Tj ET",
+  ]);
+
+  const admissionOnly = await engine.run({
+    source: { bytes, fileName: "public-api-intent-admission.pdf" },
+    intent: "admission",
+  });
+  assert.equal(admissionOnly.admission.status, "completed");
+  assert.equal(admissionOnly.ir.status, "skipped");
+  assert.equal(admissionOnly.observation.status, "skipped");
+  assert.equal(admissionOnly.layout.status, "skipped");
+  assert.equal(admissionOnly.knowledge.status, "skipped");
+  assert.equal(admissionOnly.render.status, "skipped");
+  assert.equal("value" in admissionOnly.ir, false);
+
+  const textOnly = await engine.run({
+    source: { bytes, fileName: "public-api-intent-text.pdf" },
+    intent: "text",
+  });
+  assert.equal(textOnly.ir.value?.kind, "pdf-ir");
+  assert.equal(textOnly.observation.value?.kind, "pdf-observation");
+  assert.equal(textOnly.layout.status, "skipped");
+  assert.equal(textOnly.knowledge.status, "skipped");
+  assert.equal(textOnly.render.status, "skipped");
+
+  const layoutOnly = await engine.run({
+    source: { bytes, fileName: "public-api-intent-layout.pdf" },
+    intent: "layout",
+  });
+  assert.equal(layoutOnly.layout.value?.kind, "pdf-layout");
+  assert.equal(layoutOnly.knowledge.status, "skipped");
+  assert.equal(layoutOnly.render.status, "skipped");
+
+  const knowledgeOnly = await engine.run({
+    source: { bytes, fileName: "public-api-intent-knowledge.pdf" },
+    intent: "knowledge",
+  });
+  assert.equal(knowledgeOnly.knowledge.value?.kind, "pdf-knowledge");
+  assert.equal(knowledgeOnly.render.status, "skipped");
+  assert.equal(knowledgeOnly.diagnostics.some((diagnostic) => diagnostic.stage === "render"), false);
+
+  const renderIntent = await engine.run({
+    source: { bytes, fileName: "public-api-intent-render.pdf" },
+    intent: "render",
+  });
+  const defaultRun = await engine.run({
+    source: { bytes, fileName: "public-api-intent-default.pdf" },
+  });
+  assert.equal(renderIntent.render.value?.kind, "pdf-render");
+  assert.equal(defaultRun.render.value?.kind, "pdf-render");
+  assert.equal(renderIntent.render.value?.renderHash.hex, defaultRun.render.value?.renderHash.hex);
+});
+
 test("public pipeline contracts expose opt-in OCR provenance and fusion decisions", async () => {
   const provider: PdfOcrProvider = {
     name: "contract-fake-ocr",

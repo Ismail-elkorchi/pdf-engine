@@ -206,12 +206,46 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     const ocr = resolveOcrOptions(defaultOcr, request.ocr);
     const inspection = await inspectSource(request.source, policy, request.passwordProvider);
     const admission = buildAdmissionStage(request, inspection);
+    const irSkipped = stageResult<PdfIrDocument>("ir", "skipped", []);
+    const observationSkipped = stageResult<PdfObservedDocument>("observation", "skipped", []);
+    const layoutSkipped = stageResult<PdfLayoutDocument>("layout", "skipped", []);
+    const knowledgeSkipped = stageResult<PdfKnowledgeDocument>("knowledge", "skipped", []);
+    const renderSkipped = stageResult<PdfRenderDocument>("render", "skipped", []);
+
+    if (request.intent === "admission") {
+      return buildPipelineResult(request, admission, irSkipped, observationSkipped, layoutSkipped, knowledgeSkipped, renderSkipped);
+    }
+
     const ir = buildIrStage(inspection, admission);
     const observation = await buildObservationForRequest(inspection, admission, request.source, ocr);
+    if (request.intent === "text") {
+      return buildPipelineResult(request, admission, ir, observation, layoutSkipped, knowledgeSkipped, renderSkipped);
+    }
+
     const layout = buildLayoutStage(observation);
+    if (request.intent === "layout") {
+      return buildPipelineResult(request, admission, ir, observation, layout, knowledgeSkipped, renderSkipped);
+    }
+
     const knowledge = buildKnowledgeStage(observation, layout);
+    if (request.intent === "knowledge") {
+      return buildPipelineResult(request, admission, ir, observation, layout, knowledge, renderSkipped);
+    }
+
     const render = await buildRenderStage(inspection, observation);
 
+    return buildPipelineResult(request, admission, ir, observation, layout, knowledge, render);
+  }
+
+  function buildPipelineResult(
+    request: PdfPipelineRequest,
+    admission: PdfStageResult<PdfAdmissionArtifact>,
+    ir: PdfStageResult<PdfIrDocument>,
+    observation: PdfStageResult<PdfObservedDocument>,
+    layout: PdfStageResult<PdfLayoutDocument>,
+    knowledge: PdfStageResult<PdfKnowledgeDocument>,
+    render: PdfStageResult<PdfRenderDocument>,
+  ): PdfPipelineResult {
     return {
       engine: ENGINE_IDENTITY,
       runtime,
