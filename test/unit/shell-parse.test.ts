@@ -8,6 +8,7 @@ import {
   parseContentStreamOperators,
   parseDictionaryEntries,
   parseTextOperatorRuns,
+  parseTextOperatorRunsFromOperators,
   readObjectRefValue,
   readObjectRefsValue,
 } from "../../src/shell-parse.ts";
@@ -138,6 +139,33 @@ test("parseContentStreamOperators and parseTextOperatorRuns recover operator-lev
       token: "(Hello\\040World)",
     },
   ]);
+
+  assert.deepEqual(
+    parseTextOperatorRunsFromOperators(parseContentStreamOperators(text)),
+    runs,
+  );
+});
+
+test("parseTextOperatorRunsFromOperators reuses parsed operators for rich text states", () => {
+  const text = [
+    "/Artifact BMC",
+    "BT",
+    "/F2 9 Tf",
+    "72 720 Td",
+    "(First) Tj",
+    "14 TL",
+    "T*",
+    "[(Second) -10 <5468697264>] TJ",
+    "(Fourth) '",
+    "1 2 (Fifth) \"",
+    "ET",
+    "EMC",
+  ].join("\n");
+
+  assert.deepEqual(
+    parseTextOperatorRunsFromOperators(parseContentStreamOperators(text)),
+    parseTextOperatorRuns(text),
+  );
 });
 
 test("decodePdfLiteral and findFirstDictionaryToken handle escaped content", () => {
