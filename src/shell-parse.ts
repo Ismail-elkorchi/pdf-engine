@@ -151,7 +151,7 @@ export interface PdfShellAnalysis {
   readonly repairState: PdfRepairState;
 }
 
-export type PdfShellStreamDecodeScope = "all" | "text";
+export type PdfShellStreamDecodeScope = "all" | "text" | "structure";
 
 const FULL_STRUCTURE_SCAN_LIMIT = 8_000_000;
 
@@ -647,6 +647,10 @@ function shouldSkipPayloadStreamDecode(
 ): boolean {
   if (streamDecodeScope === "all") {
     return false;
+  }
+
+  if (streamDecodeScope === "structure") {
+    return objectShell.typeName !== "ObjStm" && objectShell.typeName !== "XRef";
   }
 
   const subtypeName = readNameValue(objectShell.dictionaryEntries.get("Subtype"));

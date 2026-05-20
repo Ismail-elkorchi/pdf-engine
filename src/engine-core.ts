@@ -119,7 +119,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider, "text");
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, "structure");
     return buildAdmissionStage(request, inspection);
   }
 
@@ -383,6 +383,10 @@ function streamDecodeScopeForPipeline(
 ): PdfShellStreamDecodeScope {
   if (ocr.mode !== "off") {
     return "all";
+  }
+
+  if (request.intent === "admission") {
+    return "structure";
   }
 
   return request.intent === undefined || request.intent === "render" ? "all" : "text";
