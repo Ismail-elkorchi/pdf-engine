@@ -270,3 +270,77 @@ test("analyzePdfShell can skip non-text payload stream decoding for text-oriente
   assert.equal(renderAnalysis.objectIndex.get("5:0")?.streamText, imageBytes);
   assert.equal(renderAnalysis.objectIndex.get("7:0")?.streamText, embeddedBytes);
 });
+
+test("analyzePdfShell structure scope decodes only structural streams", async () => {
+  const contentText = "BT /F1 12 Tf 72 720 Td (Admission structure) Tj ET";
+  const imageBytes = "IMAG";
+  const embeddedBytes = "FILE";
+  const objectStreamText = "9 0 << /S /JavaScript /JS (app.alert) >>";
+  const xrefBytes = "ABC";
+  const bytes = buildPdfFromObjects([
+    {
+      objectNumber: 1,
+      body: "<< /Type /Catalog /Pages 2 0 R /Names << /EmbeddedFiles << /Names [(f) 8 0 R] >> >> >>",
+    },
+    {
+      objectNumber: 2,
+      body: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>",
+    },
+    {
+      objectNumber: 3,
+      body:
+        "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 6 0 R >> /XObject << /Im1 5 0 R >> >> /MediaBox [0 0 612 792] /Contents 4 0 R >>",
+    },
+    {
+      objectNumber: 4,
+      body: `<< /Length ${String(textEncoder.encode(contentText).byteLength)} >>\nstream\n${contentText}\nendstream`,
+    },
+    {
+      objectNumber: 5,
+      body:
+        `<< /Type /XObject /Subtype /Image /Width 1 /Height 1 /ColorSpace /DeviceGray /BitsPerComponent 8 /Length ${String(imageBytes.length)} >>\nstream\n${imageBytes}\nendstream`,
+    },
+    {
+      objectNumber: 6,
+      body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>",
+    },
+    {
+      objectNumber: 7,
+      body: `<< /Type /EmbeddedFile /Length ${String(embeddedBytes.length)} >>\nstream\n${embeddedBytes}\nendstream`,
+    },
+    {
+      objectNumber: 8,
+      body: "<< /Type /Filespec /EF << /F 7 0 R >> >>",
+    },
+    {
+      objectNumber: 10,
+      body:
+        `<< /Type /ObjStm /N 1 /First 4 /Length ${String(textEncoder.encode(objectStreamText).byteLength)} >>\nstream\n${objectStreamText}\nendstream`,
+    },
+    {
+      objectNumber: 11,
+      body: `<< /Type /XRef /Size 12 /W [1 1 1] /Length ${String(xrefBytes.length)} >>\nstream\n${xrefBytes}\nendstream`,
+    },
+  ]);
+
+  const analysis = await analyzePdfShell(
+    { bytes, fileName: "structure-scope.pdf" },
+    defaultPolicy,
+    { streamDecodeScope: "structure" },
+  );
+
+  assert.equal(analysis.objectIndex.get("4:0")?.streamText, undefined);
+  assert.equal(analysis.objectIndex.get("4:0")?.decodedStreamBytes, undefined);
+  assert.equal(analysis.objectIndex.get("4:0")?.streamByteLength, textEncoder.encode(contentText).byteLength);
+  assert.equal(analysis.objectIndex.get("5:0")?.streamText, undefined);
+  assert.equal(analysis.objectIndex.get("5:0")?.decodedStreamBytes, undefined);
+  assert.equal(analysis.objectIndex.get("7:0")?.streamText, undefined);
+  assert.equal(analysis.objectIndex.get("7:0")?.decodedStreamBytes, undefined);
+  assert.equal(analysis.objectIndex.get("10:0")?.streamText, objectStreamText);
+  assert.equal(analysis.objectIndex.get("11:0")?.streamText, xrefBytes);
+  assert.equal(analysis.objectIndex.get("9:0")?.dictionaryEntries.get("S"), "/JavaScript");
+  assert.deepEqual(analysis.objectIndex.get("9:0")?.containerObjectRef, {
+    objectNumber: 10,
+    generationNumber: 0,
+  });
+});
