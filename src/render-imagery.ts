@@ -828,12 +828,7 @@ function buildRasterImagery(
   scale: number,
 ): PdfRenderPageImageRaster {
   const rgbaBytes = new Uint8Array(width * height * 4);
-  for (let index = 0; index < rgbaBytes.length; index += 4) {
-    rgbaBytes[index] = WHITE_PIXEL[0];
-    rgbaBytes[index + 1] = WHITE_PIXEL[1];
-    rgbaBytes[index + 2] = WHITE_PIXEL[2];
-    rgbaBytes[index + 3] = WHITE_PIXEL[3];
-  }
+  rgbaBytes.fill(WHITE_PIXEL[0]);
 
   for (const primitive of primitives) {
     switch (primitive.kind) {
