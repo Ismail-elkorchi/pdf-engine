@@ -274,6 +274,93 @@ test("buildRenderDocument lifts observed marks into a render document", async ()
   assert.equal(renderDocument.renderHash.hex.length, 64);
 });
 
+test("buildRenderDocument skips raster when eager raster work exceeds the document budget", async () => {
+  const renderDocument = await buildRenderDocument({
+    kind: "pdf-observation",
+    strategy: "content-stream-interpreter",
+    extractedText: "",
+    knownLimits: [],
+    pages: [
+      {
+        pageNumber: 1,
+        resolutionMethod: "page-tree",
+        glyphs: [],
+        runs: [],
+        marks: [
+          {
+            id: "large-path-1",
+            kind: "path",
+            pageNumber: 1,
+            contentOrder: 0,
+            paintOperator: "f",
+            paintState: {
+              lineWidth: 1,
+              lineCapStyle: "butt",
+              lineJoinStyle: "miter",
+              miterLimit: 10,
+              dashPattern: {
+                segments: [],
+                phase: 0,
+              },
+            },
+            colorState: {
+              strokeColorSpace: {
+                kind: "device-rgb",
+              },
+              fillColorSpace: {
+                kind: "device-rgb",
+              },
+              strokeColor: {
+                colorSpace: {
+                  kind: "device-rgb",
+                },
+                components: [0, 0, 0],
+              },
+              fillColor: {
+                colorSpace: {
+                  kind: "device-rgb",
+                },
+                components: [0.8, 0.8, 0.8],
+              },
+            },
+            transparencyState: {
+              strokeAlpha: 1,
+              fillAlpha: 1,
+              blendMode: "normal",
+              softMask: "none",
+            },
+            segments: [
+              {
+                kind: "rectangle",
+                x: 0,
+                y: 0,
+                width: 20_000,
+                height: 1_000,
+              },
+            ],
+            pointCount: 4,
+            closed: true,
+            bbox: {
+              x: 0,
+              y: 0,
+              width: 20_000,
+              height: 1_000,
+            },
+          },
+        ],
+      },
+    ],
+  });
+
+  const renderPage = renderDocument.pages[0];
+  assert.ok(renderPage?.imagery?.svg);
+  assert.equal(renderPage?.imagery?.raster, undefined);
+  assert.equal(renderDocument.knownLimits.includes("render-imagery-partial"), true);
+  assert.equal(renderPage?.displayList.commands.length, 1);
+  assert.equal(renderPage?.renderHash.algorithm, "sha-256");
+  assert.equal(renderPage?.renderHash.hex.length, 64);
+});
+
 test("buildRenderDocument exposes font and image resource payloads for later imagery work", async () => {
   const engine = createPdfEngine();
   const bytes = buildPdfWithRenderResourcePayloads();

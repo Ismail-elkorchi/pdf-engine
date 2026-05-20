@@ -22,6 +22,7 @@ interface RenderPageImageryBuildInput {
   readonly pageBox?: PdfBoundingBox;
   readonly resourcePayloads: readonly PdfRenderResourcePayload[];
   readonly cachedImageDataByPayloadId?: Map<string, CachedImageData>;
+  readonly rasterBudgetBytes?: number;
 }
 
 export interface RenderPageImageryBuildResult {
@@ -218,15 +219,17 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
   const svgWidth = toPixelDimension(pageBox.width);
   const svgHeight = toPixelDimension(pageBox.height);
   const svg = buildSvgImagery(orderedPrimitives, svgWidth, svgHeight);
-  const raster = buildRasterImagery(orderedPrimitives, svgWidth, svgHeight);
+  const rasterWorkBytes = estimateRasterWorkBytes(svgWidth, svgHeight);
+  const canBuildRaster = input.rasterBudgetBytes === undefined || rasterWorkBytes <= input.rasterBudgetBytes;
+  const raster = canBuildRaster ? buildRasterImagery(orderedPrimitives, svgWidth, svgHeight) : undefined;
 
   return {
     pageBox,
     imagery: {
       svg,
-      raster,
+      ...(raster !== undefined ? { raster } : {}),
     },
-    knownLimits: hasPartialImagery ? ["render-imagery-partial"] : [],
+    knownLimits: hasPartialImagery || raster === undefined ? ["render-imagery-partial"] : [],
   };
 }
 
@@ -1529,6 +1532,10 @@ function escapeXml(value: string): string {
 
 function toPixelDimension(value: number): number {
   return Math.max(1, Math.round(value));
+}
+
+function estimateRasterWorkBytes(width: number, height: number): number {
+  return width * height * 4 + 1024;
 }
 
 function isAxisAlignedTransform(transform: PdfTransformMatrix): boolean {
