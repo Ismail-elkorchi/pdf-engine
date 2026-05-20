@@ -337,6 +337,70 @@ test("buildRenderDocument document hash tracks page hash changes without relying
   assert.notEqual(first.renderHash.hex, changed.renderHash.hex);
 });
 
+test("buildRenderDocument preserves text index and selection units in one render pass", async () => {
+  const renderDocument = await buildRenderDocument({
+    kind: "pdf-observation",
+    strategy: "content-stream-interpreter",
+    extractedText: "Alpha\nBeta",
+    knownLimits: [],
+    pages: [
+      {
+        pageNumber: 1,
+        resolutionMethod: "page-tree",
+        glyphs: [],
+        runs: [],
+        marks: [
+          {
+            id: "text-1",
+            kind: "text",
+            pageNumber: 1,
+            contentOrder: 0,
+            runId: "run-1",
+            glyphIds: ["glyph-a"],
+            text: "Alpha",
+            origin: "native-text",
+            bbox: { x: 10, y: 30, width: 30, height: 10 },
+            anchor: { x: 10, y: 30 },
+            writingMode: "horizontal",
+          },
+          {
+            id: "text-2",
+            kind: "text",
+            pageNumber: 1,
+            contentOrder: 1,
+            runId: "run-2",
+            glyphIds: ["glyph-b"],
+            text: "Beta",
+            origin: "native-text",
+            bbox: { x: 10, y: 15, width: 24, height: 10 },
+            anchor: { x: 10, y: 15 },
+            writingMode: "horizontal",
+            startsNewLine: true,
+          },
+        ],
+      },
+    ],
+  });
+
+  const page = renderDocument.pages[0];
+  assert.ok(page);
+  assert.equal(page.textIndex.text, "Alpha\nBeta");
+  assert.deepEqual(
+    page.textIndex.spans.map((span) => [span.id, span.text, span.startsNewLine ?? false]),
+    [
+      ["render-text-span-1-1", "Alpha", false],
+      ["render-text-span-1-2", "Beta", true],
+    ],
+  );
+  assert.deepEqual(
+    page.selectionModel.units.map((unit) => [unit.id, unit.textSpanId, unit.text]),
+    [
+      ["render-selection-unit-1-1", "render-text-span-1-1", "Alpha"],
+      ["render-selection-unit-1-2", "render-text-span-1-2", "Beta"],
+    ],
+  );
+});
+
 test("buildRenderPageImagery downscales raster when eager raster work exceeds the page budget", () => {
   const imagery = buildRenderPageImagery({
     pageBox: {

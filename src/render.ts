@@ -34,6 +34,7 @@ import type {
 
 interface RenderResourcePayloadCatalog {
   readonly resourcePayloads: readonly PdfRenderResourcePayload[];
+  readonly resourcePayloadsByPageNumber: ReadonlyMap<number, readonly PdfRenderResourcePayload[]>;
   readonly fontPayloadIdByFontKey: ReadonlyMap<string, string>;
   readonly imagePayloadIdByXObjectKey: ReadonlyMap<string, string>;
   readonly xObjectPayloadIdByXObjectKey: ReadonlyMap<string, string>;
@@ -56,6 +57,11 @@ interface RenderXObjectUsage {
   readonly xObjectRef: PdfObjectRef;
   readonly pageNumbers: Set<number>;
   readonly resourceNames: Set<string>;
+}
+
+interface RenderTextSelectionArtifacts {
+  readonly textIndex: PdfRenderTextIndex;
+  readonly selectionModel: PdfRenderSelectionModel;
 }
 
 const DEFAULT_RENDER_RASTER_BUDGET_BYTES = 64 * 1024 * 1024;
@@ -86,6 +92,7 @@ export async function buildRenderDocument(
       page.pageRef,
       page.marks,
       payloadCatalog,
+      payloadCatalog.resourcePayloadsByPageNumber.get(page.pageNumber) ?? [],
       pageEntryByPageNumber.get(page.pageNumber),
       cachedImageDataByPayloadId,
       pageRasterBudgetBytes,
@@ -135,6 +142,7 @@ async function buildRenderPage(
   pageRef: PdfRenderPage["pageRef"],
   marks: readonly PdfObservedMark[],
   payloadCatalog: RenderResourcePayloadCatalog,
+  pageResourcePayloads: readonly PdfRenderResourcePayload[],
   pageEntry: ParsedPageEntry | undefined,
   cachedImageDataByPayloadId: Map<string, CachedImageData>,
   rasterBudgetBytes: number,
@@ -143,9 +151,7 @@ async function buildRenderPage(
   const displayList: PdfDisplayList = {
     commands: marks.map((mark) => toDisplayCommand(mark, payloadCatalog)),
   };
-  const textIndex = buildRenderTextIndex(pageNumber, displayList.commands);
-  const selectionModel = buildRenderSelectionModel(pageNumber, textIndex);
-  const pageResourcePayloads = payloadCatalog.resourcePayloads.filter((payload) => payload.pageNumbers.includes(pageNumber));
+  const { textIndex, selectionModel } = buildRenderTextSelectionArtifacts(pageNumber, displayList.commands);
   const imageryResult = buildRenderPageImagery({
     displayList,
     ...(pageEntry?.pageBox !== undefined ? { pageBox: pageEntry.pageBox } : {}),
@@ -180,16 +186,29 @@ async function buildRenderPage(
   };
 }
 
-function buildRenderTextIndex(pageNumber: number, commands: readonly PdfDisplayCommand[]): PdfRenderTextIndex {
+function buildRenderTextSelectionArtifacts(
+  pageNumber: number,
+  commands: readonly PdfDisplayCommand[],
+): RenderTextSelectionArtifacts {
   const spans: PdfRenderTextSpan[] = [];
+  const units: PdfRenderSelectionUnit[] = [];
+  let text = "";
 
   for (const command of commands) {
     if (command.kind !== "text") {
       continue;
     }
 
-    spans.push({
-      id: `render-text-span-${pageNumber}-${spans.length + 1}`,
+    const index = spans.length + 1;
+    const spanId = `render-text-span-${pageNumber}-${index}`;
+    const startsNewLine = spans.length > 0 && command.startsNewLine === true;
+    if (startsNewLine) {
+      text += "\n";
+    }
+    text += command.text;
+
+    const span: PdfRenderTextSpan = {
+      id: spanId,
       contentOrder: command.contentOrder,
       text: command.text,
       glyphIds: command.glyphIds,
@@ -198,44 +217,29 @@ function buildRenderTextIndex(pageNumber: number, commands: readonly PdfDisplayC
       ...(command.anchor !== undefined ? { anchor: command.anchor } : {}),
       ...(command.transform !== undefined ? { transform: command.transform } : {}),
       ...(command.writingMode !== undefined ? { writingMode: command.writingMode } : {}),
-      ...(spans.length > 0 && command.startsNewLine ? { startsNewLine: true } : {}),
+      ...(startsNewLine ? { startsNewLine: true } : {}),
+    };
+    spans.push(span);
+    units.push({
+      id: `render-selection-unit-${pageNumber}-${index}`,
+      textSpanId: spanId,
+      text: command.text,
+      glyphIds: command.glyphIds,
+      ...(command.bbox !== undefined ? { bbox: command.bbox } : {}),
+      ...(command.anchor !== undefined ? { anchor: command.anchor } : {}),
+      ...(command.writingMode !== undefined ? { writingMode: command.writingMode } : {}),
     });
   }
 
   return {
-    text: flattenRenderText(spans),
-    spans,
+    textIndex: {
+      text,
+      spans,
+    },
+    selectionModel: {
+      units,
+    },
   };
-}
-
-function buildRenderSelectionModel(pageNumber: number, textIndex: PdfRenderTextIndex): PdfRenderSelectionModel {
-  const units: PdfRenderSelectionUnit[] = textIndex.spans.map((span, index) => ({
-    id: `render-selection-unit-${pageNumber}-${index + 1}`,
-    textSpanId: span.id,
-    text: span.text,
-    glyphIds: span.glyphIds,
-    ...(span.bbox !== undefined ? { bbox: span.bbox } : {}),
-    ...(span.anchor !== undefined ? { anchor: span.anchor } : {}),
-    ...(span.writingMode !== undefined ? { writingMode: span.writingMode } : {}),
-  }));
-
-  return {
-    units,
-  };
-}
-
-function flattenRenderText(spans: readonly PdfRenderTextSpan[]): string {
-  let text = "";
-
-  for (const [index, span] of spans.entries()) {
-    if (index > 0 && span.startsNewLine) {
-      text += "\n";
-    }
-
-    text += span.text;
-  }
-
-  return text;
 }
 
 function toDisplayCommand(mark: PdfObservedMark, payloadCatalog: RenderResourcePayloadCatalog): PdfDisplayCommand {
@@ -394,6 +398,7 @@ function buildRenderResourcePayloadCatalog(
   if (analysis === undefined) {
     return {
       resourcePayloads: [],
+      resourcePayloadsByPageNumber: new Map(),
       fontPayloadIdByFontKey: new Map(),
       imagePayloadIdByXObjectKey: new Map(),
       xObjectPayloadIdByXObjectKey: new Map(),
@@ -494,11 +499,26 @@ function buildRenderResourcePayloadCatalog(
 
   return {
     resourcePayloads,
+    resourcePayloadsByPageNumber: buildResourcePayloadsByPageNumber(resourcePayloads),
     fontPayloadIdByFontKey,
     imagePayloadIdByXObjectKey,
     xObjectPayloadIdByXObjectKey,
     hasUnavailablePayloads,
   };
+}
+
+function buildResourcePayloadsByPageNumber(
+  resourcePayloads: readonly PdfRenderResourcePayload[],
+): ReadonlyMap<number, readonly PdfRenderResourcePayload[]> {
+  const resourcePayloadsByPageNumber = new Map<number, PdfRenderResourcePayload[]>();
+  for (const payload of resourcePayloads) {
+    for (const pageNumber of payload.pageNumbers) {
+      const pagePayloads = resourcePayloadsByPageNumber.get(pageNumber) ?? [];
+      pagePayloads.push(payload);
+      resourcePayloadsByPageNumber.set(pageNumber, pagePayloads);
+    }
+  }
+  return resourcePayloadsByPageNumber;
 }
 
 function buildFontResourceNameLookup(analysis: PdfShellAnalysis): Map<string, readonly string[]> {
