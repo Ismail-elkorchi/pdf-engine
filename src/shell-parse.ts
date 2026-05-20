@@ -151,7 +151,7 @@ export interface PdfShellAnalysis {
   readonly repairState: PdfRepairState;
 }
 
-export type PdfShellStreamDecodeScope = "all" | "text" | "structure";
+export type PdfShellStreamDecodeScope = "all" | "text" | "render" | "structure";
 
 const FULL_STRUCTURE_SCAN_LIMIT = 8_000_000;
 
@@ -653,12 +653,25 @@ function shouldSkipPayloadStreamDecode(
     return objectShell.typeName !== "ObjStm" && objectShell.typeName !== "XRef";
   }
 
+  if (streamDecodeScope === "render") {
+    return isNonRenderedPayloadStream(objectShell);
+  }
+
   const subtypeName = readNameValue(objectShell.dictionaryEntries.get("Subtype"));
   if (subtypeName === "Image") {
     return true;
   }
 
-  return objectShell.typeName === "EmbeddedFile";
+  return isNonRenderedPayloadStream(objectShell);
+}
+
+function isNonRenderedPayloadStream(objectShell: ParsedIndirectObject): boolean {
+  if (objectShell.typeName === "EmbeddedFile" || objectShell.typeName === "Metadata") {
+    return true;
+  }
+
+  const subtypeName = readNameValue(objectShell.dictionaryEntries.get("Subtype"));
+  return subtypeName === "XML";
 }
 
 function expandObjectStreams(indirectObjects: readonly ParsedIndirectObject[]): {

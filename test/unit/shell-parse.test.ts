@@ -236,6 +236,7 @@ test("analyzePdfShell can skip non-text payload stream decoding for text-oriente
   ].join("\n");
   const imageBytes = "IMAG";
   const embeddedBytes = "FILE";
+  const metadataBytes = "<x:xmpmeta>metadata</x:xmpmeta>";
   const bytes = buildPdfFromObjects([
     {
       objectNumber: 1,
@@ -271,6 +272,10 @@ test("analyzePdfShell can skip non-text payload stream decoding for text-oriente
       objectNumber: 8,
       body: "<< /Type /Filespec /EF << /F 7 0 R >> >>",
     },
+    {
+      objectNumber: 9,
+      body: `<< /Type /Metadata /Subtype /XML /Length ${String(metadataBytes.length)} >>\nstream\n${metadataBytes}\nendstream`,
+    },
   ]);
 
   const textAnalysis = await analyzePdfShell(
@@ -281,6 +286,7 @@ test("analyzePdfShell can skip non-text payload stream decoding for text-oriente
   const contentObject = textAnalysis.objectIndex.get("4:0");
   const imageObject = textAnalysis.objectIndex.get("5:0");
   const embeddedObject = textAnalysis.objectIndex.get("7:0");
+  const metadataObject = textAnalysis.objectIndex.get("9:0");
 
   assert.equal(contentObject?.streamText, contentText);
   assert.equal(imageObject?.streamText, undefined);
@@ -289,14 +295,31 @@ test("analyzePdfShell can skip non-text payload stream decoding for text-oriente
   assert.equal(embeddedObject?.streamText, undefined);
   assert.equal(embeddedObject?.decodedStreamBytes, undefined);
   assert.equal(embeddedObject?.streamByteLength, embeddedBytes.length);
+  assert.equal(metadataObject?.streamText, undefined);
+  assert.equal(metadataObject?.decodedStreamBytes, undefined);
+  assert.equal(metadataObject?.streamByteLength, metadataBytes.length);
 
   const renderAnalysis = await analyzePdfShell(
     { bytes, fileName: "payload-render.pdf" },
     defaultPolicy,
+    { streamDecodeScope: "render" },
+  );
+  assert.equal(renderAnalysis.objectIndex.get("4:0")?.streamText, contentText);
+  assert.equal(renderAnalysis.objectIndex.get("5:0")?.streamText, imageBytes);
+  assert.equal(renderAnalysis.objectIndex.get("7:0")?.streamText, undefined);
+  assert.equal(renderAnalysis.objectIndex.get("7:0")?.decodedStreamBytes, undefined);
+  assert.equal(renderAnalysis.objectIndex.get("7:0")?.streamByteLength, embeddedBytes.length);
+  assert.equal(renderAnalysis.objectIndex.get("9:0")?.streamText, undefined);
+  assert.equal(renderAnalysis.objectIndex.get("9:0")?.decodedStreamBytes, undefined);
+  assert.equal(renderAnalysis.objectIndex.get("9:0")?.streamByteLength, metadataBytes.length);
+
+  const allAnalysis = await analyzePdfShell(
+    { bytes, fileName: "payload-all.pdf" },
+    defaultPolicy,
     { streamDecodeScope: "all" },
   );
-  assert.equal(renderAnalysis.objectIndex.get("5:0")?.streamText, imageBytes);
-  assert.equal(renderAnalysis.objectIndex.get("7:0")?.streamText, embeddedBytes);
+  assert.equal(allAnalysis.objectIndex.get("7:0")?.streamText, embeddedBytes);
+  assert.equal(allAnalysis.objectIndex.get("9:0")?.streamText, metadataBytes);
 });
 
 test("analyzePdfShell structure scope decodes only structural streams", async () => {
