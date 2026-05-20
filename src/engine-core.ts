@@ -665,7 +665,7 @@ function buildIrStage(
     parseCoverage: inspection.analysis.parseCoverage,
     crossReferenceSections: inspection.analysis.crossReferenceSections,
     ...(inspection.analysis.trailer !== undefined ? { trailer: inspection.analysis.trailer } : {}),
-    indirectObjects: inspection.analysis.indirectObjects,
+    indirectObjects: inspection.analysis.indirectObjects.map(toPublicIndirectObjectShell),
     featureFindings: inspection.featureFindings,
     pages,
     decodedStreams: hasDecodedStreams(inspection),
@@ -676,6 +676,25 @@ function buildIrStage(
   };
 
   return stageResult("ir", admission.status === "partial" || diagnostics.length > 0 ? "partial" : "completed", diagnostics, ir);
+}
+
+function toPublicIndirectObjectShell(
+  objectShell: PdfShellAnalysis["indirectObjects"][number],
+): PdfIrDocument["indirectObjects"][number] {
+  return {
+    ref: objectShell.ref,
+    offset: objectShell.offset,
+    endOffset: objectShell.endOffset,
+    hasStream: objectShell.hasStream,
+    ...(objectShell.typeName !== undefined ? { typeName: objectShell.typeName } : {}),
+    dictionaryKeys: objectShell.dictionaryKeys,
+    ...(objectShell.streamByteLength !== undefined ? { streamByteLength: objectShell.streamByteLength } : {}),
+    ...(objectShell.streamFilterNames !== undefined ? { streamFilterNames: objectShell.streamFilterNames } : {}),
+    ...(objectShell.streamDecodeState !== undefined ? { streamDecodeState: objectShell.streamDecodeState } : {}),
+    ...(objectShell.decodedStreamByteLength !== undefined ? { decodedStreamByteLength: objectShell.decodedStreamByteLength } : {}),
+    ...(objectShell.streamRole !== undefined ? { streamRole: objectShell.streamRole } : {}),
+    ...(objectShell.containerObjectRef !== undefined ? { containerObjectRef: objectShell.containerObjectRef } : {}),
+  };
 }
 
 async function buildObservationStage(
