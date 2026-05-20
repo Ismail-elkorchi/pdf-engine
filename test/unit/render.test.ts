@@ -361,6 +361,82 @@ test("buildRenderPageImagery downscales raster when eager raster work exceeds th
   assert.equal(imagery.knownLimits.includes("render-imagery-partial"), true);
 });
 
+test("buildRenderPageImagery omits oversized SVG while preserving raster imagery", () => {
+  const imagery = buildRenderPageImagery({
+    pageBox: {
+      x: 0,
+      y: 0,
+      width: 100,
+      height: 100,
+    },
+    resourcePayloads: [],
+    svgBudgetCharacters: 1,
+    displayList: {
+      commands: [
+        {
+          id: "path-1",
+          kind: "path",
+          contentOrder: 0,
+          paintOperator: "f",
+          paintState: {
+            lineWidth: 1,
+            lineCapStyle: "butt",
+            lineJoinStyle: "miter",
+            miterLimit: 10,
+            dashPattern: {
+              segments: [],
+              phase: 0,
+            },
+          },
+          colorState: {
+            strokeColorSpace: {
+              kind: "device-rgb",
+            },
+            fillColorSpace: {
+              kind: "device-rgb",
+            },
+            fillColor: {
+              colorSpace: {
+                kind: "device-rgb",
+              },
+              components: [0.2, 0.4, 0.6],
+            },
+          },
+          transparencyState: {
+            strokeAlpha: 1,
+            fillAlpha: 1,
+            blendMode: "normal",
+            softMask: "none",
+          },
+          segments: [
+            {
+              kind: "rectangle",
+              x: 0,
+              y: 0,
+              width: 100,
+              height: 100,
+            },
+          ],
+          pointCount: 4,
+          closed: true,
+          bbox: {
+            x: 0,
+            y: 0,
+            width: 100,
+            height: 100,
+          },
+        },
+      ],
+    },
+  });
+
+  assert.equal(imagery.imagery?.svg, undefined);
+  assert.ok(imagery.imagery?.raster);
+  assert.equal(imagery.imagery?.raster?.width, 100);
+  assert.equal(imagery.imagery?.raster?.height, 100);
+  assert.equal(imagery.knownLimits.includes("render-imagery-partial"), true);
+});
+
 test("buildRenderDocument preserves raster page coverage when the document raster budget is shared", async () => {
   const pages: PdfObservedPage[] = Array.from({ length: 3 }, (_, pageIndex) => ({
     pageNumber: pageIndex + 1,

@@ -23,6 +23,7 @@ interface RenderPageImageryBuildInput {
   readonly resourcePayloads: readonly PdfRenderResourcePayload[];
   readonly cachedImageDataByPayloadId?: Map<string, CachedImageData>;
   readonly rasterBudgetBytes?: number;
+  readonly svgBudgetCharacters?: number;
 }
 
 export interface RenderPageImageryBuildResult {
@@ -218,7 +219,7 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
   const orderedPrimitives = primitives.toSorted((left, right) => left.contentOrder - right.contentOrder);
   const svgWidth = toPixelDimension(pageBox.width);
   const svgHeight = toPixelDimension(pageBox.height);
-  const svg = buildSvgImagery(orderedPrimitives, svgWidth, svgHeight);
+  const svg = buildSvgImagery(orderedPrimitives, svgWidth, svgHeight, input.svgBudgetCharacters);
   const rasterDimensions = resolveRasterDimensions(svgWidth, svgHeight, input.rasterBudgetBytes);
   const rasterPrimitives = rasterDimensions.scale === 1
     ? orderedPrimitives
@@ -228,10 +229,12 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
   return {
     pageBox,
     imagery: {
-      svg,
+      ...(svg !== undefined ? { svg } : {}),
       raster,
     },
-    knownLimits: hasPartialImagery || rasterDimensions.scale !== 1 ? ["render-imagery-partial"] : [],
+    knownLimits: hasPartialImagery || svg === undefined || rasterDimensions.scale !== 1
+      ? ["render-imagery-partial"]
+      : [],
   };
 }
 
@@ -611,29 +614,57 @@ function buildSvgImagery(
   primitives: readonly RenderPrimitive[],
   width: number,
   height: number,
-): PdfRenderPageImageSvg {
-  const elements = [
-    `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${String(width)} ${String(height)}" width="${String(width)}" height="${String(height)}">`,
-    `<rect x="0" y="0" width="${String(width)}" height="${String(height)}" fill="#ffffff"/>`,
-  ];
+  characterBudget: number | undefined,
+): PdfRenderPageImageSvg | undefined {
+  const closingElement = "</svg>";
+  const elements: string[] = [];
+  let characterCount = 0;
+  const appendElement = (element: string): boolean => {
+    if (
+      characterBudget !== undefined &&
+      characterCount + element.length + closingElement.length > characterBudget
+    ) {
+      return false;
+    }
+    elements.push(element);
+    characterCount += element.length;
+    return true;
+  };
+
+  if (
+    !appendElement(
+      `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 ${String(width)} ${String(height)}" width="${String(width)}" height="${String(height)}">`,
+    ) ||
+    !appendElement(`<rect x="0" y="0" width="${String(width)}" height="${String(height)}" fill="#ffffff"/>`)
+  ) {
+    return undefined;
+  }
 
   for (const primitive of primitives) {
     switch (primitive.kind) {
       case "path":
-        elements.push(buildSvgPathElement(primitive));
+        if (!appendElement(buildSvgPathElement(primitive))) {
+          return undefined;
+        }
         break;
       case "text":
-        elements.push(buildSvgTextElement(primitive));
+        if (!appendElement(buildSvgTextElement(primitive))) {
+          return undefined;
+        }
         break;
       case "image":
-        elements.push(
-          `<image x="${formatNumber(primitive.bbox.x)}" y="${formatNumber(primitive.bbox.y)}" width="${formatNumber(primitive.bbox.width)}" height="${formatNumber(primitive.bbox.height)}" href="${primitive.dataUri}"/>`,
-        );
+        if (
+          !appendElement(
+            `<image x="${formatNumber(primitive.bbox.x)}" y="${formatNumber(primitive.bbox.y)}" width="${formatNumber(primitive.bbox.width)}" height="${formatNumber(primitive.bbox.height)}" href="${primitive.dataUri}"/>`,
+          )
+        ) {
+          return undefined;
+        }
         break;
     }
   }
 
-  elements.push("</svg>");
+  elements.push(closingElement);
 
   return {
     mimeType: "image/svg+xml",
