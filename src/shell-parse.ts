@@ -2397,6 +2397,12 @@ export function parseContentStreamOperators(text: string): readonly ParsedConten
 }
 
 export function parseTextOperatorRuns(text: string): readonly ParsedTextOperatorRun[] {
+  return parseTextOperatorRunsFromOperators(parseContentStreamOperators(text));
+}
+
+export function parseTextOperatorRunsFromOperators(
+  operators: readonly ParsedContentStreamOperator[],
+): readonly ParsedTextOperatorRun[] {
   const runs: ParsedTextOperatorRun[] = [];
   let currentFontResourceName: string | undefined;
   let currentFontSize: number | undefined;
@@ -2404,102 +2410,18 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
   let currentLeading: number | undefined;
   let pendingLineBreak = false;
   const markedContentStack: ParsedMarkedContentContext[] = [];
-  const operands: Array<
-    | { kind: "name"; token: string }
-    | { kind: "literal"; token: string }
-    | { kind: "hex"; token: string }
-    | { kind: "dictionary"; token: string }
-    | { kind: "array"; items: ReadonlyArray<ParsedTextArrayOperand> }
-    | { kind: "other"; token: string }
-  > = [];
 
-  for (let index = 0; index < text.length; ) {
-    index = skipPdfWhitespaceAndComments(text, index);
-    const current = text[index];
-
-    if (current === undefined) {
-      break;
-    }
-
-    if (current === "(") {
-      const literal = readPdfLiteralToken(text, index);
-      if (!literal) {
-        index += 1;
-        continue;
-      }
-
-      operands.push({ kind: "literal", token: literal.token });
-      index = literal.nextIndex;
-      continue;
-    }
-
-    if (current === "/") {
-      const nameToken = readPdfNameToken(text, index);
-      if (!nameToken) {
-        index += 1;
-        continue;
-      }
-
-      operands.push({ kind: "name", token: nameToken.raw });
-      index = nameToken.nextIndex;
-      continue;
-    }
-
-    if (current === "<" && text[index + 1] !== "<") {
-      const hex = readPdfHexStringToken(text, index);
-      if (!hex) {
-        index += 1;
-        continue;
-      }
-
-      operands.push({ kind: "hex", token: hex.token });
-      index = hex.nextIndex;
-      continue;
-    }
-
-    if (current === "<" && text[index + 1] === "<") {
-      const dictionary = readPdfDictionaryToken(text, index);
-      if (!dictionary) {
-        index += 1;
-        continue;
-      }
-
-      operands.push({ kind: "dictionary", token: dictionary.token });
-      index = dictionary.nextIndex;
-      continue;
-    }
-
-    if (current === "[") {
-      const array = readPdfTextArrayToken(text, index);
-      if (!array) {
-        index += 1;
-        continue;
-      }
-
-      operands.push({ kind: "array", items: array.items });
-      index = array.nextIndex;
-      continue;
-    }
-
-    const tokenEnd = readUntilDelimiter(text, index);
-    if (tokenEnd <= index) {
-      index += 1;
-      continue;
-    }
-
-    const token = text.slice(index, tokenEnd);
+  for (const contentOperator of operators) {
+    const token = contentOperator.operator;
+    const operands = contentOperator.operands;
     if (token === "BT") {
-      operands.length = 0;
       pendingLineBreak = false;
       currentTextAnchor = undefined;
       markedContentStack.length = 0;
-      index = tokenEnd;
       continue;
     }
 
     if (token === "ET") {
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
@@ -2512,8 +2434,6 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
       currentFontSize = fontSizeOperand?.kind === "other"
         ? readNumericTokenValue(fontSizeOperand.token) ?? currentFontSize
         : currentFontSize;
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
@@ -2526,8 +2446,6 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         };
         pendingLineBreak = true;
       }
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
@@ -2537,8 +2455,6 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         currentTextAnchor = offsetPoint(currentTextAnchor, positionOperands[0] ?? 0, positionOperands[1] ?? 0);
         pendingLineBreak = true;
       }
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
@@ -2549,16 +2465,12 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         currentLeading = -(positionOperands[1] ?? 0);
         pendingLineBreak = true;
       }
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
     if (token === "T*") {
       currentTextAnchor = advanceToNextLine(currentTextAnchor, currentLeading);
       pendingLineBreak = true;
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
@@ -2590,9 +2502,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       }
-      operands.length = 0;
       pendingLineBreak = false;
-      index = tokenEnd;
       continue;
     }
 
@@ -2611,9 +2521,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
           ...(markedContent?.actualText !== undefined ? { actualText: markedContent.actualText } : {}),
         });
       }
-      operands.length = 0;
       pendingLineBreak = false;
-      index = tokenEnd;
       continue;
     }
 
@@ -2647,9 +2555,7 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         });
       }
       currentTextAnchor = lineAnchor;
-      operands.length = 0;
       pendingLineBreak = false;
-      index = tokenEnd;
       continue;
     }
 
@@ -2683,36 +2589,25 @@ export function parseTextOperatorRuns(text: string): readonly ParsedTextOperator
         });
       }
       currentTextAnchor = lineAnchor;
-      operands.length = 0;
       pendingLineBreak = false;
-      index = tokenEnd;
       continue;
     }
 
     if (token === "BDC") {
       markedContentStack.push(readMarkedContentContext(operands));
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
     if (token === "BMC") {
       const tagOperand = [...operands].reverse().find((operand) => operand.kind === "name");
       markedContentStack.push(classifyMarkedContent(tagOperand?.kind === "name" ? tagOperand.token : undefined));
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
 
     if (token === "EMC") {
       markedContentStack.pop();
-      operands.length = 0;
-      index = tokenEnd;
       continue;
     }
-
-    operands.push({ kind: "other", token });
-    index = tokenEnd;
   }
 
   return runs;

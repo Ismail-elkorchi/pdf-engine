@@ -16,7 +16,7 @@ import {
   keyOfObjectRef,
   parseContentStreamOperators,
   parseDictionaryEntries,
-  parseTextOperatorRuns,
+  parseTextOperatorRunsFromOperators,
   readObjectRefValue,
   readObjectRefsValue,
   type ParsedContentStreamOperator,
@@ -330,8 +330,9 @@ function buildObservedPage(
       continue;
     }
 
+    const contentStreamOperators = parseContentStreamOperators(contentStream.streamText);
     const contentMarkResult = observeContentStreamMarks(
-      contentStream.streamText,
+      contentStreamOperators,
       pageNumber,
       contentStreamRef,
       colorSpaceBindingByResourceName,
@@ -345,7 +346,7 @@ function buildObservedPage(
     contentOrder = contentMarkResult.nextContentOrder;
     marks.push(...contentMarkResult.marks);
     const textContexts = [...contentMarkResult.textContexts];
-    const parsedRuns = parseTextOperatorRuns(contentStream.streamText);
+    const parsedRuns = parseTextOperatorRunsFromOperators(contentStreamOperators);
     for (const parsedRun of parsedRuns) {
       const observedRun = observeParsedTextRun(
         parsedRun,
@@ -479,7 +480,7 @@ function buildObservedPage(
 }
 
 function observeContentStreamMarks(
-  contentStreamText: string,
+  operators: readonly ParsedContentStreamOperator[],
   pageNumber: number,
   contentStreamRef: PdfObjectRef,
   colorSpaceBindingByResourceName: ReadonlyMap<string, PdfColorSpaceBinding>,
@@ -492,7 +493,6 @@ function observeContentStreamMarks(
 ): PdfObservedContentMarksResult {
   const marks: Array<Exclude<PdfObservedMark, PdfObservedTextMark>> = [];
   const textContexts: PdfObservedTextContext[] = [];
-  const operators = parseContentStreamOperators(contentStreamText);
   const graphicsStateStack: PdfObservedGraphicsState[] = [];
   const markedContentStack: PdfObservedMarkedContentState[] = [];
   let graphicsState: PdfObservedGraphicsState = {
