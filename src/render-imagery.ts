@@ -306,15 +306,19 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
     }
   }
 
-  const orderedPrimitives = primitives.toSorted((left, right) => left.contentOrder - right.contentOrder);
+  const orderedPrimitives = primitivesAreInContentOrder(primitives)
+    ? primitives
+    : primitives.toSorted((left, right) => left.contentOrder - right.contentOrder);
   const svgWidth = toPixelDimension(pageBox.width);
   const svgHeight = toPixelDimension(pageBox.height);
   const svg = buildSvgImagery(orderedPrimitives, svgWidth, svgHeight, input.svgBudgetCharacters);
   const rasterDimensions = resolveRasterDimensions(svgWidth, svgHeight, input.rasterBudgetBytes);
-  const rasterPrimitives = rasterDimensions.scale === 1
-    ? orderedPrimitives
-    : orderedPrimitives.map((primitive) => scalePrimitiveForRaster(primitive, rasterDimensions.scale));
-  const raster = buildRasterImagery(rasterPrimitives, rasterDimensions.width, rasterDimensions.height);
+  const raster = buildRasterImagery(
+    orderedPrimitives,
+    rasterDimensions.width,
+    rasterDimensions.height,
+    rasterDimensions.scale,
+  );
 
   return {
     pageBox,
@@ -326,6 +330,16 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
       ? ["render-imagery-partial"]
       : [],
   };
+}
+
+function primitivesAreInContentOrder(primitives: readonly RenderPrimitive[]): boolean {
+  for (let index = 1; index < primitives.length; index += 1) {
+    if ((primitives[index - 1]?.contentOrder ?? 0) > (primitives[index]?.contentOrder ?? 0)) {
+      return false;
+    }
+  }
+
+  return true;
 }
 
 function buildTextPrimitive(
@@ -555,7 +569,7 @@ function normalizePathSegments(
       case "line-to": {
         const point = normalizePoint(pageBox, transformPoint(activeTransform, segment.to));
         pathParts.push(`L${formatNumber(point.x)} ${formatNumber(point.y)}`);
-        currentPoints = currentPoints.length > 0 ? [...currentPoints, point] : [point];
+        currentPoints.push(point);
         currentPoint = point;
         break;
       }
@@ -567,7 +581,7 @@ function normalizePathSegments(
           `C${formatNumber(control1.x)} ${formatNumber(control1.y)} ${formatNumber(control2.x)} ${formatNumber(control2.y)} ${formatNumber(point.x)} ${formatNumber(point.y)}`,
         );
         const curvePoints = flattenCubicCurve(currentPoint ?? control1, control1, control2, point);
-        currentPoints = currentPoints.length > 0 ? [...currentPoints, ...curvePoints] : [...curvePoints];
+        currentPoints.push(...curvePoints);
         currentPoint = point;
         break;
       }
@@ -575,7 +589,7 @@ function normalizePathSegments(
         pathParts.push("Z");
         currentClosed = true;
         if (subpathStart !== undefined && currentPoints.length > 0) {
-          currentPoints = [...currentPoints, subpathStart];
+          currentPoints.push(subpathStart);
           currentPoint = subpathStart;
         }
         break;
@@ -591,12 +605,11 @@ function normalizePathSegments(
             points.slice(1).map((point) => `L${formatNumber(point.x)} ${formatNumber(point.y)}`).join(" ") +
             " Z",
         );
+        const axisAlignedRectangle = detectAxisAlignedRectangle(points);
         rasterSubpaths.push({
           points: [...points, points[0]!],
           closed: true,
-          ...(detectAxisAlignedRectangle(points) !== undefined
-            ? { axisAlignedRectangle: detectAxisAlignedRectangle(points)! }
-            : {}),
+          ...(axisAlignedRectangle !== undefined ? { axisAlignedRectangle } : {}),
         });
         currentPoints = [];
         currentPoint = undefined;
@@ -635,16 +648,24 @@ function detectAxisAlignedRectangle(points: readonly NormalizedPoint[]): PdfBoun
     return undefined;
   }
 
-  const xs = Array.from(new Set(points.map((point) => formatNumber(point.x))));
-  const ys = Array.from(new Set(points.map((point) => formatNumber(point.y))));
-  if (xs.length !== 2 || ys.length !== 2) {
+  const xs = new Set<string>();
+  const ys = new Set<string>();
+  let minX = Number.POSITIVE_INFINITY;
+  let maxX = Number.NEGATIVE_INFINITY;
+  let minY = Number.POSITIVE_INFINITY;
+  let maxY = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    xs.add(formatNumber(point.x));
+    ys.add(formatNumber(point.y));
+    minX = Math.min(minX, point.x);
+    maxX = Math.max(maxX, point.x);
+    minY = Math.min(minY, point.y);
+    maxY = Math.max(maxY, point.y);
+  }
+  if (xs.size !== 2 || ys.size !== 2) {
     return undefined;
   }
 
-  const minX = Math.min(...points.map((point) => point.x));
-  const maxX = Math.max(...points.map((point) => point.x));
-  const minY = Math.min(...points.map((point) => point.y));
-  const maxY = Math.max(...points.map((point) => point.y));
   if (maxX <= minX || maxY <= minY) {
     return undefined;
   }
@@ -804,6 +825,7 @@ function buildRasterImagery(
   primitives: readonly RenderPrimitive[],
   width: number,
   height: number,
+  scale: number,
 ): PdfRenderPageImageRaster {
   const rgbaBytes = new Uint8Array(width * height * 4);
   for (let index = 0; index < rgbaBytes.length; index += 4) {
@@ -816,13 +838,13 @@ function buildRasterImagery(
   for (const primitive of primitives) {
     switch (primitive.kind) {
       case "path":
-        rasterizePathPrimitive(rgbaBytes, width, height, primitive);
+        rasterizePathPrimitive(rgbaBytes, width, height, primitive, scale);
         break;
       case "text":
-        rasterizeTextPrimitive(rgbaBytes, width, height, primitive);
+        rasterizeTextPrimitive(rgbaBytes, width, height, primitive, scale);
         break;
       case "image":
-        rasterizeImagePrimitive(rgbaBytes, width, height, primitive);
+        rasterizeImagePrimitive(rgbaBytes, width, height, primitive, scale);
         break;
     }
   }
@@ -840,9 +862,17 @@ function rasterizePathPrimitive(
   width: number,
   height: number,
   primitive: PathPrimitive,
+  scale: number,
 ): void {
+  const rasterSubpaths = scale === 1
+    ? primitive.rasterSubpaths
+    : primitive.rasterSubpaths.map((subpath) => scaleRasterSubpath(subpath, scale));
+  const strokeWidth = scale === 1 ? primitive.strokeWidth : Math.max(0.5, primitive.strokeWidth * scale);
+  const dashPattern = scale === 1 ? primitive.dashPattern : primitive.dashPattern.map((value) => value * scale);
+  const dashPhase = scale === 1 ? primitive.dashPhase : primitive.dashPhase * scale;
+
   if (primitive.fillColor !== undefined) {
-    for (const subpath of primitive.rasterSubpaths) {
+    for (const subpath of rasterSubpaths) {
       if (subpath.axisAlignedRectangle !== undefined) {
         fillRectangle(
           rgbaBytes,
@@ -861,17 +891,17 @@ function rasterizePathPrimitive(
   }
 
   if (primitive.strokeColor !== undefined) {
-    const dashedStroke = primitive.dashPattern.length > 0
-      ? applyDashPattern(primitive.rasterSubpaths, primitive.dashPattern, primitive.dashPhase)
-      : primitive.rasterSubpaths;
+    const dashedStroke = dashPattern.length > 0
+      ? applyDashPattern(rasterSubpaths, dashPattern, dashPhase)
+      : rasterSubpaths;
     for (const subpath of dashedStroke) {
-      if (subpath.axisAlignedRectangle !== undefined && primitive.dashPattern.length === 0) {
+      if (subpath.axisAlignedRectangle !== undefined && dashPattern.length === 0) {
         strokeRectangle(
           rgbaBytes,
           width,
           height,
           subpath.axisAlignedRectangle,
-          primitive.strokeWidth,
+          strokeWidth,
           primitive.strokeColor,
           primitive.blendMode,
         );
@@ -882,7 +912,7 @@ function rasterizePathPrimitive(
         width,
         height,
         subpath.points,
-        primitive.strokeWidth,
+        strokeWidth,
         primitive.strokeColor,
         primitive.blendMode,
       );
@@ -895,21 +925,25 @@ function rasterizeTextPrimitive(
   width: number,
   height: number,
   primitive: TextPrimitive,
+  scale: number,
 ): void {
+  const bbox = scale === 1 ? primitive.bbox : scaleBoundingBox(primitive.bbox, scale);
   const glyphCount = Math.max(primitive.text.length, 1);
-  const glyphWidth = primitive.bbox.width / glyphCount;
-  const glyphHeight = primitive.bbox.height;
+  const glyphWidth = bbox.width / glyphCount;
+  const glyphHeight = bbox.height;
   const pixelWidth = glyphWidth / 6;
   const pixelHeight = glyphHeight / 8;
 
-  for (const [glyphIndex, character] of Array.from(primitive.text).entries()) {
+  let glyphIndex = 0;
+  for (const character of primitive.text) {
     const rows = BITMAP_FONT.get(character.toUpperCase()) ?? BITMAP_FONT.get("?") ?? [];
-    const glyphX = primitive.bbox.x + glyphIndex * glyphWidth;
-    const glyphY = primitive.bbox.y;
+    const glyphX = bbox.x + glyphIndex * glyphWidth;
+    const glyphY = bbox.y;
 
-    for (const [rowIndex, row] of rows.entries()) {
-      for (const [columnIndex, value] of Array.from(row).entries()) {
-        if (value !== "1") {
+    for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+      const row = rows[rowIndex] ?? "";
+      for (let columnIndex = 0; columnIndex < row.length; columnIndex += 1) {
+        if (row.charCodeAt(columnIndex) !== 49) {
           continue;
         }
 
@@ -928,6 +962,7 @@ function rasterizeTextPrimitive(
         );
       }
     }
+    glyphIndex += 1;
   }
 }
 
@@ -936,11 +971,13 @@ function rasterizeImagePrimitive(
   width: number,
   height: number,
   primitive: ImagePrimitive,
+  scale: number,
 ): void {
-  const targetWidth = Math.max(1, Math.round(primitive.bbox.width));
-  const targetHeight = Math.max(1, Math.round(primitive.bbox.height));
-  const startX = Math.round(primitive.bbox.x);
-  const startY = Math.round(primitive.bbox.y);
+  const bbox = scale === 1 ? primitive.bbox : scaleBoundingBox(primitive.bbox, scale);
+  const targetWidth = Math.max(1, Math.round(bbox.width));
+  const targetHeight = Math.max(1, Math.round(bbox.height));
+  const startX = Math.round(bbox.x);
+  const startY = Math.round(bbox.y);
   const visibleStartX = Math.max(0, startX);
   const visibleStartY = Math.max(0, startY);
   const visibleEndX = Math.min(width, startX + targetWidth);
@@ -1000,8 +1037,14 @@ function fillPolygon(
   color: RgbaColor,
   blendMode: PdfObservedBlendMode,
 ): void {
-  const minY = Math.max(0, Math.floor(Math.min(...points.map((point) => point.y))));
-  const maxY = Math.min(height - 1, Math.ceil(Math.max(...points.map((point) => point.y))));
+  let pointMinY = Number.POSITIVE_INFINITY;
+  let pointMaxY = Number.NEGATIVE_INFINITY;
+  for (const point of points) {
+    pointMinY = Math.min(pointMinY, point.y);
+    pointMaxY = Math.max(pointMaxY, point.y);
+  }
+  const minY = Math.max(0, Math.floor(pointMinY));
+  const maxY = Math.min(height - 1, Math.ceil(pointMaxY));
 
   for (let y = minY; y <= maxY; y += 1) {
     const scanY = y + 0.5;
@@ -1237,7 +1280,7 @@ function applyDashPattern(
           if (activePoints.length === 0) {
             activePoints = [start];
           }
-          activePoints = [...activePoints, splitPoint];
+          activePoints.push(splitPoint);
         } else if (activePoints.length > 1) {
           result.push({ points: activePoints, closed: false });
           activePoints = [];
@@ -1929,34 +1972,14 @@ function resolveRasterDimensions(
   };
 }
 
-function scalePrimitiveForRaster(primitive: RenderPrimitive, scale: number): RenderPrimitive {
-  switch (primitive.kind) {
-    case "text":
-      return {
-        ...primitive,
-        bbox: scaleBoundingBox(primitive.bbox, scale),
-        fontSize: primitive.fontSize * scale,
-      };
-    case "path":
-      return {
-        ...primitive,
-        rasterSubpaths: primitive.rasterSubpaths.map((subpath) => ({
-          points: subpath.points.map((point) => scalePoint(point, scale)),
-          closed: subpath.closed,
-          ...(subpath.axisAlignedRectangle !== undefined
-            ? { axisAlignedRectangle: scaleBoundingBox(subpath.axisAlignedRectangle, scale) }
-            : {}),
-        })),
-        strokeWidth: Math.max(0.5, primitive.strokeWidth * scale),
-        dashPattern: primitive.dashPattern.map((value) => value * scale),
-        dashPhase: primitive.dashPhase * scale,
-      };
-    case "image":
-      return {
-        ...primitive,
-        bbox: scaleBoundingBox(primitive.bbox, scale),
-      };
-  }
+function scaleRasterSubpath(subpath: RasterSubpath, scale: number): RasterSubpath {
+  return {
+    points: subpath.points.map((point) => scalePoint(point, scale)),
+    closed: subpath.closed,
+    ...(subpath.axisAlignedRectangle !== undefined
+      ? { axisAlignedRectangle: scaleBoundingBox(subpath.axisAlignedRectangle, scale) }
+      : {}),
+  };
 }
 
 function scaleBoundingBox(bbox: PdfBoundingBox, scale: number): PdfBoundingBox {

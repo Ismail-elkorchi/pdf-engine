@@ -112,17 +112,7 @@ export async function buildRenderDocument(
   const renderHash = await buildRenderHash({
     strategy: "observed-display-list",
     resourcePayloads: payloadCatalog.resourcePayloads,
-    pages: pages.map((page) => ({
-      pageNumber: page.pageNumber,
-      resolutionMethod: page.resolutionMethod,
-      ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
-      ...(page.pageBox !== undefined ? { pageBox: page.pageBox } : {}),
-      displayList: page.displayList,
-      textIndex: page.textIndex,
-      selectionModel: page.selectionModel,
-      ...(page.imagery !== undefined ? { imagery: page.imagery } : {}),
-      renderHash: page.renderHash,
-    })),
+    pages: pages.map(toRenderDocumentHashPage),
   });
 
   return {
@@ -377,6 +367,24 @@ function stripInternalKnownLimits(
   const { knownLimits, ...publicPage } = page;
   void knownLimits;
   return publicPage;
+}
+
+function toRenderDocumentHashPage(
+  page: PdfRenderPage & { readonly knownLimits: readonly PdfRenderDocument["knownLimits"][number][] },
+): {
+  readonly pageNumber: number;
+  readonly resolutionMethod: PdfRenderPage["resolutionMethod"];
+  readonly pageRef?: PdfRenderPage["pageRef"];
+  readonly pageBox?: PdfRenderPage["pageBox"];
+  readonly renderHash: PdfRenderHash;
+} {
+  return {
+    pageNumber: page.pageNumber,
+    resolutionMethod: page.resolutionMethod,
+    ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
+    ...(page.pageBox !== undefined ? { pageBox: page.pageBox } : {}),
+    renderHash: page.renderHash,
+  };
 }
 
 function buildRenderResourcePayloadCatalog(
