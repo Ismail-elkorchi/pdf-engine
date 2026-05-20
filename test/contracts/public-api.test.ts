@@ -109,6 +109,52 @@ test("public pipeline intent skips downstream stages without changing the defaul
   assert.equal(renderIntent.render.value?.renderHash.hex, defaultRun.render.value?.renderHash.hex);
 });
 
+test("public IR object shells expose only contract fields", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderResourcePayloads();
+  const result = await engine.run({
+    source: { bytes, fileName: "public-api-ir-shells.pdf" },
+  });
+
+  const allowedObjectShellKeys = new Set([
+    "ref",
+    "offset",
+    "endOffset",
+    "hasStream",
+    "typeName",
+    "dictionaryKeys",
+    "streamByteLength",
+    "streamFilterNames",
+    "streamDecodeState",
+    "decodedStreamByteLength",
+    "streamRole",
+    "containerObjectRef",
+  ]);
+  const internalPayloadKeys = [
+    "dictionaryEntries",
+    "objectValueText",
+    "streamText",
+    "decodedStreamBytes",
+    "streamStartOffset",
+    "streamEndOffset",
+    "streamLengthRef",
+  ];
+  const objects = result.ir.value?.indirectObjects ?? [];
+  assert.ok(objects.length > 0);
+  assert.ok(objects.some((objectShell) => objectShell.hasStream && objectShell.decodedStreamByteLength !== undefined));
+
+  for (const objectShell of objects) {
+    for (const key of Object.keys(objectShell)) {
+      assert.equal(allowedObjectShellKeys.has(key), true, `unexpected public IR key: ${key}`);
+    }
+    for (const key of internalPayloadKeys) {
+      assert.equal(key in objectShell, false, `internal parser field leaked into public IR: ${key}`);
+    }
+  }
+
+  assert.equal(result.render.value?.resourcePayloads.some((payload) => payload.availability === "available"), true);
+});
+
 test("public pipeline contracts expose opt-in OCR provenance and fusion decisions", async () => {
   const provider: PdfOcrProvider = {
     name: "contract-fake-ocr",
