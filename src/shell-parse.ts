@@ -151,6 +151,8 @@ export interface PdfShellAnalysis {
   readonly repairState: PdfRepairState;
 }
 
+export type PdfShellStreamDecodeScope = "all" | "text";
+
 const FULL_STRUCTURE_SCAN_LIMIT = 8_000_000;
 
 export async function analyzePdfShell(
@@ -158,8 +160,10 @@ export async function analyzePdfShell(
   policy: PdfNormalizedAdmissionPolicy,
   options: {
     readonly securityHandler?: PdfStandardPasswordSecurityHandler;
+    readonly streamDecodeScope?: PdfShellStreamDecodeScope;
   } = {},
 ): Promise<PdfShellAnalysis> {
+  const streamDecodeScope = options.streamDecodeScope ?? "all";
   const byteLength = source.bytes.byteLength;
   const scanBytes = source.bytes.subarray(0, Math.min(policy.resourceBudget.maxScanBytes, byteLength));
   const scanText = decodePdfBytes(scanBytes);
@@ -188,6 +192,7 @@ export async function analyzePdfShell(
     source.bytes,
     provisionalObjectIndex,
     options.securityHandler,
+    streamDecodeScope,
   );
   const expandedObjectStreamResult = expandObjectStreams(finalizedIndirectObjects);
   let indirectObjects = expandedObjectStreamResult.indirectObjects;
@@ -198,6 +203,7 @@ export async function analyzePdfShell(
       source.bytes,
       objectIndex,
       options.securityHandler,
+      streamDecodeScope,
     );
     objectIndex = new Map(indirectObjects.map((objectShell) => [keyOfObjectRef(objectShell.ref), objectShell] as const));
   }
@@ -539,11 +545,12 @@ async function finalizeIndirectObjects(
   sourceBytes: Uint8Array,
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
   securityHandler?: PdfStandardPasswordSecurityHandler,
+  streamDecodeScope: PdfShellStreamDecodeScope = "all",
 ): Promise<ParsedIndirectObject[]> {
   const finalized: ParsedIndirectObject[] = [];
 
   for (const objectShell of indirectObjects) {
-    finalized.push(await finalizeIndirectObject(objectShell, sourceBytes, objectIndex, securityHandler));
+    finalized.push(await finalizeIndirectObject(objectShell, sourceBytes, objectIndex, securityHandler, streamDecodeScope));
   }
 
   return finalized;
@@ -554,6 +561,7 @@ async function finalizeIndirectObject(
   sourceBytes: Uint8Array,
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
   securityHandler?: PdfStandardPasswordSecurityHandler,
+  streamDecodeScope: PdfShellStreamDecodeScope = "all",
 ): Promise<ParsedIndirectObject> {
   let finalizedObject = objectShell;
   if (
@@ -586,6 +594,14 @@ async function finalizeIndirectObject(
 
   if (!finalizedObject.hasStream || finalizedObject.streamStartOffset === undefined) {
     return finalizedObject;
+  }
+
+  if (shouldSkipPayloadStreamDecode(finalizedObject, streamDecodeScope)) {
+    const streamByteLength = readStreamByteLength(finalizedObject, objectIndex);
+    return {
+      ...finalizedObject,
+      ...(streamByteLength !== undefined ? { streamByteLength } : {}),
+    };
   }
 
   const rawStreamBytes = readStreamBytes(finalizedObject, sourceBytes, objectIndex);
@@ -623,6 +639,22 @@ async function finalizeIndirectObject(
     ...finalizedBase,
     streamDecodeState: decodedStream.state,
   };
+}
+
+function shouldSkipPayloadStreamDecode(
+  objectShell: ParsedIndirectObject,
+  streamDecodeScope: PdfShellStreamDecodeScope,
+): boolean {
+  if (streamDecodeScope === "all") {
+    return false;
+  }
+
+  const subtypeName = readNameValue(objectShell.dictionaryEntries.get("Subtype"));
+  if (subtypeName === "Image") {
+    return true;
+  }
+
+  return objectShell.typeName === "EmbeddedFile";
 }
 
 function expandObjectStreams(indirectObjects: readonly ParsedIndirectObject[]): {
@@ -734,6 +766,23 @@ function readStreamBytes(
   }
 
   return sourceBytes.slice(dataStartOffset, dataEndOffset);
+}
+
+function readStreamByteLength(
+  objectShell: ParsedIndirectObject,
+  objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
+): number | undefined {
+  const dataStartOffset = objectShell.streamStartOffset;
+  if (dataStartOffset === undefined) {
+    return undefined;
+  }
+
+  const dataEndOffset = resolveStreamEndOffset(objectShell, objectIndex);
+  if (dataEndOffset === undefined || dataEndOffset < dataStartOffset) {
+    return undefined;
+  }
+
+  return dataEndOffset - dataStartOffset;
 }
 
 function resolveStreamEndOffset(

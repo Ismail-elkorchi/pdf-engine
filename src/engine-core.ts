@@ -10,7 +10,7 @@ import {
 import { evaluatePdfFeatureFindings, hasDetectedFeatureFinding } from "./pdf-feature-findings.ts";
 import { preparePdfStandardPasswordSecurity } from "./pdf-standard-security.ts";
 import { buildRenderDocument } from "./render.ts";
-import { analyzePdfShell, keyOfObjectRef, type PdfShellAnalysis } from "./shell-parse.ts";
+import { analyzePdfShell, keyOfObjectRef, type PdfShellAnalysis, type PdfShellStreamDecodeScope } from "./shell-parse.ts";
 
 import type {
   PdfAdmissionArtifact,
@@ -119,13 +119,13 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
 
   async function admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, "text");
     return buildAdmissionStage(request, inspection);
   }
 
   async function toIr(request: PdfIrRequest): Promise<PdfStageResult<PdfIrDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, "text");
     const admission = buildAdmissionStage(
       {
         source: request.source,
@@ -140,7 +140,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   async function observe(request: PdfObservationRequest): Promise<PdfStageResult<PdfObservedDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const ocr = resolveOcrOptions(defaultOcr, request.ocr);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, streamDecodeScopeForObservation(ocr));
     const admission = buildAdmissionStage(
       {
         source: request.source,
@@ -155,7 +155,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   async function toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const ocr = resolveOcrOptions(defaultOcr, request.ocr);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, streamDecodeScopeForObservation(ocr));
     const admission = buildAdmissionStage(
       {
         source: request.source,
@@ -171,7 +171,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   async function toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const ocr = resolveOcrOptions(defaultOcr, request.ocr);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, streamDecodeScopeForObservation(ocr));
     const admission = buildAdmissionStage(
       {
         source: request.source,
@@ -188,7 +188,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   async function toRender(request: PdfRenderRequest): Promise<PdfStageResult<PdfRenderDocument>> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const ocr = resolveOcrOptions(defaultOcr, request.ocr);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, "all");
     const admission = buildAdmissionStage(
       {
         source: request.source,
@@ -204,7 +204,7 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   async function run(request: PdfPipelineRequest): Promise<PdfPipelineResult> {
     const policy = mergePolicy(defaultPolicy, request.policy);
     const ocr = resolveOcrOptions(defaultOcr, request.ocr);
-    const inspection = await inspectSource(request.source, policy, request.passwordProvider);
+    const inspection = await inspectSource(request.source, policy, request.passwordProvider, streamDecodeScopeForPipeline(request, ocr));
     const admission = buildAdmissionStage(request, inspection);
     const irSkipped = stageResult<PdfIrDocument>("ir", "skipped", []);
     const observationSkipped = stageResult<PdfObservedDocument>("observation", "skipped", []);
@@ -298,8 +298,9 @@ async function inspectSource(
   source: PdfAdmissionRequest["source"],
   policy: PdfNormalizedAdmissionPolicy,
   passwordProvider?: PdfAdmissionRequest["passwordProvider"],
+  streamDecodeScope: PdfShellStreamDecodeScope = "all",
 ): Promise<PdfShellInspection> {
-  const analysis = await analyzePdfShell(source, policy);
+  const analysis = await analyzePdfShell(source, policy, { streamDecodeScope });
   const initialFeatureEvaluation = evaluatePdfFeatureFindings(analysis, policy);
 
   if (!hasDetectedFeatureFinding(initialFeatureEvaluation.featureFindings, "encryption")) {
@@ -333,7 +334,7 @@ async function inspectSource(
   });
   if (emptyPasswordAttempt.status === "decrypted") {
     return buildInspection(
-      await analyzePdfShell(source, policy, { securityHandler: emptyPasswordAttempt.handler }),
+      await analyzePdfShell(source, policy, { securityHandler: emptyPasswordAttempt.handler, streamDecodeScope }),
       policy,
       "decrypted",
     );
@@ -363,13 +364,28 @@ async function inspectSource(
   });
   if (suppliedPasswordAttempt.status === "decrypted") {
     return buildInspection(
-      await analyzePdfShell(source, policy, { securityHandler: suppliedPasswordAttempt.handler }),
+      await analyzePdfShell(source, policy, { securityHandler: suppliedPasswordAttempt.handler, streamDecodeScope }),
       policy,
       "decrypted",
     );
   }
 
   return buildInspection(analysis, policy, suppliedPasswordAttempt.status, suppliedPasswordAttempt.detail);
+}
+
+function streamDecodeScopeForObservation(ocr: PdfResolvedOcrOptions): PdfShellStreamDecodeScope {
+  return ocr.mode === "off" ? "text" : "all";
+}
+
+function streamDecodeScopeForPipeline(
+  request: PdfPipelineRequest,
+  ocr: PdfResolvedOcrOptions,
+): PdfShellStreamDecodeScope {
+  if (ocr.mode !== "off") {
+    return "all";
+  }
+
+  return request.intent === undefined || request.intent === "render" ? "all" : "text";
 }
 
 function buildInspection(
@@ -927,6 +943,10 @@ function isParserRelevantStream(
   }
 
   if (objectShell.dictionaryEntries.get("Subtype")?.trim() === "/Image") {
+    return false;
+  }
+
+  if (objectShell.typeName === "EmbeddedFile") {
     return false;
   }
 
