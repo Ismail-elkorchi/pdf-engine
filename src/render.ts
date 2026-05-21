@@ -307,6 +307,8 @@ function toDisplayCommand(mark: PdfObservedMark, payloadCatalog: RenderResourceP
         ...(imagePayloadId !== undefined ? { imagePayloadId } : {}),
         ...(mark.width !== undefined ? { width: mark.width } : {}),
         ...(mark.height !== undefined ? { height: mark.height } : {}),
+        ...(mark.colorState !== undefined ? { colorState: mark.colorState } : {}),
+        ...(mark.transparencyState !== undefined ? { transparencyState: mark.transparencyState } : {}),
       };
     }
     case "xobject": {
@@ -617,6 +619,9 @@ function buildImageResourcePayload(
   const height = readNumericValue(imageObject?.dictionaryEntries.get("Height"));
   const colorSpaceValue = imageObject?.dictionaryEntries.get("ColorSpace")?.trim();
   const bitsPerComponent = readNumericValue(imageObject?.dictionaryEntries.get("BitsPerComponent"));
+  const imageMask = readBooleanValue(imageObject?.dictionaryEntries.get("ImageMask"));
+  const explicitDecodeValues = readNumericArrayValue(imageObject?.dictionaryEntries.get("Decode"));
+  const decodeValues = explicitDecodeValues ?? (imageMask === true ? [0, 1] : undefined);
   const basePayload = {
     id,
     kind: "image" as const,
@@ -627,6 +632,8 @@ function buildImageResourcePayload(
     ...(height !== undefined ? { height } : {}),
     ...(colorSpaceValue !== undefined ? { colorSpaceValue } : {}),
     ...(bitsPerComponent !== undefined ? { bitsPerComponent } : {}),
+    ...(imageMask === true ? { imageMask: true } : {}),
+    ...(decodeValues !== undefined ? { decodeValues } : {}),
     ...(imageObject?.streamDecodeState !== undefined ? { streamDecodeState: imageObject.streamDecodeState } : {}),
     ...(imageObject?.streamFilterNames !== undefined ? { streamFilterNames: imageObject.streamFilterNames } : {}),
   };
@@ -776,6 +783,32 @@ function readNumericValue(value: string | undefined): number | undefined {
 
   const parsed = Number(value);
   return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readBooleanValue(value: string | undefined): boolean | undefined {
+  const trimmed = value?.trim();
+  if (trimmed === "true") {
+    return true;
+  }
+  if (trimmed === "false") {
+    return false;
+  }
+  return undefined;
+}
+
+function readNumericArrayValue(value: string | undefined): readonly number[] | undefined {
+  const trimmed = value?.trim();
+  if (trimmed === undefined || !trimmed.startsWith("[") || !trimmed.endsWith("]")) {
+    return undefined;
+  }
+
+  const body = trimmed.slice(1, -1).trim();
+  if (body.length === 0) {
+    return [];
+  }
+
+  const values = body.split(/\s+/).map((token) => Number(token));
+  return values.every(Number.isFinite) ? values : undefined;
 }
 
 async function buildRenderHash(value: unknown): Promise<PdfRenderHash> {

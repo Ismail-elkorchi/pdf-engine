@@ -110,6 +110,12 @@ try {
         fileName: "render-imagery-raster.pdf",
       },
     });
+    const renderImageMaskResult = await engine.run({
+      source: {
+        bytes: buildRenderImageMaskBytes(),
+        fileName: "render-image-mask.pdf",
+      },
+    });
     const geometryPathMark =
       geometryResult.observation.value?.pages[0]?.marks.find((mark) =>
         mark.kind === "path"
@@ -133,6 +139,9 @@ try {
     );
     const renderImagerySignature = await toRenderImagerySignature(
       renderImageryResult.render.value?.pages[0],
+    );
+    const renderImageMaskSignature = toRenderImageMaskSignature(
+      renderImageMaskResult.render.value,
     );
 
     const browserDocument = globalThis.document;
@@ -296,6 +305,18 @@ try {
       renderImageryPngSignature:
         JSON.stringify(Array.from(renderImageryResult.render.value?.pages[0]?.imagery?.raster.bytes.slice(0, 8) ?? [])) ===
           JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+      renderImageMaskPayload:
+        renderImageMaskSignature?.imageMask === true &&
+        renderImageMaskSignature.bitsPerComponent === 1 &&
+        JSON.stringify(renderImageMaskSignature.decodeValues) === JSON.stringify([0, 1]),
+      renderImageMaskCommandState:
+        JSON.stringify(renderImageMaskSignature?.fillColorComponents ?? null) === JSON.stringify([1, 0, 0]) &&
+        renderImageMaskSignature?.fillAlpha === 1,
+      renderImageMaskImagery:
+        renderImageMaskSignature?.svgImageElementPresent === true &&
+        JSON.stringify(renderImageMaskSignature.rasterPngSignature) === JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+      renderImageMaskNoPartial:
+        renderImageMaskSignature?.knownLimits.includes("render-imagery-partial") === false,
     };
 
     const failedChecks = Object.entries(checks)
@@ -333,6 +354,8 @@ try {
         renderResourcePayloadHash: renderResourceResult.render.value?.renderHash.hex ?? null,
         renderImagerySignature,
         renderImageryHash: renderImageryResult.render.value?.pages[0]?.renderHash.hex ?? null,
+        renderImageMaskSignature,
+        renderImageMaskHash: renderImageMaskResult.render.value?.renderHash.hex ?? null,
       },
     };
 
@@ -412,6 +435,25 @@ try {
       };
     }
 
+    function toRenderImageMaskSignature(renderDocument) {
+      if (!renderDocument) {
+        return null;
+      }
+
+      const imagePayload = renderDocument.resourcePayloads.find((payload) => payload.kind === "image");
+      const imageCommand = renderDocument.pages[0]?.displayList.commands.find((command) => command.kind === "image");
+      return {
+        imageMask: imagePayload?.imageMask ?? null,
+        bitsPerComponent: imagePayload?.bitsPerComponent ?? null,
+        decodeValues: imagePayload?.decodeValues ?? null,
+        fillColorComponents: imageCommand?.colorState?.fillColor?.components ?? null,
+        fillAlpha: imageCommand?.transparencyState?.fillAlpha ?? null,
+        svgImageElementPresent: renderDocument.pages[0]?.imagery?.svg?.markup.includes("<image") === true,
+        rasterPngSignature: Array.from(renderDocument.pages[0]?.imagery?.raster?.bytes.slice(0, 8) ?? []),
+        knownLimits: renderDocument.knownLimits,
+      };
+    }
+
     async function toRenderImagerySignature(renderPage) {
       const svg = renderPage?.imagery?.svg;
       const raster = renderPage?.imagery?.raster;
@@ -437,6 +479,63 @@ try {
       return Array.from(new Uint8Array(digest))
         .map((value) => value.toString(16).padStart(2, "0"))
         .join("");
+    }
+
+    function buildRenderImageMaskBytes() {
+      const textEncoder = new TextEncoder();
+      const content = [
+        "1 0 0 rg",
+        "q",
+        "24 0 0 12 18 18 cm",
+        "/ImMask Do",
+        "Q",
+      ].join("\n");
+      return buildPdfFromObjects([
+        { objectNumber: 1, body: "<< /Type /Catalog /Pages 2 0 R >>" },
+        { objectNumber: 2, body: "<< /Type /Pages /Kids [3 0 R] /Count 1 >>" },
+        {
+          objectNumber: 3,
+          body:
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 72 72] " +
+            "/Resources << /XObject << /ImMask 5 0 R >> >> /Contents 4 0 R >>",
+        },
+        {
+          objectNumber: 4,
+          body: `<< /Length ${String(textEncoder.encode(content).byteLength)} >>\nstream\n${content}\nendstream`,
+        },
+        {
+          objectNumber: 5,
+          body:
+            "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ImageMask true " +
+            "/BitsPerComponent 1 /Decode [0 1] /Filter /ASCIIHexDecode /Length 3 >>\n" +
+            "stream\n80>\nendstream",
+        },
+      ]);
+    }
+
+    function buildPdfFromObjects(objects) {
+      const textEncoder = new TextEncoder();
+      const offsets = new Map();
+      let pdfText = "%PDF-1.4\n";
+      const sortedObjects = [...objects].sort((left, right) => left.objectNumber - right.objectNumber);
+
+      for (const object of sortedObjects) {
+        offsets.set(object.objectNumber, textEncoder.encode(pdfText).byteLength);
+        pdfText += `${String(object.objectNumber)} 0 obj\n${object.body}\nendobj\n`;
+      }
+
+      const xrefOffset = textEncoder.encode(pdfText).byteLength;
+      const objectCount = Math.max(...sortedObjects.map((object) => object.objectNumber)) + 1;
+      pdfText += `xref\n0 ${String(objectCount)}\n`;
+      pdfText += "0000000000 65535 f \n";
+      for (let objectNumber = 1; objectNumber < objectCount; objectNumber += 1) {
+        const offset = offsets.get(objectNumber);
+        pdfText += offset === undefined
+          ? "0000000000 65535 f \n"
+          : `${offset.toString().padStart(10, "0")} 00000 n \n`;
+      }
+      pdfText += `trailer\n<< /Root 1 0 R /Size ${String(objectCount)} >>\nstartxref\n${String(xrefOffset)}\n%%EOF\n`;
+      return textEncoder.encode(pdfText);
     }
   }, browserName);
 
