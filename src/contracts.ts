@@ -1301,6 +1301,10 @@ export interface PdfObservedImageMark extends PdfObservedMarkBase {
   readonly width?: number;
   /** XObject height when the current implementation can recover it. */
   readonly height?: number;
+  /** Active color state at the image invocation site. Required for image-mask stencils. */
+  readonly colorState?: PdfObservedColorState;
+  /** Active transparency state at the image invocation site. Required for image-mask stencils. */
+  readonly transparencyState?: PdfObservedTransparencyState;
 }
 
 /**
@@ -1895,6 +1899,10 @@ export interface PdfRenderImagePayload extends PdfRenderResourcePayloadBase {
   readonly colorSpaceValue?: string;
   /** Raw `BitsPerComponent` value when known. */
   readonly bitsPerComponent?: number;
+  /** Whether the XObject is a one-bit image mask stencil. */
+  readonly imageMask?: boolean;
+  /** Direct numeric `Decode` array values when known. */
+  readonly decodeValues?: readonly number[];
   /** Image stream bytes when available. */
   readonly bytes?: Uint8Array;
 }
@@ -2041,6 +2049,10 @@ export interface PdfDisplayImageCommand extends PdfDisplayCommandBase {
   readonly width?: number;
   /** Image height when known. */
   readonly height?: number;
+  /** Active color state at the image invocation site. Required for image-mask stencils. */
+  readonly colorState?: PdfObservedColorState;
+  /** Active transparency state at the image invocation site. Required for image-mask stencils. */
+  readonly transparencyState?: PdfObservedTransparencyState;
 }
 
 /**

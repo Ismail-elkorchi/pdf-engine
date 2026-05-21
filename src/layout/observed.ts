@@ -952,6 +952,8 @@ function observeContentStreamMarks(
           ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
           ...(xObjectBinding.width !== undefined ? { width: xObjectBinding.width } : {}),
           ...(xObjectBinding.height !== undefined ? { height: xObjectBinding.height } : {}),
+          colorState: cloneObservedColorState(graphicsState.colorState),
+          transparencyState: cloneObservedTransparencyState(graphicsState.transparencyState),
           ...(imageBoundingBox !== undefined ? { bbox: imageBoundingBox } : {}),
           transform: graphicsState.transform,
           ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),

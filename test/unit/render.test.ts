@@ -11,6 +11,7 @@ import {
   buildPdfWithOverscaledImageImagery,
   buildPdfWithPageSpecs,
   buildPdfWithRenderImagery,
+  buildPdfWithRenderImageMask,
   buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
 
@@ -785,6 +786,60 @@ test("buildRenderDocument emits page-box-aware SVG and PNG imagery", async () =>
   assert.ok(renderDocument?.knownLimits.includes("render-imagery-partial"));
 });
 
+test("buildRenderDocument emits imagery for image-mask stencils", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImageMask();
+
+  const [first, second] = await Promise.all([
+    engine.run({
+      source: {
+        bytes,
+        fileName: "render-image-mask.pdf",
+      },
+    }),
+    engine.run({
+      source: {
+        bytes,
+        fileName: "render-image-mask.pdf",
+      },
+    }),
+  ]);
+
+  const renderDocument = first.render.value;
+  const renderPage = renderDocument?.pages[0];
+  assert.ok(renderDocument);
+  assert.ok(renderPage?.imagery?.svg);
+  assert.ok(renderPage?.imagery?.raster);
+  if (!renderPage?.imagery?.svg || !renderPage.imagery.raster) {
+    return;
+  }
+
+  const imagePayload = renderDocument.resourcePayloads.find((payload) => payload.kind === "image");
+  assert.equal(imagePayload?.kind, "image");
+  if (imagePayload?.kind !== "image") {
+    return;
+  }
+  assert.equal(imagePayload.availability, "available");
+  assert.equal(imagePayload.imageMask, true);
+  assert.equal(imagePayload.bitsPerComponent, 1);
+  assert.deepEqual(imagePayload.decodeValues, [0, 1]);
+  assert.deepEqual(Array.from(imagePayload.bytes ?? []), [128]);
+
+  const imageCommand = renderPage.displayList.commands.find((command) => command.kind === "image");
+  assert.equal(imageCommand?.kind, "image");
+  if (imageCommand?.kind !== "image") {
+    return;
+  }
+  assert.equal(imageCommand.imagePayloadId, imagePayload.id);
+  assert.deepEqual(imageCommand.colorState?.fillColor?.components, [1, 0, 0]);
+
+  assert.ok(renderPage.imagery.svg.markup.includes("<image"));
+  const png = assertValidPng(renderPage.imagery.raster.bytes);
+  assert.equal(hasRgbaPixel(png.scanlines, png.width, png.height, 255, 0, 0, 255), true);
+  assert.equal(renderDocument.knownLimits.includes("render-imagery-partial"), false);
+  assert.equal(renderDocument.renderHash.hex, second.render.value?.renderHash.hex);
+});
+
 test("buildRenderDocument emits imagery for dense vector-heavy PDFs", async () => {
   const engine = createPdfEngine();
   const bytes = buildPdfWithDenseVectorImagery();
@@ -999,6 +1054,32 @@ function assertValidPng(bytes: Uint8Array): {
   const scanlines = Uint8Array.from(inflateSync(compressed));
   assert.equal(scanlines.byteLength, height * ((width * 4) + 1));
   return { width, height, scanlines };
+}
+
+function hasRgbaPixel(
+  scanlines: Uint8Array,
+  width: number,
+  height: number,
+  red: number,
+  green: number,
+  blue: number,
+  alpha: number,
+): boolean {
+  const rowByteLength = width * 4 + 1;
+  for (let row = 0; row < height; row += 1) {
+    for (let column = 0; column < width; column += 1) {
+      const offset = row * rowByteLength + 1 + column * 4;
+      if (
+        scanlines[offset] === red &&
+        scanlines[offset + 1] === green &&
+        scanlines[offset + 2] === blue &&
+        scanlines[offset + 3] === alpha
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function readUint32(bytes: Uint8Array, offset: number): number {

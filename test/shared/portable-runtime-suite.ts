@@ -1,6 +1,7 @@
 import { createPdfEngine } from "../../src/index.ts";
 
 import { loadNamedPdfFixture } from "./load-fixture.ts";
+import { buildPdfWithRenderImageMask } from "./pdf-builders.ts";
 
 export interface PortableRuntimeSuiteResult {
   readonly runtime: string;
@@ -22,6 +23,8 @@ export interface PortableRuntimeSuiteResult {
     readonly renderResourcePayloadHash: string | null;
     readonly renderImagerySignature: PortableRenderImagerySignature | null;
     readonly renderImageryHash: string | null;
+    readonly renderImageMaskSignature: PortableRenderImageMaskSignature | null;
+    readonly renderImageMaskHash: string | null;
   };
 }
 
@@ -91,6 +94,17 @@ interface PortableRenderImagerySignature {
   readonly rasterSha256: string;
 }
 
+interface PortableRenderImageMaskSignature {
+  readonly imageMask: boolean | null;
+  readonly bitsPerComponent: number | null;
+  readonly decodeValues: readonly number[] | null;
+  readonly fillColorComponents: unknown;
+  readonly fillAlpha: number | null;
+  readonly svgImageElementPresent: boolean;
+  readonly rasterPngSignature: readonly number[];
+  readonly knownLimits: readonly string[];
+}
+
 export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteResult> {
   const engine = createPdfEngine();
   const simpleTextFixture = await loadNamedPdfFixture("simpleText");
@@ -152,6 +166,12 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       fileName: renderImageryFixture.fixture.fileName,
     },
   });
+  const renderImageMaskResult = await engine.run({
+    source: {
+      bytes: buildPdfWithRenderImageMask(),
+      fileName: "render-image-mask.pdf",
+    },
+  });
 
   const javascriptFeatureKinds = javascriptAdmission.value?.featureFindings.map(
     (finding) => finding.kind,
@@ -175,6 +195,7 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
   const renderImagerySignature = await toPortableRenderImagerySignature(
     renderImageryPage,
   );
+  const renderImageMaskSignature = toPortableRenderImageMaskSignature(renderImageMaskResult.render.value);
   const checks = {
     identityMode: engine.identity.mode === "core",
     renderSupported: engine.identity.supportedStages.includes("render"),
@@ -249,6 +270,18 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
     renderImageryPngSignature:
       JSON.stringify(Array.from(renderImageryPage?.imagery?.raster?.bytes.slice(0, 8) ?? [])) ===
       JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+    renderImageMaskPayload:
+      renderImageMaskSignature?.imageMask === true &&
+      renderImageMaskSignature.bitsPerComponent === 1 &&
+      JSON.stringify(renderImageMaskSignature.decodeValues) === JSON.stringify([0, 1]),
+    renderImageMaskCommandState:
+      JSON.stringify(renderImageMaskSignature?.fillColorComponents ?? null) === JSON.stringify([1, 0, 0]) &&
+      renderImageMaskSignature?.fillAlpha === 1,
+    renderImageMaskImagery:
+      renderImageMaskSignature?.svgImageElementPresent === true &&
+      JSON.stringify(renderImageMaskSignature.rasterPngSignature) === JSON.stringify([137, 80, 78, 71, 13, 10, 26, 10]),
+    renderImageMaskNoPartial:
+      renderImageMaskSignature?.knownLimits.includes("render-imagery-partial") === false,
   } as const;
 
   assertChecks(checks);
@@ -273,6 +306,8 @@ export async function runPortableRuntimeSuite(): Promise<PortableRuntimeSuiteRes
       renderResourcePayloadHash: renderResourceResult.render.value?.renderHash.hex ?? null,
       renderImagerySignature,
       renderImageryHash: renderImageryPage?.renderHash.hex ?? null,
+      renderImageMaskSignature,
+      renderImageMaskHash: renderImageMaskResult.render.value?.renderHash.hex ?? null,
     },
   };
 }
@@ -423,6 +458,60 @@ function toPortableRenderResourcePayloadSignature(
         .filter((command) => command.kind === "image")
         .map((command) => command.imagePayloadId ?? null)
     ),
+  };
+}
+
+function toPortableRenderImageMaskSignature(
+  renderDocument:
+    | {
+        readonly resourcePayloads: readonly {
+          readonly kind: string;
+          readonly imageMask?: boolean;
+          readonly bitsPerComponent?: number;
+          readonly decodeValues?: readonly number[];
+        }[];
+        readonly knownLimits: readonly string[];
+        readonly pages: readonly {
+          readonly imagery?: {
+            readonly svg?: {
+              readonly markup: string;
+            };
+            readonly raster?: {
+              readonly bytes: Uint8Array;
+            };
+          };
+          readonly displayList: {
+            readonly commands: readonly {
+              readonly kind: string;
+              readonly colorState?: {
+                readonly fillColor?: {
+                  readonly components: unknown;
+                };
+              };
+              readonly transparencyState?: {
+                readonly fillAlpha?: number;
+              };
+            }[];
+          };
+        }[];
+      }
+    | undefined,
+): PortableRenderImageMaskSignature | null {
+  if (renderDocument === undefined) {
+    return null;
+  }
+
+  const imagePayload = renderDocument.resourcePayloads.find((payload) => payload.kind === "image");
+  const imageCommand = renderDocument.pages[0]?.displayList.commands.find((command) => command.kind === "image");
+  return {
+    imageMask: imagePayload?.imageMask ?? null,
+    bitsPerComponent: imagePayload?.bitsPerComponent ?? null,
+    decodeValues: imagePayload?.decodeValues ?? null,
+    fillColorComponents: imageCommand?.colorState?.fillColor?.components ?? null,
+    fillAlpha: imageCommand?.transparencyState?.fillAlpha ?? null,
+    svgImageElementPresent: renderDocument.pages[0]?.imagery?.svg?.markup.includes("<image") === true,
+    rasterPngSignature: Array.from(renderDocument.pages[0]?.imagery?.raster?.bytes.slice(0, 8) ?? []),
+    knownLimits: renderDocument.knownLimits,
   };
 }
 

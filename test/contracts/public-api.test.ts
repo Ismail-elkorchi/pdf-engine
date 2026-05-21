@@ -7,6 +7,7 @@ import {
   buildPdfWithPageContents,
   buildPdfWithPageSpecs,
   buildPdfWithRenderImagery,
+  buildPdfWithRenderImageMask,
   buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
 
@@ -613,6 +614,38 @@ test("public render contracts expose resource payloads and payload-linked comman
 
   assert.equal(textCommand.fontPayloadId, fontPayload.id);
   assert.equal(imageCommand.imagePayloadId, imagePayload.id);
+});
+
+test("public render contracts expose image-mask payload metadata and invocation state", async () => {
+  const engine = createPdfEngine();
+  const bytes = buildPdfWithRenderImageMask();
+
+  const result = await engine.run({
+    source: {
+      bytes,
+      fileName: "public-api-render-image-mask.pdf",
+    },
+  });
+
+  const renderDocument = result.render.value;
+  assert.ok(renderDocument);
+  const imagePayload = renderDocument?.resourcePayloads.find((payload) => payload.kind === "image");
+  const imageCommand = renderDocument?.pages[0]?.displayList.commands.find((command) => command.kind === "image");
+  assert.equal(imagePayload?.kind, "image");
+  assert.equal(imageCommand?.kind, "image");
+  if (imagePayload?.kind !== "image" || imageCommand?.kind !== "image") {
+    return;
+  }
+
+  assert.equal(imagePayload.availability, "available");
+  assert.equal(imagePayload.imageMask, true);
+  assert.equal(imagePayload.bitsPerComponent, 1);
+  assert.deepEqual(imagePayload.decodeValues, [0, 1]);
+  assert.equal(imageCommand.imagePayloadId, imagePayload.id);
+  assert.deepEqual(imageCommand.colorState?.fillColor?.components, [1, 0, 0]);
+  assert.equal(imageCommand.transparencyState?.fillAlpha, 1);
+  assert.ok(renderDocument.pages[0]?.imagery?.svg?.markup.includes("<image"));
+  assert.equal(renderDocument.knownLimits.includes("render-imagery-partial"), false);
 });
 
 test("public render contracts expose page-box-aware imagery", async () => {

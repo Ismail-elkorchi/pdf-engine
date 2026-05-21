@@ -6,6 +6,7 @@ import {
   appendTrailingComment,
   buildPdfWithPageContents,
   buildPdfWithRenderImagery,
+  buildPdfWithRenderImageMask,
   buildPdfWithPageSpecs,
   buildPdfWithRenderResourcePayloads,
 } from "../shared/pdf-builders.ts";
@@ -409,4 +410,37 @@ test("resource ordering does not change page imagery or render hash", async () =
     reorderedImagery.raster.bytes,
   );
   assert.equal(baseResult.render.value?.renderHash.hex, reorderedResult.render.value?.renderHash.hex);
+});
+
+test("explicit default image-mask decode does not change imagery or render hash", async () => {
+  const engine = createPdfEngine();
+  const explicitDecodeBytes = buildPdfWithRenderImageMask({
+    includeDecodeArray: true,
+  });
+  const implicitDecodeBytes = buildPdfWithRenderImageMask({
+    includeDecodeArray: false,
+  });
+
+  const explicitResult = await engine.run({
+    source: {
+      bytes: explicitDecodeBytes,
+      fileName: "render-image-mask-explicit-decode.pdf",
+    },
+  });
+  const implicitResult = await engine.run({
+    source: {
+      bytes: implicitDecodeBytes,
+      fileName: "render-image-mask-implicit-decode.pdf",
+    },
+  });
+
+  assert.equal(
+    explicitResult.render.value?.pages[0]?.imagery?.svg?.markup,
+    implicitResult.render.value?.pages[0]?.imagery?.svg?.markup,
+  );
+  assert.deepEqual(
+    explicitResult.render.value?.pages[0]?.imagery?.raster?.bytes,
+    implicitResult.render.value?.pages[0]?.imagery?.raster?.bytes,
+  );
+  assert.equal(explicitResult.render.value?.renderHash.hex, implicitResult.render.value?.renderHash.hex);
 });

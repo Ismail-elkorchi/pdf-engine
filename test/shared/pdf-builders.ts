@@ -21,6 +21,10 @@ export interface RenderImageryPdfOptions {
   readonly reorderResourceEntries?: boolean;
 }
 
+export interface RenderImageMaskPdfOptions {
+  readonly includeDecodeArray?: boolean;
+}
+
 export interface DenseVectorRenderPdfOptions {
   readonly ruleCount?: number;
   readonly rectangleCount?: number;
@@ -240,6 +244,36 @@ export function buildPdfWithRenderImagery(
           "<< /Type /XObject /Subtype /Image /Width 2 /Height 2 /ColorSpace /DeviceRGB /BitsPerComponent 8 /Length 12 >>\nstream\n" +
           "ABCDEFGHIJKL" +
           "\nendstream",
+      },
+    ],
+  );
+}
+
+export function buildPdfWithRenderImageMask(
+  options: RenderImageMaskPdfOptions = {},
+): Uint8Array {
+  const decodeArray = options.includeDecodeArray === false ? "" : " /Decode [0 1]";
+  return buildPdfWithPageSpecs(
+    [
+      {
+        mediaBox: [0, 0, 72, 72],
+        resourcesBody: "<< /XObject << /ImMask 20 0 R >> >>",
+        content: [
+          "1 0 0 rg",
+          "q",
+          "24 0 0 12 18 18 cm",
+          "/ImMask Do",
+          "Q",
+        ].join("\n"),
+      },
+    ],
+    [
+      {
+        objectNumber: 20,
+        body:
+          "<< /Type /XObject /Subtype /Image /Width 2 /Height 1 /ImageMask true " +
+          `/BitsPerComponent 1${decodeArray} /Filter /ASCIIHexDecode /Length 3 >>\n` +
+          "stream\n80>\nendstream",
       },
     ],
   );

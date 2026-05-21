@@ -296,6 +296,15 @@ export function buildRenderPageImagery(input: RenderPageImageryBuildInput): Rend
         if (command.transform !== undefined && !isAxisAlignedTransform(command.transform)) {
           hasPartialImagery = true;
         }
+        if (
+          command.transparencyState !== undefined &&
+          (
+            command.transparencyState.softMask !== "none" ||
+            !isSupportedBlendMode(command.transparencyState.blendMode)
+          )
+        ) {
+          hasPartialImagery = true;
+        }
         break;
       }
       case "xobject":
@@ -436,12 +445,14 @@ function buildImagePrimitive(
     return undefined;
   }
 
-  const cachedImageData = cachedImageDataByPayloadId?.get(command.imagePayloadId);
-  const imageData = cachedImageData ?? buildCachedImageData(payload);
+  const imageMaskColor = payload.imageMask === true ? resolveImageMaskColor(command) : undefined;
+  const imageCacheKey = buildImageCacheKey(command.imagePayloadId, payload, imageMaskColor);
+  const cachedImageData = cachedImageDataByPayloadId?.get(imageCacheKey);
+  const imageData = cachedImageData ?? buildCachedImageData(payload, imageMaskColor);
   if (imageData === undefined) {
     return undefined;
   }
-  cachedImageDataByPayloadId?.set(command.imagePayloadId, imageData);
+  cachedImageDataByPayloadId?.set(imageCacheKey, imageData);
 
   return {
     kind: "image",
@@ -452,10 +463,33 @@ function buildImagePrimitive(
   };
 }
 
+function buildImageCacheKey(
+  imagePayloadId: string,
+  payload: Extract<PdfRenderResourcePayload, { readonly kind: "image" }>,
+  imageMaskColor: RgbaColor | undefined,
+): string {
+  if (payload.imageMask !== true || imageMaskColor === undefined) {
+    return imagePayloadId;
+  }
+
+  return [
+    imagePayloadId,
+    imageMaskColor.r,
+    imageMaskColor.g,
+    imageMaskColor.b,
+    formatNumber(imageMaskColor.a),
+  ].join(":");
+}
+
+function resolveImageMaskColor(command: PdfDisplayImageCommand): RgbaColor {
+  return toRgbaColor(command.colorState?.fillColor, command.transparencyState?.fillAlpha ?? 1) ?? BLACK_PIXEL;
+}
+
 function buildCachedImageData(
   payload: Extract<PdfRenderResourcePayload, { readonly kind: "image" }>,
+  imageMaskColor: RgbaColor | undefined,
 ): CachedImageData | undefined {
-  const image = decodeImagePayload(payload);
+  const image = decodeImagePayload(payload, imageMaskColor);
   if (image === undefined) {
     return undefined;
   }
@@ -1318,7 +1352,10 @@ function interpolatePoint(
   };
 }
 
-function decodeImagePayload(payload: Extract<PdfRenderResourcePayload, { readonly kind: "image" }>): DecodedImagePixels | undefined {
+function decodeImagePayload(
+  payload: Extract<PdfRenderResourcePayload, { readonly kind: "image" }>,
+  imageMaskColor: RgbaColor | undefined,
+): DecodedImagePixels | undefined {
   const width = payload.width;
   const height = payload.height;
   const bytes = payload.bytes;
@@ -1327,9 +1364,23 @@ function decodeImagePayload(payload: Extract<PdfRenderResourcePayload, { readonl
     height === undefined ||
     width <= 0 ||
     height <= 0 ||
-    payload.bitsPerComponent !== 8 ||
     bytes === undefined
   ) {
+    return undefined;
+  }
+
+  if (payload.imageMask === true) {
+    return decodeImageMaskPayload(
+      width,
+      height,
+      payload.bitsPerComponent,
+      payload.decodeValues,
+      bytes,
+      imageMaskColor ?? BLACK_PIXEL,
+    );
+  }
+
+  if (payload.bitsPerComponent !== 8) {
     return undefined;
   }
 
@@ -1380,6 +1431,54 @@ function decodeImagePayload(payload: Extract<PdfRenderResourcePayload, { readonl
     default:
       return undefined;
   }
+}
+
+function decodeImageMaskPayload(
+  width: number,
+  height: number,
+  bitsPerComponent: number | undefined,
+  decodeValues: readonly number[] | undefined,
+  bytes: Uint8Array,
+  paintColor: RgbaColor,
+): DecodedImagePixels | undefined {
+  if (bitsPerComponent !== 1) {
+    return undefined;
+  }
+
+  const rowByteLength = Math.ceil(width / 8);
+  if (bytes.length < rowByteLength * height) {
+    return undefined;
+  }
+
+  const [zeroValue, oneValue] = normalizeImageMaskDecodeValues(decodeValues);
+  const rgbaBytes = new Uint8Array(width * height * 4);
+  for (let row = 0; row < height; row += 1) {
+    for (let column = 0; column < width; column += 1) {
+      const byte = bytes[row * rowByteLength + Math.floor(column / 8)] ?? 0;
+      const bit = (byte >> (7 - (column % 8))) & 1;
+      const decoded = bit === 1 ? oneValue : zeroValue;
+      const targetIndex = (row * width + column) * 4;
+      rgbaBytes[targetIndex] = paintColor.r;
+      rgbaBytes[targetIndex + 1] = paintColor.g;
+      rgbaBytes[targetIndex + 2] = paintColor.b;
+      rgbaBytes[targetIndex + 3] = decoded >= 0.5 ? clampByte(paintColor.a * 255) : 0;
+    }
+  }
+
+  return { width, height, rgbaBytes };
+}
+
+function normalizeImageMaskDecodeValues(decodeValues: readonly number[] | undefined): readonly [number, number] {
+  if (
+    decodeValues !== undefined &&
+    decodeValues.length >= 2 &&
+    Number.isFinite(decodeValues[0]) &&
+    Number.isFinite(decodeValues[1])
+  ) {
+    return [decodeValues[0] ?? 0, decodeValues[1] ?? 1];
+  }
+
+  return [0, 1];
 }
 
 function encodePngRgba(width: number, height: number, rgbaBytes: Uint8Array): Uint8Array {

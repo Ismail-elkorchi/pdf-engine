@@ -38,3 +38,4 @@ All notable changes are documented in this file.
 - Observation requests now accept explicit OCR options and providers; OCR is off by default, fuses accepted lines into observation evidence only when requested, and records provider-unavailable, timeout, low-confidence, and fusion diagnostics without replacing native text silently.
 - An optional `./ocr/tesseract` helper creates a Tesseract.js-compatible OCR provider from a caller-supplied module loader without bundling trained data or fetching models automatically.
 - Render imagery no longer reports dashed vector paths as partial imagery when the page otherwise stays within supported vector imagery semantics.
+- Render imagery now decodes one-bit image-mask stencils into deterministic SVG and PNG imagery while preserving invocation color and transparency state in image display commands.
