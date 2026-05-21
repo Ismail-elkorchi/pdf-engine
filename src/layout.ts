@@ -51,14 +51,14 @@ interface GroupedLayoutPage {
 }
 
 const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
+const groupedLayoutPagesByObservation = new WeakMap<PdfObservedDocument, readonly GroupedLayoutPage[]>();
 
 export function buildObservationParagraphText(observation: PdfObservedDocument): string {
-  const groupedPages = observation.pages.map((page) => groupPageIntoBlocks(page));
-  return serializeObservationPages(groupedPages);
+  return serializeObservationPages(getGroupedLayoutPages(observation));
 }
 
 export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayoutDocument {
-  const groupedPages = observation.pages.map((page) => groupPageIntoBlocks(page));
+  const groupedPages = getGroupedLayoutPages(observation);
   const publicGroupedPages = groupedPages.map((page) => ({
     pageNumber: page.pageNumber,
     resolutionMethod: page.resolutionMethod,
@@ -90,6 +90,17 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
       "layout-region-heuristic",
     ]),
   };
+}
+
+function getGroupedLayoutPages(observation: PdfObservedDocument): readonly GroupedLayoutPage[] {
+  const cachedPages = groupedLayoutPagesByObservation.get(observation);
+  if (cachedPages !== undefined) {
+    return cachedPages;
+  }
+
+  const groupedPages = observation.pages.map((page) => groupPageIntoBlocks(page));
+  groupedLayoutPagesByObservation.set(observation, groupedPages);
+  return groupedPages;
 }
 
 function toPublicLayoutBlock(block: GroupedLayoutBlock): PdfLayoutBlock {
