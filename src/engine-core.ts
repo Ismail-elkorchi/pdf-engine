@@ -70,6 +70,8 @@ const ENGINE_IDENTITY: PdfEngineIdentity = {
   supportedStages: ["admission", "ir", "observation", "layout", "knowledge", "render"],
 };
 
+type Mutable<T> = { -readonly [Key in keyof T]: T[Key] };
+
 interface PdfShellInspection {
   readonly analysis: PdfShellAnalysis;
   readonly featureFindings: readonly PdfFeatureFinding[];
@@ -715,13 +717,15 @@ async function buildObservationStage(
   const diagnostics = createObservationDiagnostics(inspection);
   const observedPageResult = buildObservedPages(inspection, diagnostics);
   const pages = observedPageResult.pages;
-  const extractedText = buildObservationParagraphText({
+  const observation: Mutable<PdfObservedDocument> = {
     kind: "pdf-observation",
     strategy: "content-stream-interpreter",
     extractedText: "",
     pages,
     knownLimits: [],
-  });
+  };
+  const extractedText = buildObservationParagraphText(observation);
+  observation.extractedText = extractedText;
 
   if (extractedText.length === 0) {
     if (observedPageResult.hasFontMappingGap) {
@@ -751,18 +755,12 @@ async function buildObservationStage(
     });
   }
 
-  const observation: PdfObservedDocument = {
-    kind: "pdf-observation",
-    strategy: "content-stream-interpreter",
-    extractedText,
-    pages,
-    knownLimits: collectObservationKnownLimits(
-      inspection,
-      observedPageResult.hasFontMappingGap,
-      observedPageResult.hasLiteralFontEncodingGap,
-      extractedText.length > 0,
-    ),
-  };
+  observation.knownLimits = collectObservationKnownLimits(
+    inspection,
+    observedPageResult.hasFontMappingGap,
+    observedPageResult.hasLiteralFontEncodingGap,
+    extractedText.length > 0,
+  );
   const ocrResult = await applyOcrToObservation({
     source,
     observation,

@@ -2,7 +2,7 @@ import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
 import type { PdfObservedDocument, PdfObservedTextRun } from "../../src/contracts.ts";
-import { buildLayoutDocument } from "../../src/layout.ts";
+import { buildLayoutDocument, buildObservationParagraphText } from "../../src/layout.ts";
 
 test("layout orders anchored multi-column text by column and records inference evidence", () => {
   const layout = buildLayoutDocument(createObservation([
@@ -549,6 +549,44 @@ test("layout keeps repeated compact form titles as headings", () => {
           inference.method === "repeated-boundary-heading"
         );
     }),
+  );
+});
+
+test("layout grouping remains order-independent when paragraph text and layout are both requested", () => {
+  const runs = [
+    run("run-left-1", 0, "Left column begins the first paragraph", 72, 700),
+    run("run-right-1", 1, "Right column begins after the left column", 340, 700),
+    run("run-left-2", 2, "Left column continues with stable ordering", 72, 684),
+    run("run-right-2", 3, "Right column continues without changing output", 340, 684),
+  ];
+  const paragraphFirstObservation = createObservation(runs);
+  const layoutFirstObservation = createObservation(runs);
+
+  const paragraphFirstText = buildObservationParagraphText(paragraphFirstObservation);
+  const paragraphFirstLayout = buildLayoutDocument(paragraphFirstObservation);
+  const layoutFirstLayout = buildLayoutDocument(layoutFirstObservation);
+  const layoutFirstText = buildObservationParagraphText(layoutFirstObservation);
+
+  assert.equal(paragraphFirstText, layoutFirstText);
+  assert.equal(paragraphFirstText, paragraphFirstLayout.extractedText);
+  assert.equal(layoutFirstText, layoutFirstLayout.extractedText);
+  assert.deepEqual(
+    paragraphFirstLayout.pages[0]?.blocks.map((block) => ({
+      text: block.text,
+      readingOrder: block.readingOrder,
+      runIds: block.runIds,
+      glyphIds: block.glyphIds,
+      role: block.role,
+      roleConfidence: block.roleConfidence,
+    })),
+    layoutFirstLayout.pages[0]?.blocks.map((block) => ({
+      text: block.text,
+      readingOrder: block.readingOrder,
+      runIds: block.runIds,
+      glyphIds: block.glyphIds,
+      role: block.role,
+      roleConfidence: block.roleConfidence,
+    })),
   );
 });
 
