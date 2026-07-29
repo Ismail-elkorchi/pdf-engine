@@ -1,27 +1,11 @@
-## Summary
-- [ ] Describe what changed and why.
-- [ ] Confirm this description is historical, not aspirational.
+## What changed
 
-## User-visible changes
-- [ ] List externally observable behavior or interface changes.
-- [ ] If no user-visible changes, explicitly state `None`.
+Describe the problem and the implemented change.
 
-## Evidence
-- [ ] Paste commands run and summarize outputs.
-- [ ] If coverage is included, describe what missing-test signal it provided. Do not use a percentage by itself as proof.
-- [ ] Include:
-  - `npm run check`
-  - `npm run build`
-  - `npm run smoke:all`
-  - `npm pack --dry-run` when packaging changed
-  - `npx -y jsr publish --dry-run --allow-dirty` when JSR or publish workflows changed
+## User impact
 
-## Risk and rollback
-- [ ] List key risks introduced by this PR.
-- [ ] List rollback strategy.
+State the externally visible behavior, compatibility impact, or `None`.
 
-## Additional checklist
-- [ ] PR title is a Conventional Commit title.
-- [ ] Breaking change status evaluated.
-- [ ] Release and triage labels applied or intentionally left unchanged.
-- [ ] Docs are present tense and match current behavior.
+## Validation
+
+List the relevant automated and manual checks.

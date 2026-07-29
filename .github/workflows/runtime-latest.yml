@@ -46,8 +46,8 @@ jobs:
       - name: Runtime staleness policy
         run: npm run runtime:staleness
 
-      - name: Runtime smoke matrix
-        run: npm run smoke:all
+      - name: Runtime integration
+        run: npm run test:integration
 
       - name: Fail on tracked-file churn
         shell: bash

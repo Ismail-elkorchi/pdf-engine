@@ -9,11 +9,21 @@
   },
   "exclude": [
     ".github/**",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "coverage/**",
     "dist/**",
+    "eslint.config.mjs",
     "node_modules/**",
+    "out/**",
     "package-lock.json",
+    "package.json",
     "publish-artifacts/**",
     "reports/**",
-    "scripts/**"
+    "scripts/**",
+    "test/**",
+    "tools/**",
+    "tsconfig*.json"
   ]
 }

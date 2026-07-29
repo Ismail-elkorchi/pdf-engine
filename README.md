@@ -1,60 +1,81 @@
 # @ismail-elkorchi/pdf-engine
 
-`@ismail-elkorchi/pdf-engine` is the public product repository for a strict-TypeScript PDF engine targeting Node.js, Deno, Bun, and the web.
+`@ismail-elkorchi/pdf-engine` is a strict TypeScript PDF engine for Node.js,
+Deno, Bun, and browsers. It exposes staged, typed results for admission,
+parsing, observation, layout, knowledge projection, and rendering.
 
-## Repository Scope
+> This project is pre-release and is not yet published to npm or JSR. Its API
+> can change before the first release.
 
-This repository is intentionally limited to the buildable package surface:
+## Capabilities
 
-- `src/`: public TypeScript contracts and package entrypoints
-- `jsr/`: JSR entrypoints that stay aligned with the public TypeScript surface
-- package/build metadata
-- public README, changelog, contribution, and security docs
-- public GitHub automation for CI, security scanning, and tokenless publishing
+- recovers PDF objects, trailers, page trees, inherited resources, xref streams,
+  object streams, and supported stream filters
+- reports typed diagnostics and policy findings for malformed or risky documents
+- preserves page, object, stream, run, glyph, and citation provenance
+- observes native text, paths, images, marked content, color, transparency, and
+  geometry
+- derives conservative reading order, paragraphs, repeated boundaries, tables,
+  and form-like regions
+- projects deterministic Markdown, chunks, citations, tables, and forms
+- produces deterministic display lists, text indexes, selection geometry, SVG,
+  PNG, and render hashes
+- provides an opt-in OCR provider contract and a browser viewer
 
-The package goal is broader than a flat PDF parser. It is intended to become a security-first PDF engine that can admit, parse, observe, interpret, project, and render real-world PDFs without collapsing everything into one opaque extraction call.
+## Current Limits
 
-## Commands
+The parser, layout interpretation, knowledge projection, and renderer are still
+in development. Rendering is not pixel-compatible with mature native PDF
+renderers, layout and table recovery remain heuristic, and some PDF filters,
+fonts, graphics operations, and encrypted documents are unsupported. Do not
+treat this package as a drop-in replacement for a mature PDF SDK yet.
+
+OCR is disabled unless a caller supplies and enables a provider. PDF input must
+always be treated as untrusted.
+
+## Try It
+
+Until the first package release, build the repository locally:
 
 ```bash
-npm install
-npm run check
+npm ci
 npm run build
-npm run test:unit
-npm run test:contracts
-npm run test:property
-npm run test:coverage:node-lower
-npm run test:runtime:all
-npm run test:runtime:browser:compat
-npm run test:integration
 ```
 
-## Testing Signals
+```js
+import { readFile } from "node:fs/promises";
 
-`npm run test:coverage:node-lower` is a diagnostic signal, not a release or step-completion oracle.
+import { createPdfEngine } from "./dist/index.js";
 
-- use coverage to find missing lower-layer tests
-- do not treat a percentage alone as proof that a subsystem is correct
-- keep contract, property, runtime-parity, integration, and fuzz evidence alongside coverage when behavior changes
+const engine = createPdfEngine();
 
-## Status
+try {
+  const result = await engine.run({
+    source: {
+      bytes: new Uint8Array(await readFile("document.pdf")),
+      fileName: "document.pdf",
+    },
+  });
 
-The published surface is still early, but it is no longer contracts-only. This repository currently ships:
+  console.log(result.observation.value?.extractedText ?? "");
+  console.log(result.diagnostics);
+} finally {
+  await engine.dispose();
+}
+```
 
-- staged public contracts for admission, IR, observation, a first heuristic layout stage, and a first provenance-backed knowledge stage
-- a staged parser core that recovers indirect objects, xref/trailer structure, repair state, and page-resolution provenance
-- typed feature findings for risky and structural document features, including parsed-object evidence for actions, links, attachments, annotations, forms, outlines, signatures, and optional-content membership
-- inherited page-resource state, content-stream provenance for observed text, run-level anchor and font-size hints, and operator-ready stream bodies for unfiltered, `ASCIIHexDecode`, `ASCII85Decode`, `RunLengthDecode`, `FlateDecode` plus predictors, `LZWDecode`, and `CCITTFaxDecode` streams
-- content-stream-interpreter observation with page marks for text, paths, images, XObjects, clipping, and first marked-content plus visibility evidence, including normalized path paint-state facts, fill and stroke color-space evidence, fill and stroke color values, transparency evidence, form-XObject transparency-group evidence, and normalized local path segments with page-space bounding boxes
-- geometry-aware layout evidence for anchored reading order, paragraph-flow continuity, repeated header/footer separation, conservative table and form-like region inference, and inference records that keep heuristic structure distinct from observed text provenance
-- a first render stage that emits deterministic page display lists, page text indexes, selection models, render resource payloads, page-box-aware SVG imagery, deterministic PNG raster output, and stable SHA-256 render hashes from observed page marks while surfacing explicit render limits when page imagery remains partial
-- a first geometry-backed knowledge projection with stable chunks, citation anchors, deterministic Markdown text, interpreted-region table/form projection, and heuristic table projection that emits no table when layout evidence is too weak
-- an explicit opt-in OCR provider surface that can fuse OCR text into observation, layout, knowledge, and render stages while preserving page-level provenance, confidence decisions, and fail-closed diagnostics
-- a browser-only `./viewer` subpath that prefers canonical render artifacts in page view, falls back explicitly per page when imagery is unavailable, and keeps reader mode on staged layout blocks, cited knowledge chunks, projected tables, heading outlines, and staged-text search over existing pipeline results
-- runtime support claims and a no-op disposal contract for future worker or WASM backends
-- runtime smoke coverage for Node.js, Deno, Bun, and a real Chromium browser session, plus a browser bundle compatibility proof
-- required browser-compat proof on GitHub for Chromium, Firefox, and WebKit
-- a layered public verification surface with narrow unit, contract, property, Node lower-layer coverage reporting, runtime-parity, integration, and hostile-input fuzz tests
-- JSR/npm publication scaffolding and public GitHub automation
+The engine also exposes individual `admit`, `toIr`, `observe`, `toLayout`,
+`toKnowledge`, and `toRender` methods when a caller does not need the full
+pipeline.
 
-It does not yet ship a finished parser, a mature layout engine, mature structured knowledge projections, a pixel-accurate renderer, or benchmark-backed replacement claims. The current layout stage now exposes early geometry-aware reading flow and boundary separation, the current knowledge stage exposes deterministic Markdown and citation-backed chunks/tables, and the current render stage exposes deterministic text indexing, selection geometry, resource payload references, page imagery, and deterministic raster output. The browser viewer uses those render artifacts in page view with an explicit per-page fallback when imagery is unavailable. Render output still carries truthful partial-imagery limits.
+## Runtime Support
+
+The current development floors are Node.js 24, Deno 2.6.9, and Bun 1.3.9.
+Browser compatibility is checked in Chromium, Firefox, and WebKit.
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for setup and verification. Report
+security vulnerabilities using [SECURITY.md](SECURITY.md).
+
+Licensed under the [MIT License](LICENSE).
