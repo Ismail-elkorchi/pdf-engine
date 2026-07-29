@@ -634,7 +634,7 @@ function resolveFeatureAction(
       return policy.embeddedFiles;
     case "javascript-actions":
     case "launch-actions":
-      return actionKey ? policy[actionKey] : "report";
+      return "report";
     case "annotations":
     case "duplicate-text-layer":
     case "encryption":
