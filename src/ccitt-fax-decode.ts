@@ -634,7 +634,7 @@ class PdfCcittFaxDecoder {
     }
 
     if (this.endOfBlock && gotEol && this.encodedByteAlign) {
-      let code = this.lookBits(12);
+      const code = this.lookBits(12);
       if (code === 1) {
         this.eatBits(12);
         if (this.encoding > 0) {
@@ -643,7 +643,7 @@ class PdfCcittFaxDecoder {
         }
         if (this.encoding >= 0) {
           for (let index = 0; index < 4; index += 1) {
-            code = this.lookBits(12);
+            this.lookBits(12);
             this.eatBits(12);
             if (this.encoding > 0) {
               this.lookBits(1);
