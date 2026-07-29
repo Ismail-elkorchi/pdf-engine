@@ -21,4 +21,3 @@ This repository is the public product surface for `@ismail-elkorchi/pdf-engine`.
 - [README.md](README.md)
 - [CONTRIBUTING.md](CONTRIBUTING.md)
 - [SECURITY.md](SECURITY.md)
-- [CHANGELOG.md](CHANGELOG.md)
