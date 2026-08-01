@@ -2187,6 +2187,7 @@ function selectTableRegionBlocks(
     if (profile === "contract-award-table") {
       return looksLikeContractAwardHeaderText(text) ||
         looksLikeContractAwardDataBlock(text) ||
+        looksLikeContractAwardPartyBlock(text) ||
         looksLikeTableRowDescriptor(block, blockIndex, blocks);
     }
 
@@ -2281,6 +2282,17 @@ function looksLikeContractAwardDataBlock(text: string): boolean {
     /\b(?:completed|pending|ongoing|awarded|terminated)\b/iu.test(normalized) ||
     /[$€£¥]?\d{1,3}(?:,\d{3})+(?:\.\d{2})?\s*(?:ghs|usd|eur|gbp)?\b/iu.test(normalized) ||
     /\b(?:ghs|usd|eur|gbp)\b/iu.test(normalized);
+}
+
+function looksLikeContractAwardPartyBlock(text: string): boolean {
+  const normalized = normalizeBlockText(text);
+  if (normalized.length === 0 || normalized.length > 180 || /[.!?]$/u.test(normalized)) {
+    return false;
+  }
+
+  const startsWithProcurementMethod = /^(?:cqs|icb|ncb|qcbs|shopping|sss)\b/iu.test(normalized);
+  const namesOrganization = /\b(?:company|consult(?:ant|ing)?|engineering|enterprise|ghana|limited|ltd|motors|press|services|suppliers?)\b/iu.test(normalized);
+  return startsWithProcurementMethod && namesOrganization;
 }
 
 function inferFormLikeLayoutRegion(
