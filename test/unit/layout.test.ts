@@ -241,6 +241,35 @@ test("layout emits a provenance-backed table region from anchored header and row
   ));
 });
 
+test("layout keeps contract-award party cells inside the inferred table region", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-header-serial", 0, "Serial No. Contract Description", 72, 740),
+    run("run-header-party", 1, "Contractor/Suppliers /Consultant", 220, 740),
+    run("run-header-amount", 2, "Contract Amount", 360, 740),
+    run("run-header-remarks", 3, "Remarks", 470, 740),
+    run("run-description-1", 4, "24 Procurement of traffic engineering equipment", 72, 700),
+    run("run-party-1", 5, "ICB Example Systems Limited Box 40", 220, 680),
+    run("run-amount-1", 6, "38,192.83 GBP Completed", 360, 660),
+    run("run-description-2", 7, "23 Procurement of software licenses", 72, 620),
+    run("run-party-2", 8, "Shopping Sample Ghana Ltd Box 18", 220, 600),
+    run("run-amount-2", 9, "98,439.82 GHS Completed", 360, 580),
+    run("run-unrelated", 10, "Shopping guidance for the company appears in the appendix.", 72, 520),
+  ]));
+
+  const page = layout.pages[0];
+  const tableRegion = page?.regions?.find((region) => region.kind === "table");
+  const partyBlockIds = (page?.blocks ?? [])
+    .filter((block) => /Example Systems|Sample Ghana/u.test(block.text))
+    .map((block) => block.id);
+  const unrelatedBlock = page?.blocks.find((block) => block.text.startsWith("Shopping guidance"));
+
+  assert.ok(tableRegion);
+  assert.equal(partyBlockIds.length, 2);
+  assert.ok(partyBlockIds.every((blockId) => tableRegion.blockIds.includes(blockId)));
+  assert.ok(unrelatedBlock);
+  assert.ok(!tableRegion.blockIds.includes(unrelatedBlock.id));
+});
+
 test("layout classifies numbered section headings before table-row evidence", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-title", 0, "Dense Retrieval Paper", 72, 760, 16),
