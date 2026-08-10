@@ -228,6 +228,7 @@ for (const testCase of cases) {
 }
 
 clearInterval(progressTimer);
+await engine.dispose();
 
 process.stdout.write(
   `${JSON.stringify(
@@ -290,7 +291,7 @@ async function runCase(testCase) {
     caseHash: hashCase(testCase.bytes),
     byteLength: testCase.bytes.byteLength,
     durationMs: Number(durationMs.toFixed(3)),
-    admissionStatus: first.admission.status,
+    openStatus: first.open.status,
   };
 
   recordSlowCase(slowestCases, caseSummary, 10);
@@ -299,8 +300,8 @@ async function runCase(testCase) {
     recordSlowCase(familySummary.topSlowCases, caseSummary, 3);
   }
 
-  assertPipelineResult(testCase, first);
-  assertPipelineResult(testCase, second);
+  assertSessionResult(testCase, first);
+  assertSessionResult(testCase, second);
   assertRepeatedRunDeterminism(first, second);
 }
 
@@ -308,12 +309,7 @@ async function runEngineWithTimeout(testCase, runLabel) {
   let timeoutHandle;
   try {
     return await Promise.race([
-      engine.run({
-        source: {
-          bytes: testCase.bytes,
-          fileName: testCase.fileName,
-        },
-      }),
+      runSession(testCase),
       new Promise((_, reject) => {
         timeoutHandle = setTimeout(() => {
           reject(
@@ -327,6 +323,48 @@ async function runEngineWithTimeout(testCase, runLabel) {
   } finally {
     clearTimeout(timeoutHandle);
   }
+}
+
+async function runSession(testCase) {
+  const opened = await engine.open({
+    source: {
+      kind: "bytes",
+      bytes: testCase.bytes,
+      fileName: testCase.fileName,
+    },
+  });
+  const snapshot = {
+    open: summarizeResult(opened),
+    structure: null,
+    features: null,
+    observation: null,
+    layout: null,
+    knowledge: null,
+    search: null,
+  };
+  if (opened.status !== "completed" && opened.status !== "partial") {
+    return snapshot;
+  }
+  const document = opened.value;
+  try {
+    snapshot.structure = summarizeResult(await document.structure());
+    snapshot.features = summarizeResult(await document.features());
+    snapshot.observation = summarizeResult(await document.extract());
+    snapshot.layout = summarizeResult(await document.layout());
+    snapshot.knowledge = summarizeResult(await document.knowledge());
+    snapshot.search = summarizeResult(await document.search({ query: "A", limit: 20 }));
+    return snapshot;
+  } finally {
+    await document.dispose();
+  }
+}
+
+function summarizeResult(result) {
+  return {
+    status: result.status,
+    diagnostics: result.diagnostics,
+    ...((result.status === "completed" || result.status === "partial") ? { value: result.value } : {}),
+  };
 }
 
 function buildSimpleTextPdf({
@@ -516,94 +554,51 @@ function hashCase(bytes) {
   return createHash("sha256").update(bytes).digest("hex").slice(0, 16);
 }
 
-function assertPipelineResult(testCase, result) {
-  if (result.source.byteLength !== testCase.bytes.byteLength) {
-    throw new Error(`source byte length mismatch: ${result.source.byteLength} !== ${testCase.bytes.byteLength}`);
+function assertSessionResult(testCase, result) {
+  assertResultShape(result.open, "open");
+  if (result.open.status !== "completed" && result.open.status !== "partial") {
+    return;
   }
-
-  const stages = [
-    result.admission.stage,
-    result.ir.stage,
-    result.observation.stage,
-    result.layout.stage,
-    result.knowledge.stage,
-    result.render.stage,
-  ];
-  const expectedStages = ["admission", "ir", "observation", "layout", "knowledge", "render"];
-  if (JSON.stringify(stages) !== JSON.stringify(expectedStages)) {
-    throw new Error(`pipeline stages are out of contract order: ${JSON.stringify(stages)}`);
+  if (result.structure?.value?.byteLength !== testCase.bytes.byteLength) {
+    throw new Error("structure byte length does not match the source");
   }
-
-  if (!Array.isArray(result.diagnostics)) {
-    throw new Error("diagnostics must be an array");
-  }
-  for (const diagnostic of result.diagnostics) {
-    if (
-      typeof diagnostic !== "object" ||
-      diagnostic === null ||
-      typeof diagnostic.stage !== "string" ||
-      typeof diagnostic.code !== "string" ||
-      typeof diagnostic.message !== "string"
-    ) {
-      throw new Error("diagnostics must preserve the public array/object shape");
+  for (const [name, operation] of Object.entries(result)) {
+    if (name !== "open" && operation !== null) {
+      assertResultShape(operation, name);
     }
   }
-
-  const admissionValue = result.admission.value;
-  if (admissionValue && admissionValue.byteLength !== testCase.bytes.byteLength) {
-    throw new Error("admission byte length does not match source byte length");
-  }
-  if (admissionValue?.fileType === "unknown" && admissionValue.decision === "accepted") {
-    throw new Error("unknown files must not be accepted");
-  }
-
-  const irValue = result.ir.value;
-  if (irValue && irValue.byteLength !== testCase.bytes.byteLength) {
-    throw new Error("ir byte length does not match source byte length");
-  }
-
-  const observationValue = result.observation.value;
-  if (observationValue && !Array.isArray(observationValue.pages)) {
-    throw new Error("observation pages must be an array");
-  }
-
   if (testCase.expectsNativeText) {
-    const extractedText = observationValue?.extractedText?.trim() ?? "";
-    if (admissionValue?.decision === "accepted" && extractedText.length === 0) {
+    const extractedText = result.observation?.value?.extractedText?.trim() ?? "";
+    if (extractedText.length === 0) {
       throw new Error("searchable native-text case produced a silent empty success");
     }
   }
+  assertFiniteNumbers(result.structure?.value, "structure");
+  assertFiniteNumbers(result.features?.value, "features");
+  assertFiniteNumbers(result.observation?.value, "observation");
+  assertFiniteNumbers(result.layout?.value, "layout");
+  assertFiniteNumbers(result.knowledge?.value, "knowledge");
+  assertFiniteNumbers(result.search?.value, "search");
+}
 
-  assertFiniteNumbers(result.observation.value?.pages, "observation.pages");
-  assertFiniteNumbers(result.layout.value?.pages, "layout.pages");
-  assertFiniteNumbers(result.knowledge.value?.chunks, "knowledge.chunks");
-  assertFiniteNumbers(result.knowledge.value?.tables, "knowledge.tables");
-  assertFiniteNumbers(result.render.value?.pages, "render.pages");
+function assertResultShape(result, name) {
+  if (typeof result.status !== "string" || !Array.isArray(result.diagnostics)) {
+    throw new Error(`${name} does not preserve the discriminated result shape`);
+  }
+  for (const diagnostic of result.diagnostics) {
+    if (
+      typeof diagnostic !== "object" || diagnostic === null ||
+      typeof diagnostic.stage !== "string" || typeof diagnostic.code !== "string" ||
+      typeof diagnostic.message !== "string"
+    ) {
+      throw new Error(`${name} diagnostics do not preserve their public shape`);
+    }
+  }
 }
 
 function assertRepeatedRunDeterminism(first, second) {
-  if (first.admission.status !== second.admission.status) {
-    throw new Error("repeated runs changed the admission status");
-  }
-  if (first.ir.status !== second.ir.status) {
-    throw new Error("repeated runs changed the ir status");
-  }
-  if (first.observation.status !== second.observation.status) {
-    throw new Error("repeated runs changed the observation status");
-  }
-  if ((first.observation.value?.extractedText ?? "") !== (second.observation.value?.extractedText ?? "")) {
-    throw new Error("repeated runs changed extracted text");
-  }
-  if (JSON.stringify(first.diagnostics) !== JSON.stringify(second.diagnostics)) {
-    throw new Error("repeated runs changed diagnostics");
-  }
-
-  const firstRenderHash = first.render.value?.renderHash?.hex;
-  const secondRenderHash = second.render.value?.renderHash?.hex;
-  if (firstRenderHash !== undefined || secondRenderHash !== undefined) {
-    if (firstRenderHash !== secondRenderHash) {
-      throw new Error("render hashes changed across repeated runs");
-    }
+  if (JSON.stringify(first) !== JSON.stringify(second)) {
+    throw new Error("repeated sessions changed their semantic products");
   }
 }
 

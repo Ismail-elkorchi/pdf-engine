@@ -19,7 +19,6 @@ import type {
   PdfOcrPageResult,
   PdfOcrProvider,
   PdfOcrTextLine,
-  PdfRenderDocument,
 } from "./contracts.ts";
 
 const DEFAULT_OCR_LANGUAGES = ["eng"] as const;
@@ -57,32 +56,25 @@ export function resolveOcrOptions(
   defaults: PdfOcrOptions | undefined,
   overrides: PdfOcrOptions | undefined,
 ): PdfResolvedOcrOptions {
-  const mode = overrides?.mode ?? defaults?.mode ?? "off";
+  const mode = validateOcrMode(overrides?.mode ?? defaults?.mode ?? "off");
+  const provider = overrides?.provider ?? defaults?.provider;
+  if (
+    provider !== undefined &&
+    (typeof provider.name !== "string" || provider.name.trim().length === 0 || typeof provider.recognizePage !== "function")
+  ) {
+    throw new TypeError("OCR providers require a non-empty name and a recognizePage function.");
+  }
   return {
     mode,
-    ...(overrides?.provider !== undefined ? { provider: overrides.provider } : defaults?.provider !== undefined ? { provider: defaults.provider } : {}),
+    ...(provider !== undefined ? { provider } : {}),
     languages: normalizeOcrLanguages(overrides?.languages ?? defaults?.languages),
-    minConfidence: clampConfidence(overrides?.minConfidence ?? defaults?.minConfidence ?? DEFAULT_OCR_MIN_CONFIDENCE),
-    maxPages: Math.max(0, Math.floor(overrides?.maxPages ?? defaults?.maxPages ?? DEFAULT_OCR_MAX_PAGES)),
-    timeoutMilliseconds: Math.max(1, Math.floor(overrides?.timeoutMilliseconds ?? defaults?.timeoutMilliseconds ?? DEFAULT_OCR_TIMEOUT_MILLISECONDS)),
+    minConfidence: validateConfidence(overrides?.minConfidence ?? defaults?.minConfidence ?? DEFAULT_OCR_MIN_CONFIDENCE),
+    maxPages: validateNonNegativeInteger(overrides?.maxPages ?? defaults?.maxPages ?? DEFAULT_OCR_MAX_PAGES, "OCR maxPages"),
+    timeoutMilliseconds: validatePositiveInteger(
+      overrides?.timeoutMilliseconds ?? defaults?.timeoutMilliseconds ?? DEFAULT_OCR_TIMEOUT_MILLISECONDS,
+      "OCR timeoutMilliseconds",
+    ),
   };
-}
-
-export function collectOcrPageImages(render: PdfRenderDocument | undefined): ReadonlyMap<number, PdfOcrPageImage> {
-  const images = new Map<number, PdfOcrPageImage>();
-  for (const page of render?.pages ?? []) {
-    const raster = page.imagery?.raster;
-    if (raster === undefined) {
-      continue;
-    }
-    images.set(page.pageNumber, {
-      bytes: raster.bytes,
-      mimeType: raster.mimeType,
-      width: raster.width,
-      height: raster.height,
-    });
-  }
-  return images;
 }
 
 export async function applyOcrToObservation(input: PdfOcrFusionInput): Promise<PdfOcrFusionResult> {
@@ -188,15 +180,16 @@ export async function applyOcrToObservation(input: PdfOcrFusionInput): Promise<P
       continue;
     }
 
-    const acceptedLines = providerResult.lines
+    const normalizedLines = normalizeOcrLineBounds(providerResult.lines, pageImage);
+    const acceptedLines = normalizedLines
       .map((line, lineIndex) => ({ line, lineIndex }))
       .filter(({ line }) => shouldAcceptOcrLine(line, options.minConfidence));
-    const rejectedLineCount = Math.max(0, providerResult.lines.length - acceptedLines.length);
+    const rejectedLineCount = Math.max(0, normalizedLines.length - acceptedLines.length);
     if (acceptedLines.length === 0) {
       knownLimits.add("ocr-low-confidence");
       evidencePages.push(createPageEvidence(page.pageNumber, {
         providerName: options.provider.name,
-        decision: providerResult.lines.length === 0 ? "failed" : "low-confidence",
+        decision: normalizedLines.length === 0 ? "failed" : "low-confidence",
         reason: selectedPage.reason,
         acceptedLineCount: 0,
         rejectedLineCount,
@@ -240,6 +233,35 @@ export async function applyOcrToObservation(input: PdfOcrFusionInput): Promise<P
   return { observation, diagnostics };
 }
 
+function normalizeOcrLineBounds(
+  lines: readonly PdfOcrTextLine[],
+  pageImage: PdfOcrPageImage | undefined,
+): readonly PdfOcrTextLine[] {
+  if (
+    pageImage?.contentBounds === undefined || pageImage.width === undefined || pageImage.height === undefined ||
+    pageImage.width <= 0 || pageImage.height <= 0
+  ) {
+    return lines;
+  }
+  const imageWidth = pageImage.width;
+  const imageHeight = pageImage.height;
+  const target = pageImage.contentBounds;
+  return lines.map((line) => {
+    if (line.bbox === undefined) {
+      return line;
+    }
+    return {
+      ...line,
+      bbox: {
+        x: target.x + line.bbox.x / imageWidth * target.width,
+        y: target.y + (imageHeight - line.bbox.y - line.bbox.height) / imageHeight * target.height,
+        width: line.bbox.width / imageWidth * target.width,
+        height: line.bbox.height / imageHeight * target.height,
+      },
+    };
+  });
+}
+
 function selectOcrPages(
   pages: readonly PdfObservedPage[],
   mode: "auto" | "always",
@@ -272,9 +294,12 @@ async function recognizeWithTimeout(
       }, timeoutMilliseconds);
     });
     return await Promise.race([
-      provider.recognizePage({ ...input, signal: controller.signal }).catch((error: unknown) => ({
-        error: error instanceof Error ? error.message : String(error),
-      })),
+      Promise.resolve()
+        .then(async () => provider.recognizePage({ ...input, signal: controller.signal }))
+        .then((result) => validateOcrResult(result, input.pageNumber))
+        .catch((error: unknown) => ({
+          error: error instanceof Error ? error.message : String(error),
+        })),
       timeoutPromise,
     ]);
   } finally {
@@ -377,17 +402,88 @@ function createOcrDiagnostic(code: PdfKnownLimitCode, message: string): PdfDiagn
 }
 
 function normalizeOcrLanguages(languages: readonly string[] | undefined): readonly string[] {
-  const normalized = (languages ?? DEFAULT_OCR_LANGUAGES)
-    .map((language) => language.trim())
-    .filter((language) => language.length > 0);
-  return normalized.length === 0 ? DEFAULT_OCR_LANGUAGES : [...new Set(normalized)];
+  const candidate: unknown = languages ?? DEFAULT_OCR_LANGUAGES;
+  if (!Array.isArray(candidate)) {
+    throw new TypeError("OCR languages must be non-empty strings.");
+  }
+  const normalized: string[] = [];
+  for (const value of candidate as readonly unknown[]) {
+    if (typeof value !== "string" || value.trim().length === 0) {
+      throw new TypeError("OCR languages must be non-empty strings.");
+    }
+    normalized.push(value.trim());
+  }
+  if (normalized.length === 0) {
+    throw new TypeError("OCR languages must contain at least one language.");
+  }
+  return [...new Set(normalized)];
 }
 
-function clampConfidence(value: number): number {
-  if (!Number.isFinite(value)) {
-    return DEFAULT_OCR_MIN_CONFIDENCE;
+function validateOcrMode(value: PdfOcrOptions["mode"]): PdfResolvedOcrOptions["mode"] {
+  if (value !== "off" && value !== "auto" && value !== "always") {
+    throw new TypeError("OCR mode must be off, auto, or always.");
   }
-  return Math.max(0, Math.min(1, value));
+  return value;
+}
+
+function validateConfidence(value: number): number {
+  if (!Number.isFinite(value) || value < 0 || value > 1) {
+    throw new TypeError("OCR minConfidence must be a finite number from 0 through 1.");
+  }
+  return value;
+}
+
+function validateNonNegativeInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value < 0) {
+    throw new TypeError(`${name} must be a non-negative safe integer.`);
+  }
+  return value;
+}
+
+function validatePositiveInteger(value: number, name: string): number {
+  if (!Number.isSafeInteger(value) || value <= 0) {
+    throw new TypeError(`${name} must be a positive safe integer.`);
+  }
+  return value;
+}
+
+function validateOcrResult(result: PdfOcrPageResult, pageNumber: number): PdfOcrPageResult {
+  const candidate: unknown = result;
+  if (!isRecord(candidate) || candidate["pageNumber"] !== pageNumber || !Array.isArray(candidate["lines"])) {
+    throw new TypeError("OCR results must identify the requested page and contain a lines array.");
+  }
+  for (const line of candidate["lines"] as readonly unknown[]) {
+    if (
+      !isRecord(line) || typeof line["text"] !== "string" ||
+      !isConfidence(line["confidence"]) ||
+      (line["bbox"] !== undefined && !isFiniteBounds(line["bbox"]))
+    ) {
+      throw new TypeError("OCR lines must contain valid text, confidence, and finite non-negative bounds.");
+    }
+  }
+  return result;
+}
+
+function isConfidence(value: unknown): boolean {
+  return value === undefined || (typeof value === "number" && Number.isFinite(value) && value >= 0 && value <= 1);
+}
+
+function isFiniteBounds(value: unknown): boolean {
+  if (!isRecord(value)) {
+    return false;
+  }
+  const x = value["x"];
+  const y = value["y"];
+  const width = value["width"];
+  const height = value["height"];
+  return typeof x === "number" && Number.isFinite(x) &&
+    typeof y === "number" && Number.isFinite(y) &&
+    typeof width === "number" && Number.isFinite(width) && width >= 0 &&
+    typeof height === "number" && Number.isFinite(height) && height >= 0;
+}
+
+function isRecord(value: unknown): value is Readonly<Record<string, unknown>> {
+  return typeof value === "object" && value !== null;
 }
 
 function normalizeOcrText(text: string): string {

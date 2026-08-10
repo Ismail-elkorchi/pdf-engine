@@ -4,14 +4,9 @@
 export type PdfRuntimeKind = "node" | "deno" | "bun" | "web" | "unknown";
 
 /**
- * Pipeline stages that the public engine surface exposes today or plans to expose later.
+ * Processing stages used by public diagnostics and semantic products.
  */
-export type PdfStageKind = "admission" | "ir" | "observation" | "layout" | "knowledge" | "render";
-
-/**
- * Execution status for one pipeline stage.
- */
-export type PdfStageStatus = "completed" | "blocked" | "failed" | "partial" | "skipped";
+export type PdfStageKind = "admission" | "ir" | "observation" | "layout" | "knowledge";
 
 /**
  * Severity levels used by structured diagnostics.
@@ -19,29 +14,9 @@ export type PdfStageStatus = "completed" | "blocked" | "failed" | "partial" | "s
 export type PdfRiskLevel = "low" | "medium" | "high" | "critical";
 
 /**
- * Caller intent used to tune admission and downstream work.
- */
-export type PdfExecutionIntent = "admission" | "text" | "layout" | "knowledge" | "render";
-
-/**
  * Policy action applied when a risky or sensitive PDF feature is detected.
  */
 export type PdfPolicyAction = "allow" | "report" | "deny";
-
-/**
- * Repair strategy requested for malformed input.
- */
-export type PdfRepairMode = "never" | "safe" | "aggressive";
-
-/**
- * Password handling policy for encrypted documents.
- */
-export type PdfPasswordPolicy = "forbid" | "known-only" | "interactive";
-
-/**
- * High-level admission decision for an input document.
- */
-export type PdfAdmissionDecision = "accepted" | "rejected" | "password-required" | "unsupported";
 
 /**
  * Feature kinds that the engine can surface during admission and later parsing stages.
@@ -67,12 +42,12 @@ export type PdfFeatureKind =
 /**
  * Evidence path used to evaluate one feature finding.
  */
-export type PdfFeatureEvidenceSource = "object" | "scan";
+export type PdfFeatureEvidenceSource = "object";
 
 /**
  * Source of an observed text item.
  */
-export type PdfObservationOrigin = "native-text" | "heuristic-text" | "ocr" | "unknown";
+export type PdfObservationOrigin = "native-text" | "ocr";
 
 /**
  * Encoding form used by the text operand that produced an observed run or glyph.
@@ -103,24 +78,12 @@ export type PdfCrossReferenceKind = "classic" | "xref-stream" | "hybrid" | "unkn
 /**
  * Structural recovery state for the current parser pass.
  */
-export type PdfRepairState = "clean" | "recovered" | "recovery-required";
+export type PdfRepairState = "clean" | "recovered";
 
 /**
  * Stable implementation-limit codes that the current engine can expose without hiding known gaps.
  */
 export type PdfKnownLimitCode =
-  | "decryption-not-implemented"
-  | "font-unicode-mapping-not-implemented"
-  | "literal-font-encoding-not-implemented"
-  | "streams-not-decoded"
-  | "unsupported-stream-filters"
-  | "stream-decoding-failed"
-  | "xref-stream-entries-not-decoded"
-  | "object-streams-not-expanded"
-  | "resource-inheritance-unresolved"
-  | "text-decoding-heuristic"
-  | "paragraph-break-heuristic"
-  | "page-order-heuristic"
   | "layout-block-heuristic"
   | "layout-role-heuristic"
   | "layout-reading-order-heuristic"
@@ -132,9 +95,7 @@ export type PdfKnownLimitCode =
   | "ocr-provider-unavailable"
   | "ocr-timeout"
   | "ocr-low-confidence"
-  | "ocr-fusion-heuristic"
-  | "render-imagery-partial"
-  | "render-resource-payloads-partial";
+  | "ocr-fusion-heuristic";
 
 /**
  * Decode state for one recovered stream object.
@@ -144,7 +105,7 @@ export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter
 /**
  * Observation strategy used to produce the current text and page-mark evidence.
  */
-export type PdfObservationStrategy = "content-stream-interpreter" | "heuristic-literal-scan";
+export type PdfObservationStrategy = "content-stream-interpreter";
 
 /**
  * OCR execution mode. OCR is disabled by default and must be requested explicitly.
@@ -179,6 +140,8 @@ export interface PdfOcrPageImage {
   readonly width?: number;
   /** Image height in pixels when known. */
   readonly height?: number;
+  /** Page-space bounds represented by the image, when the source image is a placed page image. */
+  readonly contentBounds?: PdfBoundingBox;
 }
 
 /**
@@ -195,7 +158,7 @@ export interface PdfOcrPageInput {
   readonly reason: PdfOcrPageReason;
   /** Requested language identifiers. */
   readonly languages: readonly string[];
-  /** Optional page image supplied by the pipeline or caller. */
+  /** Optional page image supplied by the document session. */
   readonly pageImage?: PdfOcrPageImage;
   /** Abort signal for provider work when supported. */
   readonly signal?: AbortSignal;
@@ -210,6 +173,7 @@ export interface PdfOcrTextLine {
   /** Provider confidence in the range 0..1 when known. */
   readonly confidence?: number;
   /** Approximate line bounds in page coordinates when known. */
+  /** Bounds in page-image pixels with a top-left origin. */
   readonly bbox?: PdfBoundingBox;
   /** Language identifier when known. */
   readonly language?: string;
@@ -244,7 +208,7 @@ export interface PdfOcrProvider {
 }
 
 /**
- * OCR options accepted by pipeline requests and engine defaults.
+ * OCR options accepted by document-open requests and engine defaults.
  */
 export interface PdfOcrOptions {
   /** OCR mode. Defaults to `off`. */
@@ -319,82 +283,6 @@ export type PdfPageResolutionMethod = "page-tree" | "recovered-page-order" | "st
  * Where a page-level value came from after page-tree inheritance was resolved.
  */
 export type PdfPageValueOrigin = "direct" | "inherited";
-
-/**
- * Caller-provided resource limits for one request.
- */
-export interface PdfResourceBudget {
-  /** Maximum accepted input size in bytes. */
-  readonly maxBytes?: number;
-  /** Maximum accepted page count estimate. */
-  readonly maxPages?: number;
-  /** Maximum accepted indirect-object count estimate. */
-  readonly maxObjects?: number;
-  /** Maximum intended wall-clock budget in milliseconds. */
-  readonly maxMilliseconds?: number;
-  /** Maximum recursion depth allowed for recursive parsing work. */
-  readonly maxRecursionDepth?: number;
-  /** Maximum byte count scanned for parser fallback heuristics. */
-  readonly maxScanBytes?: number;
-}
-
-/**
- * Fully normalized resource limits after defaults and overrides are merged.
- */
-export interface PdfNormalizedResourceBudget {
-  /** Maximum accepted input size in bytes. */
-  readonly maxBytes: number;
-  /** Maximum accepted page count estimate. */
-  readonly maxPages: number;
-  /** Maximum accepted indirect-object count estimate. */
-  readonly maxObjects: number;
-  /** Maximum intended wall-clock budget in milliseconds. */
-  readonly maxMilliseconds: number;
-  /** Maximum recursion depth allowed for recursive parsing work. */
-  readonly maxRecursionDepth: number;
-  /** Maximum byte count scanned for parser fallback heuristics. */
-  readonly maxScanBytes: number;
-}
-
-/**
- * Admission policy controls for risky features, repair behavior, passwords, and resource budgets.
- */
-export interface PdfAdmissionPolicy {
-  /** Action to take when JavaScript actions are detected. */
-  readonly javascriptActions?: PdfPolicyAction;
-  /** Action to take when launch actions are detected. */
-  readonly launchActions?: PdfPolicyAction;
-  /** Action to take when embedded files are detected. */
-  readonly embeddedFiles?: PdfPolicyAction;
-  /** Repair strategy for malformed input. */
-  readonly repairMode?: PdfRepairMode;
-  /** Password handling policy for encrypted documents. */
-  readonly passwordPolicy?: PdfPasswordPolicy;
-  /** Whether encrypted metadata may still be inspected when allowed by the file. */
-  readonly allowEncryptedMetadata?: boolean;
-  /** Optional resource limits for this request. */
-  readonly resourceBudget?: PdfResourceBudget;
-}
-
-/**
- * Admission policy after defaults and overrides are merged into concrete values.
- */
-export interface PdfNormalizedAdmissionPolicy {
-  /** Action to take when JavaScript actions are detected. */
-  readonly javascriptActions: PdfPolicyAction;
-  /** Action to take when launch actions are detected. */
-  readonly launchActions: PdfPolicyAction;
-  /** Action to take when embedded files are detected. */
-  readonly embeddedFiles: PdfPolicyAction;
-  /** Repair strategy for malformed input. */
-  readonly repairMode: PdfRepairMode;
-  /** Password handling policy for encrypted documents. */
-  readonly passwordPolicy: PdfPasswordPolicy;
-  /** Whether encrypted metadata may still be inspected when allowed by the file. */
-  readonly allowEncryptedMetadata: boolean;
-  /** Concrete resource limits used for the request. */
-  readonly resourceBudget: PdfNormalizedResourceBudget;
-}
 
 /**
  * Raw document input accepted by the engine.
@@ -566,22 +454,6 @@ export interface PdfRuntimeCapabilities {
   readonly webWorker: boolean;
   /** Whether a high-resolution timer is available. */
   readonly highResolutionTime: boolean;
-}
-
-/**
- * Identity metadata for the engine implementation that produced a result.
- */
-export interface PdfEngineIdentity {
-  /** Public package name or engine identifier. */
-  readonly name: string;
-  /** Public engine version string. */
-  readonly version: string;
-  /** Implementation mode for the current engine. */
-  readonly mode: "core";
-  /** Runtimes that the public package currently claims to support. */
-  readonly supportedRuntimes: readonly PdfRuntimeKind[];
-  /** Stages that the current implementation actually exposes. */
-  readonly supportedStages: readonly PdfStageKind[];
 }
 
 /**
@@ -760,129 +632,6 @@ export type PdfFeatureFinding =
   | PdfSignatureFinding
   | PdfOptionalContentFinding
   | PdfObjectFeatureFinding;
-
-/**
- * Password request metadata passed to a caller-supplied password provider.
- */
-export interface PdfPasswordChallenge {
-  /** Reason the engine is asking for a password. */
-  readonly reason: "document-encrypted";
-  /** Optional source file name. */
-  readonly fileName?: string;
-  /** Number of password attempts already made for this request. */
-  readonly attempts: number;
-}
-
-/**
- * Callback used to supply a password for an encrypted document.
- */
-export type PdfPasswordProvider = (challenge: PdfPasswordChallenge) => Promise<string | null> | string | null;
-
-/**
- * Result of the admission stage.
- */
-export interface PdfAdmissionArtifact {
-  /** Final admission decision. */
-  readonly decision: PdfAdmissionDecision;
-  /** File type classification produced by admission. */
-  readonly fileType: "pdf" | "unknown";
-  /** Optional source file name. */
-  readonly fileName?: string;
-  /** Source length in bytes. */
-  readonly byteLength: number;
-  /** Parsed or inferred PDF version when known. */
-  readonly pdfVersion?: string;
-  /** Estimated page count when the current implementation can infer it. */
-  readonly pageCountEstimate?: number;
-  /** Estimated indirect-object count when the current implementation can infer it. */
-  readonly objectCountEstimate?: number;
-  /** `startxref` offset when the current implementation can recover it. */
-  readonly startXrefOffset?: number;
-  /** Whether the document appears to be encrypted. */
-  readonly isEncrypted: boolean;
-  /** Structural recovery state for the current parser pass. */
-  readonly repairState: PdfRepairState;
-  /** Structural coverage reached by the current parser pass. */
-  readonly parseCoverage: PdfParseCoverage;
-  /** Typed feature findings captured during admission. */
-  readonly featureFindings: readonly PdfFeatureFinding[];
-  /** Fully normalized policy used for the request. */
-  readonly policy: PdfNormalizedAdmissionPolicy;
-  /** Known implementation limits that materially affect this admission result. */
-  readonly knownLimits: readonly PdfKnownLimitCode[];
-}
-
-/**
- * Per-page summary in the current IR implementation.
- */
-export interface PdfIrPageShell {
-  /** One-based page number. */
-  readonly pageNumber: number;
-  /** How page ordering for this page summary was resolved. */
-  readonly resolutionMethod: PdfPageResolutionMethod;
-  /** Page object reference when the page tree could be traversed. */
-  readonly pageRef?: PdfObjectRef;
-  /** Number of content streams mapped to this page summary. */
-  readonly contentStreamCount: number;
-  /** Content stream references mapped to this page summary. */
-  readonly contentStreamRefs: readonly PdfObjectRef[];
-  /** Number of `/Resources` hits mapped to this page summary. */
-  readonly resourceCount: number;
-  /** Whether the current resource mapping came from the page or an inherited ancestor. */
-  readonly resourceOrigin?: PdfPageValueOrigin;
-  /** Resource dictionary reference when present and indirect. */
-  readonly resourceRef?: PdfObjectRef;
-  /** Number of annotations mapped to this page summary. */
-  readonly annotationCount: number;
-  /** Annotation references mapped to this page summary. */
-  readonly annotationRefs: readonly PdfObjectRef[];
-}
-
-/**
- * Current parser-stage intermediate representation for a document.
- */
-export interface PdfIrDocument {
-  /** IR implementation kind. */
-  readonly kind: "pdf-ir";
-  /** Parsed or inferred PDF version when known. */
-  readonly pdfVersion?: string;
-  /** Source length in bytes. */
-  readonly byteLength: number;
-  /** Estimated page count when known. */
-  readonly pageCountEstimate?: number;
-  /** Estimated indirect-object count when known. */
-  readonly objectCountEstimate?: number;
-  /** `startxref` offset when the current implementation can recover it. */
-  readonly startXrefOffset?: number;
-  /** Cross-reference organization detected by the current parser. */
-  readonly crossReferenceKind: PdfCrossReferenceKind;
-  /** Whether the document appears to be encrypted. */
-  readonly isEncrypted: boolean;
-  /** Structural recovery state for the current parser pass. */
-  readonly repairState: PdfRepairState;
-  /** Structural coverage reached by the current parser pass. */
-  readonly parseCoverage: PdfParseCoverage;
-  /** Cross-reference sections recovered by the current parser pass. */
-  readonly crossReferenceSections: readonly PdfCrossReferenceSection[];
-  /** Trailer summary recovered by the current parser pass. */
-  readonly trailer?: PdfTrailerShell;
-  /** Indirect object summaries recovered by the current parser pass. */
-  readonly indirectObjects: readonly PdfIndirectObjectShell[];
-  /** Typed feature findings resolved during admission and IR. */
-  readonly featureFindings: readonly PdfFeatureFinding[];
-  /** Per-page parser summaries. */
-  readonly pages: readonly PdfIrPageShell[];
-  /** Whether the parser recovered at least one operator-ready stream body. */
-  readonly decodedStreams: boolean;
-  /** Whether object streams were expanded into member objects. */
-  readonly expandedObjectStreams: boolean;
-  /** Whether xref stream entries were decoded into a full index. */
-  readonly decodedXrefStreamEntries: boolean;
-  /** Whether inherited page resources and defaults were resolved. */
-  readonly resolvedInheritedPageState: boolean;
-  /** Known implementation limits that materially affect this IR. */
-  readonly knownLimits: readonly PdfKnownLimitCode[];
-}
 
 /**
  * Observed glyph-level text evidence.
@@ -1606,7 +1355,7 @@ export interface PdfKnowledgeCitation {
 }
 
 /**
- * One chunk projected from the layout stage for downstream agent use.
+ * One chunk projected from layout for downstream retrieval use.
  */
 export interface PdfKnowledgeChunk {
   /** Stable chunk identifier within the knowledge result. */
@@ -1721,7 +1470,7 @@ export interface PdfKnowledgeDocument {
   readonly kind: "pdf-knowledge";
   /** Knowledge strategy used by the current implementation. */
   readonly strategy: PdfKnowledgeStrategy;
-  /** Chunk projections for downstream agent use. */
+  /** Chunk projections for downstream retrieval use. */
   readonly chunks: readonly PdfKnowledgeChunk[];
   /** Table projections when the current evidence is sufficient. */
   readonly tables: readonly PdfKnowledgeTable[];
@@ -1733,693 +1482,4 @@ export interface PdfKnowledgeDocument {
   readonly extractedText: string;
   /** Known implementation limits that materially affect this knowledge result. */
   readonly knownLimits: readonly PdfKnownLimitCode[];
-}
-
-/**
- * First render-stage strategy used by the current implementation.
- */
-export type PdfRenderStrategy = "observed-display-list";
-
-/**
- * Stable hash attached to a render artifact.
- */
-export interface PdfRenderHash {
-  /** Hash algorithm used for the current render artifact. */
-  readonly algorithm: "sha-256";
-  /** Lowercase hexadecimal digest. */
-  readonly hex: string;
-}
-
-/**
- * One text span indexed from the render display list.
- */
-export interface PdfRenderTextSpan {
-  /** Stable text-span identifier within the render page. */
-  readonly id: string;
-  /** Zero-based content-order position for the source text command. */
-  readonly contentOrder: number;
-  /** Text payload for the span. */
-  readonly text: string;
-  /** Source glyph identifiers. */
-  readonly glyphIds: readonly string[];
-  /** Source run identifier when known. */
-  readonly runId?: string;
-  /** Bounding box when the current implementation can recover one. */
-  readonly bbox?: PdfBoundingBox;
-  /** Approximate anchor when the current implementation can recover one. */
-  readonly anchor?: PdfPoint;
-  /** Active transform when the current implementation can recover one. */
-  readonly transform?: PdfTransformMatrix;
-  /** Writing mode when known. */
-  readonly writingMode?: PdfWritingMode;
-  /** Whether this span starts on a new line. */
-  readonly startsNewLine?: boolean;
-}
-
-/**
- * Deterministic text index for one rendered page.
- */
-export interface PdfRenderTextIndex {
-  /** Flattened page text in render content order. */
-  readonly text: string;
-  /** Ordered text spans recovered from render text commands. */
-  readonly spans: readonly PdfRenderTextSpan[];
-}
-
-/**
- * One selection-focused text unit for one rendered page.
- */
-export interface PdfRenderSelectionUnit {
-  /** Stable selection-unit identifier within the render page. */
-  readonly id: string;
-  /** Linked render text-span identifier. */
-  readonly textSpanId: string;
-  /** Text payload for the selection unit. */
-  readonly text: string;
-  /** Source glyph identifiers. */
-  readonly glyphIds: readonly string[];
-  /** Bounding box when the current implementation can recover one. */
-  readonly bbox?: PdfBoundingBox;
-  /** Approximate anchor when the current implementation can recover one. */
-  readonly anchor?: PdfPoint;
-  /** Writing mode when known. */
-  readonly writingMode?: PdfWritingMode;
-}
-
-/**
- * Deterministic selection model for one rendered page.
- */
-export interface PdfRenderSelectionModel {
-  /** Ordered selection units for the page. */
-  readonly units: readonly PdfRenderSelectionUnit[];
-}
-
-/**
- * Availability state for one render resource payload.
- */
-export type PdfRenderResourcePayloadAvailability = "available" | "unavailable";
-
-/**
- * Byte-source kind for one render resource payload.
- */
-export type PdfRenderResourcePayloadByteSource = "decoded-stream";
-
-/**
- * Embedded font-program format when the current implementation can identify it.
- */
-export type PdfRenderFontProgramFormat = "type1" | "truetype" | "cff" | "opentype" | "unknown";
-
-/**
- * Truthful reason why a render resource payload is not available yet.
- */
-export type PdfRenderResourcePayloadUnavailableReason =
-  | "missing-font-descriptor"
-  | "missing-embedded-font-program"
-  | "missing-decoded-font-program"
-  | "missing-image-stream"
-  | "missing-decoded-image-stream"
-  | "xobject-not-direct-rasterizable"
-  | "missing-decoded-xobject-stream";
-
-/**
- * Base fields shared by every render resource payload.
- */
-export interface PdfRenderResourcePayloadBase {
-  /** Stable payload identifier within the render document. */
-  readonly id: string;
-  /** Whether the current payload bytes are available. */
-  readonly availability: PdfRenderResourcePayloadAvailability;
-  /** One-based page numbers that reference this payload. */
-  readonly pageNumbers: readonly number[];
-  /** Resource names that pointed at this payload when known. */
-  readonly resourceNames: readonly string[];
-  /** Stream decode state for the payload-bearing object when known. */
-  readonly streamDecodeState?: PdfStreamDecodeState;
-  /** Declared stream filters for the payload-bearing object when known. */
-  readonly streamFilterNames?: readonly string[];
-  /** Byte source when payload bytes are available. */
-  readonly byteSource?: PdfRenderResourcePayloadByteSource;
-  /** Truthful unavailable reason when the payload bytes are not available. */
-  readonly unavailableReason?: PdfRenderResourcePayloadUnavailableReason;
-}
-
-/**
- * One render payload for a referenced font resource.
- */
-export interface PdfRenderFontPayload extends PdfRenderResourcePayloadBase {
-  /** Font payload kind. */
-  readonly kind: "font";
-  /** Font object reference used by render text commands. */
-  readonly fontRef: PdfObjectRef;
-  /** Font subtype when known. */
-  readonly fontSubtypeName?: string;
-  /** Base-font or descriptor font name when known. */
-  readonly baseFontName?: string;
-  /** Embedded font-program object reference when known. */
-  readonly fontProgramRef?: PdfObjectRef;
-  /** Embedded font-program format when known. */
-  readonly fontProgramFormat?: PdfRenderFontProgramFormat;
-  /** Embedded font-program bytes when available. */
-  readonly bytes?: Uint8Array;
-}
-
-/**
- * One render payload for a referenced image XObject.
- */
-export interface PdfRenderImagePayload extends PdfRenderResourcePayloadBase {
-  /** Image payload kind. */
-  readonly kind: "image";
-  /** Image XObject reference used by render image commands. */
-  readonly xObjectRef: PdfObjectRef;
-  /** Image width when known. */
-  readonly width?: number;
-  /** Image height when known. */
-  readonly height?: number;
-  /** Raw `ColorSpace` value when known. */
-  readonly colorSpaceValue?: string;
-  /** Raw `BitsPerComponent` value when known. */
-  readonly bitsPerComponent?: number;
-  /** Whether the XObject is a one-bit image mask stencil. */
-  readonly imageMask?: boolean;
-  /** Direct numeric `Decode` array values when known. */
-  readonly decodeValues?: readonly number[];
-  /** Image stream bytes when available. */
-  readonly bytes?: Uint8Array;
-}
-
-/**
- * One render payload for a directly rasterizable XObject.
- */
-export interface PdfRenderXObjectPayload extends PdfRenderResourcePayloadBase {
-  /** XObject payload kind. */
-  readonly kind: "xobject";
-  /** XObject reference used by render XObject commands. */
-  readonly xObjectRef: PdfObjectRef;
-  /** XObject subtype when known. */
-  readonly subtypeName?: string;
-  /** Transparency-group evidence when the XObject declares one. */
-  readonly transparencyGroup?: PdfObservedTransparencyGroup;
-  /** XObject stream bytes when available. */
-  readonly bytes?: Uint8Array;
-}
-
-/**
- * Canonical render resource-payload union.
- */
-export type PdfRenderResourcePayload =
-  | PdfRenderFontPayload
-  | PdfRenderImagePayload
-  | PdfRenderXObjectPayload;
-
-/**
- * Base fields shared by every display-list command.
- */
-export interface PdfDisplayCommandBase {
-  /** Stable command identifier within the render result. */
-  readonly id: string;
-  /** Command kind. */
-  readonly kind: PdfObservedMark["kind"];
-  /** Zero-based content-order position for the command. */
-  readonly contentOrder: number;
-  /** Optional originating object reference. */
-  readonly objectRef?: PdfObjectRef;
-  /** Enclosing marked-content identifier when known. */
-  readonly markedContentId?: string;
-  /** Bounding box when the current implementation can recover one. */
-  readonly bbox?: PdfBoundingBox;
-  /** Active transform when the current implementation can recover one. */
-  readonly transform?: PdfTransformMatrix;
-  /** Visibility state when the current implementation can recover one. */
-  readonly visibilityState?: PdfVisibilityState;
-}
-
-/**
- * Display-list text command derived from an observed text mark.
- */
-export interface PdfDisplayTextCommand extends PdfDisplayCommandBase {
-  /** Text command kind. */
-  readonly kind: "text";
-  /** Source run identifier. */
-  readonly runId: string;
-  /** Source glyph identifiers. */
-  readonly glyphIds: readonly string[];
-  /** Text payload. */
-  readonly text: string;
-  /** Observation origin. */
-  readonly origin: PdfObservationOrigin;
-  /** Font object reference when known. */
-  readonly fontRef?: PdfObjectRef;
-  /** Linked render font-payload identifier when known. */
-  readonly fontPayloadId?: string;
-  /** Encoding form used to decode the text when known. */
-  readonly textEncodingKind?: PdfTextEncodingKind;
-  /** Unicode mapping path when known. */
-  readonly unicodeMappingSource?: PdfUnicodeMappingSource;
-  /** Writing mode when known. */
-  readonly writingMode?: PdfWritingMode;
-  /** Marked-content classification when known. */
-  readonly markedContentKind?: PdfMarkedContentKind;
-  /** Preferred ActualText payload when known. */
-  readonly actualText?: string;
-  /** Approximate text anchor when known. */
-  readonly anchor?: PdfPoint;
-  /** Active font size when known. */
-  readonly fontSize?: number;
-  /** Whether the text started on a new line. */
-  readonly startsNewLine?: boolean;
-  /** Whether the current command is a hidden-text candidate. */
-  readonly hiddenTextCandidate?: boolean;
-  /** Whether the current command is a duplicate-layer candidate. */
-  readonly duplicateLayerCandidate?: boolean;
-}
-
-/**
- * Display-list path command derived from an observed path mark.
- */
-export interface PdfDisplayPathCommand extends PdfDisplayCommandBase {
-  /** Path command kind. */
-  readonly kind: "path";
-  /** Painting operator that finalized the path. */
-  readonly paintOperator: PdfObservedPathPaintOperator;
-  /** Normalized paint-state facts active when this path was painted. */
-  readonly paintState: PdfObservedPaintState;
-  /** Normalized fill and stroke color facts active when this path was painted. */
-  readonly colorState: PdfObservedColorState;
-  /** Normalized transparency facts active when this path was painted. */
-  readonly transparencyState: PdfObservedTransparencyState;
-  /** Normalized path segments in local path space. */
-  readonly segments: readonly PdfObservedPathSegment[];
-  /** Number of points considered while recovering the path. */
-  readonly pointCount: number;
-  /** Whether the path was explicitly closed. */
-  readonly closed: boolean;
-}
-
-/**
- * Display-list XObject command derived from an observed XObject mark.
- */
-export interface PdfDisplayXObjectCommand extends PdfDisplayCommandBase {
-  /** XObject command kind. */
-  readonly kind: "xobject";
-  /** Resource name used by the `Do` operator. */
-  readonly resourceName: string;
-  /** XObject reference when known. */
-  readonly xObjectRef?: PdfObjectRef;
-  /** Linked render XObject-payload identifier when known. */
-  readonly xObjectPayloadId?: string;
-  /** XObject subtype when known. */
-  readonly subtypeName?: string;
-  /** Transparency-group evidence when the XObject declares one. */
-  readonly transparencyGroup?: PdfObservedTransparencyGroup;
-}
-
-/**
- * Display-list image command derived from an observed image mark.
- */
-export interface PdfDisplayImageCommand extends PdfDisplayCommandBase {
-  /** Image command kind. */
-  readonly kind: "image";
-  /** Resource name used by the `Do` operator. */
-  readonly resourceName: string;
-  /** Image XObject reference when known. */
-  readonly xObjectRef?: PdfObjectRef;
-  /** Linked render image-payload identifier when known. */
-  readonly imagePayloadId?: string;
-  /** Image width when known. */
-  readonly width?: number;
-  /** Image height when known. */
-  readonly height?: number;
-  /** Active color state at the image invocation site. Required for image-mask stencils. */
-  readonly colorState?: PdfObservedColorState;
-  /** Active transparency state at the image invocation site. Required for image-mask stencils. */
-  readonly transparencyState?: PdfObservedTransparencyState;
-}
-
-/**
- * Display-list clip command derived from an observed clip mark.
- */
-export interface PdfDisplayClipCommand extends PdfDisplayCommandBase {
-  /** Clip command kind. */
-  readonly kind: "clip";
-  /** Clip operator that established the clipping path. */
-  readonly clipOperator: PdfObservedClipOperator;
-}
-
-/**
- * Display-list marked-content command derived from an observed marked-content mark.
- */
-export interface PdfDisplayMarkedContentCommand extends PdfDisplayCommandBase {
-  /** Marked-content command kind. */
-  readonly kind: "marked-content";
-  /** Original tag name without the leading slash. */
-  readonly tagName: string;
-  /** Broad marked-content classification. */
-  readonly markedContentKind: PdfMarkedContentKind;
-  /** Nesting depth when this marked-content sequence started. */
-  readonly depth: number;
-  /** Properties resource name used by `BDC` when known. */
-  readonly propertyName?: string;
-  /** Optional-content object reference when known. */
-  readonly optionalContentRef?: PdfObjectRef;
-  /** Marked-content identifier when known. */
-  readonly mcid?: number;
-  /** Preferred ActualText payload when known. */
-  readonly actualText?: string;
-  /** Content-order position where this sequence closed when known. */
-  readonly closedContentOrder?: number;
-}
-
-/**
- * Canonical display-list command union.
- */
-export type PdfDisplayCommand =
-  | PdfDisplayTextCommand
-  | PdfDisplayPathCommand
-  | PdfDisplayXObjectCommand
-  | PdfDisplayImageCommand
-  | PdfDisplayClipCommand
-  | PdfDisplayMarkedContentCommand;
-
-/**
- * Display list emitted for one rendered page.
- */
-export interface PdfDisplayList {
-  /** Commands in content order. */
-  readonly commands: readonly PdfDisplayCommand[];
-}
-
-/**
- * Deterministic SVG page imagery emitted by the render stage.
- */
-export interface PdfRenderPageImageSvg {
-  /** SVG mime type. */
-  readonly mimeType: "image/svg+xml";
-  /** Deterministic SVG markup for the page imagery. */
-  readonly markup: string;
-  /** Output width in page-imagery pixels. */
-  readonly width: number;
-  /** Output height in page-imagery pixels. */
-  readonly height: number;
-}
-
-/**
- * Deterministic raster page imagery emitted by the render stage.
- */
-export interface PdfRenderPageImageRaster {
-  /** Raster mime type. */
-  readonly mimeType: "image/png";
-  /** Deterministic PNG bytes for the page imagery. */
-  readonly bytes: Uint8Array;
-  /** Output width in pixels. */
-  readonly width: number;
-  /** Output height in pixels. */
-  readonly height: number;
-}
-
-/**
- * Page imagery emitted by the render stage when available.
- */
-export interface PdfRenderPageImagery {
-  /** Deterministic SVG page imagery when available. */
-  readonly svg?: PdfRenderPageImageSvg;
-  /** Deterministic raster page imagery when available. */
-  readonly raster?: PdfRenderPageImageRaster;
-}
-
-/**
- * One rendered page in the current render result.
- */
-export interface PdfRenderPage {
-  /** One-based page number. */
-  readonly pageNumber: number;
-  /** How page ordering for this render page was resolved. */
-  readonly resolutionMethod: PdfPageResolutionMethod;
-  /** Page object reference when known. */
-  readonly pageRef?: PdfObjectRef;
-  /** Page box used to scope render imagery when known. */
-  readonly pageBox?: PdfBoundingBox;
-  /** Deterministic display-list artifact for the page. */
-  readonly displayList: PdfDisplayList;
-  /** Deterministic text index derived from render text commands. */
-  readonly textIndex: PdfRenderTextIndex;
-  /** Deterministic selection model derived from render text commands. */
-  readonly selectionModel: PdfRenderSelectionModel;
-  /** Deterministic page imagery when the current implementation can emit it. */
-  readonly imagery?: PdfRenderPageImagery;
-  /** Stable hash for the current page render artifact. */
-  readonly renderHash: PdfRenderHash;
-}
-
-/**
- * Current render-stage result for a document.
- */
-export interface PdfRenderDocument {
-  /** Render implementation kind. */
-  readonly kind: "pdf-render";
-  /** Render strategy used by the current implementation. */
-  readonly strategy: PdfRenderStrategy;
-  /** Rendered pages in source order. */
-  readonly pages: readonly PdfRenderPage[];
-  /** Resource payloads needed for later render imagery or raster work. */
-  readonly resourcePayloads: readonly PdfRenderResourcePayload[];
-  /** Stable hash for the current document render artifact. */
-  readonly renderHash: PdfRenderHash;
-  /** Known implementation limits that materially affect this render result. */
-  readonly knownLimits: readonly PdfKnownLimitCode[];
-}
-
-/**
- * Generic result wrapper for one pipeline stage.
- *
- * @typeParam T Value emitted by the stage when available.
- */
-export interface PdfStageResult<T> {
-  /** Stage that produced the result. */
-  readonly stage: PdfStageKind;
-  /** Stage execution status. */
-  readonly status: PdfStageStatus;
-  /** Diagnostics emitted by the stage. */
-  readonly diagnostics: readonly PdfDiagnostic[];
-  /** Stage value when the stage completed or produced a partial result. */
-  readonly value?: T;
-}
-
-/**
- * Request accepted by the admission stage.
- */
-export interface PdfAdmissionRequest {
-  /** Source document. */
-  readonly source: PdfDocumentSource;
-  /** Optional caller intent; `run()` skips downstream stages beyond the requested artifact. */
-  readonly intent?: PdfExecutionIntent;
-  /** Optional request-specific policy overrides. */
-  readonly policy?: PdfAdmissionPolicy;
-  /** Optional password provider for encrypted documents. */
-  readonly passwordProvider?: PdfPasswordProvider;
-}
-
-/**
- * Request accepted by the IR stage.
- */
-export interface PdfIrRequest {
-  /** Source document. */
-  readonly source: PdfDocumentSource;
-  /** Optional request-specific policy overrides. */
-  readonly policy?: PdfAdmissionPolicy;
-  /** Optional password provider for encrypted documents. */
-  readonly passwordProvider?: PdfPasswordProvider;
-}
-
-/**
- * Request accepted by the observation stage.
- */
-export interface PdfObservationRequest {
-  /** Source document. */
-  readonly source: PdfDocumentSource;
-  /** Optional request-specific policy overrides. */
-  readonly policy?: PdfAdmissionPolicy;
-  /** Optional password provider for encrypted documents. */
-  readonly passwordProvider?: PdfPasswordProvider;
-  /** Optional OCR configuration for this request. */
-  readonly ocr?: PdfOcrOptions;
-}
-
-/**
- * Request accepted by the layout stage.
- */
-export interface PdfLayoutRequest {
-  /** Source document. */
-  readonly source: PdfDocumentSource;
-  /** Optional request-specific policy overrides. */
-  readonly policy?: PdfAdmissionPolicy;
-  /** Optional password provider for encrypted documents. */
-  readonly passwordProvider?: PdfPasswordProvider;
-  /** Optional OCR configuration for this request. */
-  readonly ocr?: PdfOcrOptions;
-}
-
-/**
- * Request accepted by the knowledge stage.
- */
-export interface PdfKnowledgeRequest {
-  /** Source document. */
-  readonly source: PdfDocumentSource;
-  /** Optional request-specific policy overrides. */
-  readonly policy?: PdfAdmissionPolicy;
-  /** Optional password provider for encrypted documents. */
-  readonly passwordProvider?: PdfPasswordProvider;
-  /** Optional OCR configuration for this request. */
-  readonly ocr?: PdfOcrOptions;
-}
-
-/**
- * Request accepted by the render stage.
- */
-export interface PdfRenderRequest {
-  /** Source document. */
-  readonly source: PdfDocumentSource;
-  /** Optional request-specific policy overrides. */
-  readonly policy?: PdfAdmissionPolicy;
-  /** Optional password provider for encrypted documents. */
-  readonly passwordProvider?: PdfPasswordProvider;
-  /** Optional OCR configuration for this request. */
-  readonly ocr?: PdfOcrOptions;
-}
-
-/**
- * Request accepted by the full staged pipeline.
- */
-export interface PdfPipelineRequest {
-  /** Source document. */
-  readonly source: PdfDocumentSource;
-  /** Optional caller intent; downstream stages beyond the requested artifact are returned as skipped. */
-  readonly intent?: PdfExecutionIntent;
-  /** Optional request-specific policy overrides. */
-  readonly policy?: PdfAdmissionPolicy;
-  /** Optional password provider for encrypted documents. */
-  readonly passwordProvider?: PdfPasswordProvider;
-  /** Optional OCR configuration for this request. */
-  readonly ocr?: PdfOcrOptions;
-}
-
-/**
- * Source summary copied into a pipeline result.
- */
-export interface PdfPipelineSourceSummary {
-  /** Optional source file name. */
-  readonly fileName?: string;
-  /** Optional caller-supplied media type hint. */
-  readonly mediaType?: string;
-  /** Optional caller-supplied SHA-256 digest of the source bytes. */
-  readonly sha256?: string;
-  /** Source length in bytes. */
-  readonly byteLength: number;
-}
-
-/**
- * Result returned by the full staged pipeline.
- */
-export interface PdfPipelineResult {
-  /** Engine identity that produced the result. */
-  readonly engine: PdfEngineIdentity;
-  /** Runtime detected for the engine instance. */
-  readonly runtime: PdfRuntimeDescriptor;
-  /** Source summary for the processed document. */
-  readonly source: PdfPipelineSourceSummary;
-  /** Admission stage result. */
-  readonly admission: PdfStageResult<PdfAdmissionArtifact>;
-  /** IR stage result. */
-  readonly ir: PdfStageResult<PdfIrDocument>;
-  /** Observation stage result. */
-  readonly observation: PdfStageResult<PdfObservedDocument>;
-  /** Layout stage result. */
-  readonly layout: PdfStageResult<PdfLayoutDocument>;
-  /** Knowledge stage result. */
-  readonly knowledge: PdfStageResult<PdfKnowledgeDocument>;
-  /** Render stage result. */
-  readonly render: PdfStageResult<PdfRenderDocument>;
-  /** De-duplicated diagnostics across the completed stages. */
-  readonly diagnostics: readonly PdfDiagnostic[];
-}
-
-/**
- * Options accepted when creating an engine instance.
- */
-export interface PdfEngineOptions {
-  /** Default policy overrides applied to every request unless a request supplies its own overrides. */
-  readonly defaultPolicy?: PdfAdmissionPolicy;
-  /** Default OCR options applied to every request unless a request supplies its own OCR options. */
-  readonly defaultOcr?: PdfOcrOptions;
-}
-
-/**
- * Public engine surface exposed by `pdf-engine`.
- */
-export interface PdfEngine {
-  /** Engine identity metadata. */
-  readonly identity: PdfEngineIdentity;
-  /** Runtime detected for the engine instance. */
-  readonly runtime: PdfRuntimeDescriptor;
-  /** Capabilities detected for the current runtime. */
-  readonly capabilities: PdfRuntimeCapabilities;
-  /** Normalized default policy used by the engine instance. */
-  readonly defaultPolicy: PdfNormalizedAdmissionPolicy;
-  /** Default OCR options used by the engine instance. */
-  readonly defaultOcr: PdfOcrOptions;
-  /**
-   * Releases engine-owned resources.
-   *
-   * The current implementation is a no-op, but future backends may own workers,
-   * WASM instances, caches, or native bridges that require explicit cleanup.
-   */
-  dispose(): Promise<void>;
-  /**
-   * Runs the admission stage for one document.
-   *
-   * @param request Admission request.
-   * @returns Admission result.
-   */
-  admit(request: PdfAdmissionRequest): Promise<PdfStageResult<PdfAdmissionArtifact>>;
-  /**
-   * Produces the current parser-stage intermediate representation for one document.
-   *
-   * @param request IR request.
-   * @returns IR stage result.
-   */
-  toIr(request: PdfIrRequest): Promise<PdfStageResult<PdfIrDocument>>;
-  /**
-   * Produces observed text evidence for one document.
-   *
-   * @param request Observation request.
-   * @returns Observation stage result.
-   */
-  observe(request: PdfObservationRequest): Promise<PdfStageResult<PdfObservedDocument>>;
-  /**
-   * Produces the current layout result for one document.
-   *
-   * @param request Layout request.
-   * @returns Layout stage result.
-   */
-  toLayout(request: PdfLayoutRequest): Promise<PdfStageResult<PdfLayoutDocument>>;
-  /**
-   * Produces the current knowledge result for one document.
-   *
-   * @param request Knowledge request.
-   * @returns Knowledge stage result.
-   */
-  toKnowledge(request: PdfKnowledgeRequest): Promise<PdfStageResult<PdfKnowledgeDocument>>;
-  /**
-   * Produces the current render result for one document.
-   *
-   * @param request Render request.
-   * @returns Render stage result.
-   */
-  toRender(request: PdfRenderRequest): Promise<PdfStageResult<PdfRenderDocument>>;
-  /**
-   * Runs the staged pipeline for one document.
-   *
-   * @param request Pipeline request.
-   * @returns Combined staged result.
-   */
-  run(request: PdfPipelineRequest): Promise<PdfPipelineResult>;
 }

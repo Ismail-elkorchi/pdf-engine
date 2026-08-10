@@ -1,7 +1,7 @@
 {
   "name": "@ismail-elkorchi/pdf-engine",
   "version": "0.1.0",
-  "description": "Evidence-driven cross-runtime PDF parsing, reading, viewing, and extraction engine.",
+  "description": "Security-first cross-runtime PDF parsing, structured reading, and extraction engine.",
   "type": "module",
   "license": "MIT",
   "repository": {
@@ -17,7 +17,6 @@
     "pdf",
     "parser",
     "reader",
-    "rendering",
     "extraction",
     "typescript",
     "jsr",
@@ -33,10 +32,6 @@
     "./ocr/tesseract": {
       "types": "./dist/ocr/tesseract.d.ts",
       "import": "./dist/ocr/tesseract.js"
-    },
-    "./viewer": {
-      "types": "./dist/viewer.d.ts",
-      "import": "./dist/viewer.js"
     }
   },
   "files": [
@@ -52,7 +47,7 @@
     "npm": ">=11.0.0"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.build.json",
     "lint": "eslint src jsr scripts test eslint.config.mjs --max-warnings=0",
     "lint:fix": "eslint src jsr scripts test eslint.config.mjs --fix --max-warnings=0",
     "typecheck": "tsc -p tsconfig.json --noEmit",
@@ -85,8 +80,16 @@
     "smoke:browser:webkit": "npm run build && node scripts/smoke/browser-runtime-smoke.mjs --browser=webkit --report=reports/smoke-browser-runtime-webkit.json",
     "smoke:compiled:node": "node scripts/smoke/runtime-smoke.mjs ../../dist/index.js node",
     "smoke:compiled:bun": "bun scripts/smoke/runtime-smoke.mjs ../../dist/index.js bun",
-    "smoke:deno": "deno run --allow-read=./jsr,./src,./scripts/smoke/fixtures,./test/fixtures scripts/smoke/runtime-smoke.mjs ../../jsr/mod.ts deno",
+    "smoke:deno": "deno run --allow-read=./jsr,./src,./test/fixtures scripts/smoke/runtime-smoke.mjs ../../jsr/mod.ts deno",
     "check:ci": "npm run check && npm run test:all"
+  },
+  "dependencies": {
+    "@peculiar/asn1-cms": "^2.8.0",
+    "@peculiar/asn1-rsa": "^2.8.0",
+    "@peculiar/asn1-schema": "^2.8.0",
+    "@peculiar/asn1-x509": "^2.8.0",
+    "@peculiar/x509": "^2.0.0",
+    "reflect-metadata": "^0.2.2"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

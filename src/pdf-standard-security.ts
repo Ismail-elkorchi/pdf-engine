@@ -1,4 +1,4 @@
-import type { PdfObjectRef } from "./contracts.ts";
+import type { PdfReference } from "./pdf-values.ts";
 
 type PdfStandardSecurityMethod = "none" | "rc4" | "aes-128" | "aes-256";
 type PdfModernSecurityRevision = 5 | 6;
@@ -23,15 +23,24 @@ interface PdfEncryptionDictionary {
 }
 
 export interface PdfStandardPasswordSecurityHandler {
+  readonly credential: "user" | "owner";
+  readonly permissions: number;
   decryptObjectValueText(
-    objectRef: PdfObjectRef,
+    objectRef: PdfReference,
     objectValueText: string,
     options?: {
       readonly typeName?: string;
     },
   ): Promise<string>;
+  decryptStringBytes(
+    objectRef: PdfReference,
+    encryptedBytes: Uint8Array,
+    options?: {
+      readonly typeName?: string;
+    },
+  ): Promise<Uint8Array>;
   decryptStreamBytes(
-    objectRef: PdfObjectRef,
+    objectRef: PdfReference,
     rawStreamBytes: Uint8Array,
     options?: {
       readonly typeName?: string;
@@ -56,7 +65,7 @@ export type PdfStandardPasswordSecurityPreparation =
 export interface PdfStandardPasswordSecurityRequest {
   readonly documentId: Uint8Array;
   readonly encryptDictionaryEntries: ReadonlyMap<string, string>;
-  readonly encryptObjectRef: PdfObjectRef;
+  readonly encryptObjectRef: PdfReference;
   readonly password: string;
 }
 
@@ -134,12 +143,12 @@ export async function preparePdfStandardPasswordSecurity(
     };
   }
 
-  const encryptionKey = await deriveStandardEncryptionKey({
+  const encryption = await deriveStandardEncryptionKey({
     encryptionDictionary,
     documentId: request.documentId,
     password: request.password,
   });
-  if (!encryptionKey) {
+  if (!encryption) {
     return {
       status: "invalid-password",
       detail: "The supplied password did not unlock the standard security handler.",
@@ -151,28 +160,34 @@ export async function preparePdfStandardPasswordSecurity(
     handler: new StandardPasswordSecurityHandler(
       encryptionDictionary,
       request.encryptObjectRef,
-      encryptionKey,
+      encryption.key,
+      encryption.credential,
     ),
   };
 }
 
 class StandardPasswordSecurityHandler implements PdfStandardPasswordSecurityHandler {
+  readonly credential: "user" | "owner";
+  readonly permissions: number;
   readonly #encryptionDictionary: PdfEncryptionDictionary;
-  readonly #encryptObjectRef: PdfObjectRef;
+  readonly #encryptObjectRef: PdfReference;
   readonly #encryptionKey: Uint8Array;
 
   constructor(
     encryptionDictionary: PdfEncryptionDictionary,
-    encryptObjectRef: PdfObjectRef,
+    encryptObjectRef: PdfReference,
     encryptionKey: Uint8Array,
+    credential: "user" | "owner",
   ) {
     this.#encryptionDictionary = encryptionDictionary;
     this.#encryptObjectRef = encryptObjectRef;
     this.#encryptionKey = encryptionKey;
+    this.credential = credential;
+    this.permissions = encryptionDictionary.permissions;
   }
 
   decryptObjectValueText(
-    objectRef: PdfObjectRef,
+    objectRef: PdfReference,
     objectValueText: string,
     options?: {
       readonly typeName?: string;
@@ -239,8 +254,26 @@ class StandardPasswordSecurityHandler implements PdfStandardPasswordSecurityHand
     return Promise.resolve(decryptedText);
   }
 
+  decryptStringBytes(
+    objectRef: PdfReference,
+    encryptedBytes: Uint8Array,
+    options?: {
+      readonly typeName?: string;
+    },
+  ): Promise<Uint8Array> {
+    if (
+      this.#shouldBypassObject(objectRef, options?.typeName) ||
+      this.#encryptionDictionary.stringMethod === "none"
+    ) {
+      return Promise.resolve(Uint8Array.from(encryptedBytes));
+    }
+    return Promise.resolve(
+      this.#decryptBytes(objectRef, encryptedBytes, this.#encryptionDictionary.stringMethod),
+    );
+  }
+
   decryptStreamBytes(
-    objectRef: PdfObjectRef,
+    objectRef: PdfReference,
     rawStreamBytes: Uint8Array,
     options?: {
       readonly typeName?: string;
@@ -260,7 +293,7 @@ class StandardPasswordSecurityHandler implements PdfStandardPasswordSecurityHand
   }
 
   #shouldBypassObject(
-    objectRef: PdfObjectRef,
+    objectRef: PdfReference,
     typeName: string | undefined,
   ): boolean {
     if (
@@ -278,7 +311,7 @@ class StandardPasswordSecurityHandler implements PdfStandardPasswordSecurityHand
   }
 
   #decryptBytes(
-    objectRef: PdfObjectRef,
+    objectRef: PdfReference,
     encryptedBytes: Uint8Array,
     method: PdfStandardSecurityMethod,
   ): Uint8Array {
@@ -294,7 +327,7 @@ class StandardPasswordSecurityHandler implements PdfStandardPasswordSecurityHand
     }
   }
 
-  #buildObjectKey(objectRef: PdfObjectRef, includeAesSalt: boolean): Uint8Array {
+  #buildObjectKey(objectRef: PdfReference, includeAesSalt: boolean): Uint8Array {
     const objectKeyBytes = new Uint8Array(this.#encryptionKey.length + 9);
     objectKeyBytes.set(this.#encryptionKey, 0);
     let offset = this.#encryptionKey.length;
@@ -324,7 +357,7 @@ async function deriveStandardEncryptionKey(
     readonly documentId: Uint8Array;
     readonly password: string;
   },
-): Promise<Uint8Array | undefined> {
+): Promise<{ readonly key: Uint8Array; readonly credential: "user" | "owner" } | undefined> {
   if (input.encryptionDictionary.revision >= 5) {
     return deriveModernEncryptionKey({
       encryptionDictionary: input.encryptionDictionary,
@@ -344,7 +377,10 @@ async function deriveStandardEncryptionKey(
     encryptMetadata: input.encryptionDictionary.encryptMetadata,
   });
   if (userKeyCandidate) {
-    return normalizeAlgorithmFourKey(input.encryptionDictionary.algorithm, userKeyCandidate);
+    return {
+      key: normalizeAlgorithmFourKey(input.encryptionDictionary.algorithm, userKeyCandidate),
+      credential: "user",
+    };
   }
 
   const ownerPasswordBytes = decodeOwnerPassword({
@@ -363,9 +399,10 @@ async function deriveStandardEncryptionKey(
     documentId: input.documentId,
     encryptMetadata: input.encryptionDictionary.encryptMetadata,
   });
-  return ownerKeyCandidate
-    ? normalizeAlgorithmFourKey(input.encryptionDictionary.algorithm, ownerKeyCandidate)
-    : undefined;
+  return ownerKeyCandidate === undefined ? undefined : {
+    key: normalizeAlgorithmFourKey(input.encryptionDictionary.algorithm, ownerKeyCandidate),
+    credential: "owner",
+  };
 }
 
 async function deriveModernEncryptionKey(
@@ -373,7 +410,7 @@ async function deriveModernEncryptionKey(
     readonly encryptionDictionary: PdfEncryptionDictionary;
     readonly password: string;
   },
-): Promise<Uint8Array | undefined> {
+): Promise<{ readonly key: Uint8Array; readonly credential: "user" | "owner" } | undefined> {
   const ownerEncryptionBytes = input.encryptionDictionary.ownerEncryptionBytes;
   const userEncryptionBytes = input.encryptionDictionary.userEncryptionBytes;
   const permissionsBytes = input.encryptionDictionary.permissionsBytes;
@@ -409,7 +446,7 @@ async function deriveModernEncryptionKey(
       ownerEncryptionBytes,
     );
     if (verifyModernPermissions(ownerEncryptionKey, input.encryptionDictionary)) {
-      return ownerEncryptionKey;
+      return { key: ownerEncryptionKey, credential: "owner" };
     }
   }
 
@@ -435,7 +472,7 @@ async function deriveModernEncryptionKey(
     userEncryptionBytes,
   );
   return verifyModernPermissions(userEncryptionKey, input.encryptionDictionary)
-    ? userEncryptionKey
+    ? { key: userEncryptionKey, credential: "user" }
     : undefined;
 }
 

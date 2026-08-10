@@ -9,12 +9,11 @@ import {
   decodePdfSingleByteLiteralText,
   type PdfSingleByteFontEncoding,
 } from "../font-encoding.ts";
-import { hasDetectedFeatureFinding } from "../pdf-feature-findings.ts";
 import {
   decodePdfLiteral,
   findFirstDictionaryToken,
   keyOfObjectRef,
-  parseContentStreamOperators,
+  parsePageContentStreamOperators,
   parseDictionaryEntries,
   parseTextOperatorRunsFromOperators,
   readObjectRefValue,
@@ -22,8 +21,8 @@ import {
   type ParsedContentStreamOperator,
   type ParsedIndirectObject,
   type ParsedTextOperatorRun,
-  type PdfShellAnalysis,
-} from "../shell-parse.ts";
+  type PdfDocumentAnalysis,
+} from "../pdf-analysis.ts";
 import { parseTrueTypeGlyphUnicodeMap } from "../truetype-cmap.ts";
 
 import type {
@@ -57,6 +56,13 @@ import type {
   PdfVisibilityState,
   PdfWritingMode,
 } from "../contracts.ts";
+
+function hasDetectedFeatureFinding(
+  findings: readonly PdfFeatureFinding[],
+  kind: PdfFeatureFinding["kind"],
+): boolean {
+  return findings.some((finding) => finding.kind === kind);
+}
 
 interface PdfEmbeddedFontMapping {
   readonly glyphUnicodeByGlyphId: ReadonlyMap<number, string>;
@@ -194,7 +200,7 @@ const DEFAULT_TRANSPARENCY_STATE: PdfObservedTransparencyState = {
 };
 
 export interface PdfObservationInspection {
-  readonly analysis: PdfShellAnalysis;
+  readonly analysis: PdfDocumentAnalysis;
   readonly featureFindings: readonly PdfFeatureFinding[];
 }
 
@@ -242,6 +248,7 @@ export function buildObservedPages(
       graphicsStateBindings: [],
       propertyBindings: [],
       xObjectBindings: [],
+      pageTransform: IDENTITY_TRANSFORM,
     },
     inspection,
     "stream-fallback",
@@ -282,6 +289,7 @@ function buildObservedPage(
         readonly colorSpaceValue?: string;
       };
     }[];
+    readonly pageTransform: PdfTransformMatrix;
   },
   inspection: PdfObservationInspection,
   resolutionMethodOverride?: "page-tree" | "recovered-page-order" | "stream-fallback",
@@ -324,17 +332,19 @@ function buildObservedPage(
   const embeddedFontMappingByFontKey = new Map<string, PdfEmbeddedFontMapping | undefined>();
   const singleByteFontEncodingByFontKey = new Map<string, PdfSingleByteFontEncoding | undefined>();
 
-  for (const contentStreamRef of pageEntry.contentStreamRefs) {
-    const contentStream = inspection.analysis.objectIndex.get(keyOfObjectRef(contentStreamRef));
-    if (!contentStream?.streamText) {
-      continue;
-    }
-
-    const contentStreamOperators = parseContentStreamOperators(contentStream.streamText);
+  const contentStreamOperators = parsePageContentStreamOperators(
+    pageEntry.contentStreamRefs.flatMap((contentStreamRef) => {
+      const bytes = inspection.analysis.objectIndex.get(keyOfObjectRef(contentStreamRef))?.decodedStreamBytes;
+      return bytes === undefined ? [] : [{ bytes, contentStreamRef }];
+    }),
+    inspection.analysis.budget,
+  );
+  const fallbackContentStreamRef = pageEntry.contentStreamRefs[0];
+  if (fallbackContentStreamRef !== undefined) {
     const contentMarkResult = observeContentStreamMarks(
       contentStreamOperators,
       pageNumber,
-      contentStreamRef,
+      fallbackContentStreamRef,
       colorSpaceBindingByResourceName,
       graphicsStateBindingByResourceName,
       propertyBindingByResourceName,
@@ -342,12 +352,14 @@ function buildObservedPage(
       inspection.analysis.objectIndex,
       xObjectBindingByResourceName,
       contentOrder,
+      pageEntry.pageTransform,
     );
     contentOrder = contentMarkResult.nextContentOrder;
     marks.push(...contentMarkResult.marks);
     const textContexts = [...contentMarkResult.textContexts];
-    const parsedRuns = parseTextOperatorRunsFromOperators(contentStreamOperators);
+    const parsedRuns = parseTextOperatorRunsFromOperators(contentStreamOperators, pageEntry.pageTransform);
     for (const parsedRun of parsedRuns) {
+      const contentStreamRef = parsedRun.contentStreamRef ?? fallbackContentStreamRef;
       const observedRun = observeParsedTextRun(
         parsedRun,
         fontRefByResourceName,
@@ -450,17 +462,6 @@ function buildObservedPage(
     }
   }
 
-  const pageWritingMode = inferObservedPageWritingMode(runs);
-  const normalizedRuns = pageWritingMode === undefined ? runs : runs.map((run) => (
-    run.writingMode !== undefined ? run : { ...run, writingMode: pageWritingMode }
-  ));
-  const normalizedGlyphs = pageWritingMode === undefined ? glyphs : glyphs.map((glyph) => (
-    glyph.writingMode !== undefined ? glyph : { ...glyph, writingMode: pageWritingMode }
-  ));
-  const normalizedMarks = pageWritingMode === undefined ? marks : marks.map((mark) => (
-    mark.kind === "text" && mark.writingMode === undefined ? { ...mark, writingMode: pageWritingMode } : mark
-  ));
-
   const hasFontMappingGap = hasSevereFontMappingGap || fontMappingGapCount > 1;
   const hasLiteralFontEncodingGap =
     hasSevereLiteralFontEncodingGap || literalFontEncodingGapCount > 1;
@@ -470,9 +471,9 @@ function buildObservedPage(
       pageNumber,
       resolutionMethod,
       ...(pageEntry.pageRef !== undefined ? { pageRef: pageEntry.pageRef } : {}),
-      glyphs: normalizedGlyphs,
-      runs: normalizedRuns,
-      marks: normalizedMarks.toSorted((left, right) => left.contentOrder - right.contentOrder || left.id.localeCompare(right.id)),
+      glyphs,
+      runs,
+      marks: marks.toSorted((left, right) => left.contentOrder - right.contentOrder || left.id.localeCompare(right.id)),
     },
     hasFontMappingGap,
     hasLiteralFontEncodingGap,
@@ -482,7 +483,7 @@ function buildObservedPage(
 function observeContentStreamMarks(
   operators: readonly ParsedContentStreamOperator[],
   pageNumber: number,
-  contentStreamRef: PdfObjectRef,
+  fallbackContentStreamRef: PdfObjectRef,
   colorSpaceBindingByResourceName: ReadonlyMap<string, PdfColorSpaceBinding>,
   graphicsStateBindingByResourceName: ReadonlyMap<string, PdfGraphicsStateBinding>,
   propertyBindingByResourceName: ReadonlyMap<string, PdfPropertyBinding>,
@@ -490,6 +491,7 @@ function observeContentStreamMarks(
   objectIndex: ReadonlyMap<string, ParsedIndirectObject>,
   xObjectBindingByResourceName: ReadonlyMap<string, PdfXObjectBinding>,
   startingContentOrder: number,
+  initialTransform: PdfTransformMatrix,
 ): PdfObservedContentMarksResult {
   const marks: Array<Exclude<PdfObservedMark, PdfObservedTextMark>> = [];
   const textContexts: PdfObservedTextContext[] = [];
@@ -507,6 +509,8 @@ function observeContentStreamMarks(
   let contentOrder = startingContentOrder;
 
   for (const operator of operators) {
+    const contentStreamRef = operator.contentStreamRef ?? fallbackContentStreamRef;
+    const pageGraphicsTransform = multiplyTransformMatrices(graphicsState.transform, initialTransform);
     if (isTextShowOperator(operator.operator)) {
       const currentMarkedContentId = resolveCurrentMarkedContentId(markedContentStack);
       const currentVisibilityState = resolveEffectiveVisibilityState(markedContentStack);
@@ -782,7 +786,7 @@ function observeContentStreamMarks(
       if (point) {
         graphicsState = {
           ...graphicsState,
-          currentPath: appendObservedPathMoveTo(graphicsState.currentPath, point, graphicsState.transform),
+          currentPath: appendObservedPathMoveTo(graphicsState.currentPath, point, pageGraphicsTransform),
         };
       }
       continue;
@@ -793,7 +797,7 @@ function observeContentStreamMarks(
       if (point) {
         graphicsState = {
           ...graphicsState,
-          currentPath: appendObservedPathLineTo(graphicsState.currentPath, point, graphicsState.transform),
+          currentPath: appendObservedPathLineTo(graphicsState.currentPath, point, pageGraphicsTransform),
         };
       }
       continue;
@@ -813,7 +817,7 @@ function observeContentStreamMarks(
             control1,
             control2,
             to,
-            graphicsState.transform,
+            pageGraphicsTransform,
           ),
         };
       }
@@ -834,7 +838,7 @@ function observeContentStreamMarks(
             operator.operator,
             firstPoint,
             secondPoint,
-            graphicsState.transform,
+            pageGraphicsTransform,
           ),
         };
       }
@@ -856,7 +860,7 @@ function observeContentStreamMarks(
       if (rectangle) {
         graphicsState = {
           ...graphicsState,
-          currentPath: appendObservedPathRectangle(graphicsState.currentPath, rectangle, graphicsState.transform),
+          currentPath: appendObservedPathRectangle(graphicsState.currentPath, rectangle, pageGraphicsTransform),
         };
       }
       continue;
@@ -898,7 +902,7 @@ function observeContentStreamMarks(
           closed: isObservedPathClosed(paintedSegments),
           ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
           ...(pathBoundingBox !== undefined ? { bbox: pathBoundingBox } : {}),
-          transform: graphicsState.transform,
+          transform: pageGraphicsTransform,
           ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
         });
         contentOrder += 1;
@@ -915,7 +919,7 @@ function observeContentStreamMarks(
           clipOperator: pendingClipOperator,
           ...(currentMarkedContentId !== undefined ? { markedContentId: currentMarkedContentId } : {}),
           ...(clipBoundingBox !== undefined ? { bbox: clipBoundingBox } : {}),
-          transform: graphicsState.transform,
+          transform: pageGraphicsTransform,
           ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
         });
         contentOrder += 1;
@@ -939,7 +943,7 @@ function observeContentStreamMarks(
       const currentMarkedContentId = resolveCurrentMarkedContentId(markedContentStack);
       const currentVisibilityState = resolveEffectiveVisibilityState(markedContentStack);
       if (xObjectBinding?.subtypeName === "/Image") {
-        const imageBoundingBox = resolveXObjectBoundingBox(graphicsState.transform, xObjectBinding);
+        const imageBoundingBox = resolveImageBoundingBox(pageGraphicsTransform);
         marks.push({
           id: `mark-image-${pageNumber}-${contentOrder + 1}`,
           kind: "image",
@@ -955,14 +959,14 @@ function observeContentStreamMarks(
           colorState: cloneObservedColorState(graphicsState.colorState),
           transparencyState: cloneObservedTransparencyState(graphicsState.transparencyState),
           ...(imageBoundingBox !== undefined ? { bbox: imageBoundingBox } : {}),
-          transform: graphicsState.transform,
+          transform: pageGraphicsTransform,
           ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
         });
         contentOrder += 1;
         continue;
       }
 
-      const xObjectBoundingBox = resolveXObjectBoundingBox(graphicsState.transform, xObjectBinding);
+      const xObjectBoundingBox = resolveXObjectBoundingBox(pageGraphicsTransform, xObjectBinding);
       marks.push({
         id: `mark-xobject-${pageNumber}-${contentOrder + 1}`,
         kind: "xobject",
@@ -976,7 +980,7 @@ function observeContentStreamMarks(
         ...(xObjectBinding?.subtypeName !== undefined ? { subtypeName: xObjectBinding.subtypeName } : {}),
         ...(xObjectBinding?.transparencyGroup !== undefined ? { transparencyGroup: xObjectBinding.transparencyGroup } : {}),
         ...(xObjectBoundingBox !== undefined ? { bbox: xObjectBoundingBox } : {}),
-        transform: graphicsState.transform,
+        transform: pageGraphicsTransform,
         ...(currentVisibilityState !== undefined ? { visibilityState: currentVisibilityState } : {}),
       });
       contentOrder += 1;
@@ -2254,6 +2258,17 @@ function resolveXObjectBoundingBox(
   );
 }
 
+function resolveImageBoundingBox(transform: PdfTransformMatrix) {
+  return toObservedBoundingBox(
+    extendObservedPathBounds(undefined, [
+      transformPoint(transform, { x: 0, y: 0 }),
+      transformPoint(transform, { x: 1, y: 0 }),
+      transformPoint(transform, { x: 0, y: 1 }),
+      transformPoint(transform, { x: 1, y: 1 }),
+    ]),
+  );
+}
+
 function observeParsedTextRun(
   parsedRun: ParsedTextOperatorRun,
   fontRefByResourceName: ReadonlyMap<string, PdfObjectRef>,
@@ -2292,11 +2307,8 @@ function observeParsedTextRun(
   const singleByteFontEncoding = fontRef
     ? resolveSingleByteFontEncodingForFont(fontRef, singleByteFontEncodingByFontKey, inspection)
     : undefined;
-  const writingMode = fontRef ? resolveWritingModeForFont(fontRef, inspection) : undefined;
+  const writingMode = parsedRun.writingMode ?? (fontRef ? resolveWritingModeForFont(fontRef, inspection) : undefined);
   const hasHiddenTextFeature = hasDetectedFeatureFinding(inspection.featureFindings, "hidden-text");
-  const fontEncodingSpacingProfile = resolveFontEncodingSpacingProfile(parsedRun);
-  const shouldSuppressCompactSpacing = !hasHiddenTextFeature;
-
   for (const operand of parsedRun.operands) {
     if (operand.kind === "adjustment") {
       pendingTextAdjustment = operand.value;
@@ -2322,7 +2334,7 @@ function observeParsedTextRun(
           sanitizedLiteralText.length > 0 ? sanitizedLiteralText : preferredLiteralText,
         );
         if (preferredActualText !== undefined) {
-          text = appendObservedOperandText(text, preferredActualText, pendingTextAdjustment, parsedRun.fontSize);
+          text = appendObservedOperandText(text, preferredActualText, pendingTextAdjustment);
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
           unicodeMappingSource = unicodeMappingSource ?? "actual-text";
@@ -2334,9 +2346,6 @@ function observeParsedTextRun(
             text,
             sanitizedLiteralText,
             pendingTextAdjustment,
-            parsedRun.fontSize,
-            decodedLiteralText ? fontEncodingSpacingProfile : "default",
-            shouldSuppressCompactSpacing,
           );
           pendingTextAdjustment = undefined;
           textEncodingKind = textEncodingKind ?? "literal";
@@ -2370,9 +2379,6 @@ function observeParsedTextRun(
         text,
         preferredLiteralText,
         pendingTextAdjustment,
-        parsedRun.fontSize,
-        decodedLiteralText ? fontEncodingSpacingProfile : "default",
-        shouldSuppressCompactSpacing,
       );
       pendingTextAdjustment = undefined;
       textEncodingKind = textEncodingKind ?? "literal";
@@ -2416,9 +2422,6 @@ function observeParsedTextRun(
       text,
       decodedText.text,
       pendingTextAdjustment,
-      parsedRun.fontSize,
-      decodedText.mappingSource === "font-encoding" ? fontEncodingSpacingProfile : "default",
-      shouldSuppressCompactSpacing,
     );
     pendingTextAdjustment = undefined;
     unicodeMappingSource = unicodeMappingSource ?? decodedText.mappingSource;
@@ -2445,9 +2448,6 @@ function appendObservedOperandText(
   currentText: string,
   operandText: string,
   adjustment: number | undefined,
-  fontSize: number | undefined,
-  spacingProfile: "default" | "font-encoding-compact" | "font-encoding-wide" = "default",
-  shouldSuppressCompactWordSplit = true,
 ): string {
   if (operandText.length === 0) {
     return currentText;
@@ -2457,9 +2457,6 @@ function appendObservedOperandText(
     currentText,
     operandText,
     adjustment,
-    fontSize,
-    spacingProfile,
-    shouldSuppressCompactWordSplit,
   )) {
     return `${currentText}${operandText}`;
   }
@@ -2471,9 +2468,6 @@ function shouldInsertSyntheticSpace(
   currentText: string,
   operandText: string,
   adjustment: number | undefined,
-  fontSize: number | undefined,
-  spacingProfile: "default" | "font-encoding-compact" | "font-encoding-wide",
-  shouldSuppressCompactWordSplit: boolean,
 ): boolean {
   if (currentText.length === 0 || operandText.length === 0 || adjustment === undefined) {
     return false;
@@ -2498,88 +2492,11 @@ function shouldInsertSyntheticSpace(
     return false;
   }
 
-  if (
-    shouldSuppressCompactWordSplit &&
-    spacingProfile === "font-encoding-compact" &&
-    shouldSuppressCompactFontEncodingWordSplit(currentTail, operandHead, fontSize)
-  ) {
-    return false;
-  }
-
-  const spaceThreshold = spacingProfile === "font-encoding-compact"
-    ? -Math.max(18, (fontSize ?? 10) * 1.8)
-    : spacingProfile === "font-encoding-wide"
-    ? -Math.max(100, (fontSize ?? 10) * 8)
-    : -Math.max(120, (fontSize ?? 10) * 12);
-  if (adjustment > spaceThreshold) {
+  if (adjustment > -120) {
     return false;
   }
 
   return /\S$/u.test(currentTail) && /^\S/u.test(operandHead);
-}
-
-function resolveFontEncodingSpacingProfile(
-  parsedRun: ParsedTextOperatorRun,
-): "font-encoding-compact" | "font-encoding-wide" {
-  let minimumAdjustment = Number.POSITIVE_INFINITY;
-  for (const operand of parsedRun.operands) {
-    if (operand.kind === "adjustment") {
-      minimumAdjustment = Math.min(minimumAdjustment, operand.value);
-    }
-  }
-  return minimumAdjustment <= -100 ? "font-encoding-wide" : "font-encoding-compact";
-}
-
-const COMPACT_FONT_ENCODING_WORD_BOUNDARIES = new Set([
-  "a",
-  "an",
-  "and",
-  "as",
-  "at",
-  "be",
-  "by",
-  "for",
-  "in",
-  "of",
-  "on",
-  "or",
-  "the",
-  "to",
-]);
-
-function shouldSuppressCompactFontEncodingWordSplit(
-  currentTail: string,
-  operandHead: string,
-  fontSize: number | undefined,
-): boolean {
-  if ((fontSize ?? 10) > 4) {
-    return false;
-  }
-
-  const currentTailWord = currentTail.match(/([\p{L}]+)$/u)?.[1];
-  const operandHeadWord = operandHead.match(/^([\p{L}]+)/u)?.[1];
-  if (!currentTailWord || !operandHeadWord) {
-    return false;
-  }
-
-  const currentTailCharacter = currentTailWord.at(-1);
-  const operandHeadCharacter = operandHeadWord[0];
-  if (!currentTailCharacter || !operandHeadCharacter) {
-    return false;
-  }
-
-  if (!/\p{Ll}/u.test(currentTailCharacter) || !/\p{Ll}/u.test(operandHeadCharacter)) {
-    return false;
-  }
-
-  if (
-    COMPACT_FONT_ENCODING_WORD_BOUNDARIES.has(currentTailWord.toLowerCase()) ||
-    COMPACT_FONT_ENCODING_WORD_BOUNDARIES.has(operandHeadWord.toLowerCase())
-  ) {
-    return false;
-  }
-
-  return currentTailWord.length <= 3 || operandHeadWord.length <= 3;
 }
 
 function resolvePreferredActualText(actualText: string | undefined, observedText: string): string | undefined {
@@ -2606,8 +2523,7 @@ function sanitizeLiteralText(text: string): string {
   return text
     .replaceAll(/[\u0000-\u0008\u000b-\u001f\u007f-\u009f]+/gu, "")
     .replaceAll(/[\t\r\n]+/g, " ")
-    .replaceAll(/[ ]{2,}/g, " ")
-    .trim();
+    .replaceAll(/[ ]{2,}/g, " ");
 }
 
 function shouldSuppressUnreadableLiteralText(
@@ -3005,54 +2921,6 @@ function resolveWritingModeForFont(
   }
 
   return undefined;
-}
-
-function inferObservedPageWritingMode(
-  runs: readonly PdfObservedTextRun[],
-): PdfWritingMode | undefined {
-  if (runs.some((run) => run.writingMode === "vertical")) {
-    return "vertical";
-  }
-
-  const anchoredRuns = runs.filter((run) => run.anchor !== undefined);
-  if (anchoredRuns.length < 3 || !anchoredRuns.every((run) => run.startsNewLine === true)) {
-    return undefined;
-  }
-
-  const averageTextLength = anchoredRuns.reduce((sum, run) => sum + run.text.length, 0) / anchoredRuns.length;
-  if (averageTextLength > 20) {
-    return undefined;
-  }
-
-  let horizontalTransitions = 0;
-  let verticalTransitions = 0;
-
-  for (let index = 1; index < anchoredRuns.length; index += 1) {
-    const previousRun = anchoredRuns[index - 1] as PdfObservedTextRun;
-    const currentRun = anchoredRuns[index] as PdfObservedTextRun;
-    const previousAnchor = previousRun.anchor;
-    const currentAnchor = currentRun.anchor;
-    if (!previousAnchor || !currentAnchor) {
-      continue;
-    }
-
-    const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
-    const deltaX = Math.abs(currentAnchor.x - previousAnchor.x);
-    const deltaY = Math.abs(currentAnchor.y - previousAnchor.y);
-    const lateralThreshold = Math.max(10, fontSize * 1.2);
-    const stackThreshold = Math.max(16, fontSize * 1.4);
-
-    if (deltaX >= lateralThreshold && deltaY <= stackThreshold) {
-      horizontalTransitions += 1;
-      continue;
-    }
-
-    if (deltaY >= lateralThreshold && deltaX <= stackThreshold) {
-      verticalTransitions += 1;
-    }
-  }
-
-  return horizontalTransitions >= 2 && horizontalTransitions > verticalTransitions ? "vertical" : undefined;
 }
 
 function resolveCidCollectionForFont(
