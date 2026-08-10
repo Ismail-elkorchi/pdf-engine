@@ -417,8 +417,8 @@ function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly Gr
     );
   }
 
-  const firstReadableBlock = blocks.find((block) => block.anchor !== undefined && !looksLikeProductionMetadata(block.text));
-  if (!firstReadableBlock?.anchor) {
+  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
+  if (anchoredBlocks.length < 2) {
     return assignReadingOrderInference(
       blocks,
       "observed-content-order",
@@ -428,35 +428,16 @@ function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly Gr
     );
   }
 
-  const promotionThreshold = Math.max(24, (firstReadableBlock.fontSize ?? 12) * 2.2);
-  const promotedBlocks = blocks.filter((block, blockIndex) =>
-    blockIndex > 0 &&
-    block.anchor !== undefined &&
-    !looksLikeProductionMetadata(block.text) &&
-    block.anchor.y > firstReadableBlock.anchor!.y + promotionThreshold &&
-    (looksLikeHeading(block.text, block.fontSize) || looksLikeSectionHeading(block.text))
-  );
-  if (promotedBlocks.length === 0) {
-    return assignReadingOrderInference(
-      blocks,
-      "geometry-line-order",
-      0.55,
-      "Anchored text did not form separated column groups; observed line order was preserved.",
-      "inferred",
-    );
-  }
-
-  const promotedBlockIds = new Set(promotedBlocks.map((block) => block.id));
   const orderedBlocks = [
-    ...[...promotedBlocks].sort(compareHorizontalBlocks),
-    ...blocks.filter((block) => !promotedBlockIds.has(block.id)),
+    ...anchoredBlocks.toSorted(compareHorizontalBlocks),
+    ...blocks.filter((block) => block.anchor === undefined),
   ];
 
   return assignReadingOrderInference(
     orderedBlocks,
     "geometry-line-order",
-    0.62,
-    "A later anchored heading was promoted ahead of body text using page-space anchors.",
+    0.68,
+    "Anchored text was ordered top-to-bottom and left-to-right in page space.",
     "inferred",
   );
 }
@@ -634,7 +615,7 @@ function orderHorizontalColumnsWhenSupported(
   const fontSizes = anchoredBlocks.map((block) => block.fontSize ?? 12).sort((left, right) => left - right);
   const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] ?? 12;
   const columnThreshold = Math.max(64, medianFontSize * 5.5);
-  const xGapThreshold = Math.max(120, medianFontSize * 8);
+  const xGapThreshold = Math.max(80, medianFontSize * 6);
   const clusters: GroupedBlockSeed[][] = [];
 
   for (const block of [...anchoredBlocks].sort(compareBlockAnchorX)) {
@@ -663,6 +644,10 @@ function orderHorizontalColumnsWhenSupported(
     if (averageAnchorX(currentCluster) - averageAnchorX(previousCluster) < xGapThreshold) {
       return undefined;
     }
+  }
+
+  if (columnClustersFormRowGrid(columnClusters, medianFontSize)) {
+    return undefined;
   }
 
   if (!columnClustersHaveVerticalOverlap(columnClusters, medianFontSize)) {
@@ -712,6 +697,35 @@ function orderHorizontalColumnsWhenSupported(
   ];
 }
 
+function columnClustersFormRowGrid(
+  clusters: readonly (readonly GroupedBlockSeed[])[],
+  medianFontSize: number,
+): boolean {
+  if (clusters.length < 3) {
+    return false;
+  }
+
+  const baselineTolerance = Math.max(3, medianFontSize * 0.35);
+  const requiredMatchingClusters = Math.min(2, clusters.length - 1);
+  const blocks = clusters.flatMap((cluster, clusterIndex) =>
+    cluster.map((block) => ({ block, clusterIndex }))
+  );
+  const alignedBlocks = blocks.filter(({ block, clusterIndex }) => {
+    const y = (block.anchor as PdfPoint).y;
+    const matchingClusters = clusters.reduce((count, cluster, candidateIndex) => {
+      if (candidateIndex === clusterIndex) {
+        return count;
+      }
+      return cluster.some((candidate) => Math.abs((candidate.anchor as PdfPoint).y - y) <= baselineTolerance)
+        ? count + 1
+        : count;
+    }, 0);
+    return matchingClusters >= requiredMatchingClusters;
+  });
+
+  return alignedBlocks.length / blocks.length >= 0.6;
+}
+
 function compareBlockAnchorX(left: GroupedBlockSeed, right: GroupedBlockSeed): number {
   const leftAnchor = left.anchor as PdfPoint;
   const rightAnchor = right.anchor as PdfPoint;
@@ -735,7 +749,15 @@ function columnClustersHaveVerticalOverlap(
   });
   const sharedMin = Math.max(...ranges.map((range) => range.min));
   const sharedMax = Math.min(...ranges.map((range) => range.max));
-  return sharedMax - sharedMin >= Math.max(8, medianFontSize * 0.5);
+  const tolerance = Math.max(8, medianFontSize * 0.5);
+  if (sharedMax - sharedMin < tolerance) {
+    return false;
+  }
+
+  return clusters.every((cluster) => cluster.some((block) => {
+    const y = (block.anchor as PdfPoint).y;
+    return y >= sharedMin - tolerance && y <= sharedMax + tolerance;
+  }));
 }
 
 function assignReadingOrderInference(
@@ -1792,7 +1814,7 @@ function countLabelMarkers(text: string): number {
 }
 
 function resolvePageWritingMode(page: PdfObservedPage): PdfWritingMode | undefined {
-  if (page.runs.some((run) => run.writingMode === "vertical")) {
+  if (page.runs.length > 0 && page.runs.every((run) => run.writingMode === "vertical")) {
     return "vertical";
   }
 

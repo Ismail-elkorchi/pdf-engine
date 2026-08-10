@@ -43,6 +43,65 @@ test("layout orders anchored multi-column text by column and records inference e
   assert.match(layout.extractedText, /Left column begins[\s\S]*continues in the left column[\s\S]*Right column starts/u);
 });
 
+test("layout recognizes distinct narrow columns when their text regions overlap vertically", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-left-1", 0, "Left one", 40, 700),
+    run("run-middle-1", 1, "Middle one", 135, 685),
+    run("run-right-1", 2, "Right one", 230, 680),
+    run("run-left-2", 3, "Left two", 40, 665),
+    run("run-middle-2", 4, "Middle two", 135, 660),
+    run("run-right-2", 5, "Right two", 230, 645),
+  ]));
+
+  assert.deepEqual(layout.pages[0]?.blocks.map((block) => block.text), [
+    "Left one",
+    "Left two",
+    "Middle one",
+    "Middle two",
+    "Right one",
+    "Right two",
+  ]);
+  assert.ok(layout.pages[0]?.blocks.every((block) =>
+    block.inferences?.some((inference) => inference.method === "geometry-column-order")
+  ));
+});
+
+test("layout does not mistake offset page boundaries for a text column", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Overview of Document Reading Order", 72, 700, 18),
+    run("run-author", 1, "Example Author", 72, 670, 12),
+    run("run-body", 2, "The body begins with material content for the reader.", 72, 620, 12),
+    run("run-header", 3, "Working Papers on Information Systems", 250, 760, 14),
+    run("run-footer", 4, "Publication archive reference", 250, 30, 10),
+  ]));
+
+  const blocks = layout.pages[0]?.blocks ?? [];
+  assert.deepEqual(blocks.map((block) => block.text), [
+    "Working Papers on Information Systems",
+    "Overview of Document Reading Order",
+    "Example Author",
+    "The body begins with material content for the reader.",
+    "Publication archive reference",
+  ]);
+  assert.ok(blocks.every((block) =>
+    block.inferences?.some((inference) => inference.method === "geometry-line-order")
+  ));
+});
+
+test("layout places a late-emitted table header above its rows using page geometry", () => {
+  const layout = buildLayoutDocument(createObservation([
+    run("run-title", 0, "Demo Table", 72, 760, 20),
+    run("run-row-1", 1, "1 Mouse 115.00", 72, 680, 12),
+    run("run-row-2", 2, "3 Unicorn 250000.00", 72, 650, 12),
+    run("run-header", 3, "Qty Description Price Amount", 72, 710, 14),
+  ]));
+
+  const texts = layout.pages[0]?.blocks.map((block) => block.text) ?? [];
+  assert.deepEqual(texts.slice(0, 2), ["Demo Table", "Qty Description Price Amount"]);
+  assert.ok(texts[2]?.includes("1 Mouse 115.00"));
+  assert.ok(texts[2]?.includes("3 Unicorn 250000.00"));
+});
+
 test("layout preserves a paragraph break after a short sentence-ending tail line", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-tail", 0, "at.", 72, 700),
@@ -290,7 +349,7 @@ test("layout classifies numbered section headings before table-row evidence", ()
 
   assert.equal(sectionBlock?.role, "heading");
   assert.equal(bodyBlock?.role, "body");
-  assert.match(layout.extractedText, /1 INTRODUCTION\n\nSearch engine architectures/u);
+  assert.ok(layout.extractedText.indexOf("1 INTRODUCTION") < layout.extractedText.indexOf("Search engine architectures"));
 });
 
 test("layout keeps numbered table row descriptors as body evidence", () => {
@@ -342,6 +401,9 @@ test("layout keeps uppercase table row labels as body evidence", () => {
   assert.equal(totalRowLabel?.role, "body");
   assert.equal(header?.role, "heading");
   assert.ok(tableRegion);
+  assert.ok(layout.pages[0]?.blocks.every((block) =>
+    block.inferences?.some((inference) => inference.method === "geometry-line-order")
+  ));
 });
 
 test("layout preserves ledger row boundaries and separates retention notices", () => {

@@ -1,2 +1,2 @@
-export * from "./contracts.ts";
+export * from "./public-api.ts";
 export * from "./engine.ts";
