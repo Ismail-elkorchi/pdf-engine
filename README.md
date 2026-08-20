@@ -13,10 +13,9 @@ The package does not display or modify PDFs. It never executes JavaScript, launc
 - document metadata and XMP, named destinations, page labels, outlines, annotations, AcroForm fields, attachments, signatures, optional content, tagged structure, and active-content reporting
 - native text, glyph, marked-content, path, image, color, transparency, geometry, layout, table, form, citation, Markdown, and chunk provenance
 - image resources, inline images, masks, decode arrays, filters, and page placements
-- deterministic literal or word search and cursor-based bounded reads across visible, accessibility, OCR, annotation, form, attachment-description, script, and metadata channels
-- opt-in OCR with caller-supplied offline assets; embedded page imagery is converted internally when needed and is never exposed as a display surface
+- deterministic literal or word search and cursor-based bounded reads across visible, accessibility, annotation, form, attachment-description, script, and metadata channels
 - detached CMS signature integrity checks and caller-supplied certificate trust policy with offline CRL evidence
-- explicit policy and resource budgets for bytes, pages, objects, nesting, decoded data, operators, image pixels, OCR pixels, and caches
+- explicit policy and resource budgets for bytes, pages, objects, nesting, decoded data, operators, image pixels, and caches
 
 ## Install and build
 
@@ -80,7 +79,7 @@ Callers must supply one of these source kinds:
 - `{ kind: "blob", blob }`
 - `{ kind: "random-access", byteLength, read }`
 
-Use `policy` on `engine.open()` to control active-content admission, attachments, repair, passwords, permissions, and resource budgets. Password callbacks are invoked at most three times. No credential, OCR model, trust store, revocation feed, file, or network resource is discovered automatically.
+Use `policy` on `engine.open()` to control active-content admission, attachments, repair, passwords, permissions, and resource budgets. Password callbacks are invoked at most three times. No credential, trust store, revocation feed, file, or network resource is discovered automatically.
 
 ## Public document products
 
@@ -95,13 +94,9 @@ An opened document provides:
 
 Results are cached within the document session. Dispose the document when it is no longer needed.
 
-## OCR
-
-OCR is disabled by default. Configure a `PdfOcrProvider` or use the optional `@ismail-elkorchi/pdf-engine/ocr/tesseract` helper with a caller-supplied Tesseract-compatible module. The helper does not download code, workers, language data, or models.
-
 ## Current limits
 
-PDF is a large format and semantic recovery is not equivalent to visual interpretation. Layout, reading order, tables, and forms remain conservative inferences and carry diagnostics or provenance. Unsupported terminal image encodings remain available as original encoded bytes. OCR currently uses a dominant embedded page image when one can be recovered safely; it does not expose a general page rasterizer. OCSP evidence is accepted as a typed input but reported as unsupported by the offline verifier.
+PDF is a large format and semantic recovery is not equivalent to visual interpretation. Layout, reading order, tables, and forms remain conservative inferences and carry diagnostics or provenance. Unsupported terminal image encodings remain available as original encoded bytes. OCSP evidence is accepted as a typed input but reported as unsupported by the offline verifier.
 
 Treat every PDF as untrusted input and set budgets appropriate to the deployment.
 

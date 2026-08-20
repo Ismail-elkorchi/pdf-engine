@@ -5,7 +5,6 @@ import type {
   PdfKnowledgeDocument,
   PdfLayoutDocument,
   PdfObservedDocument,
-  PdfOcrOptions,
   PdfPolicyAction,
   PdfRuntimeCapabilities,
   PdfRuntimeDescriptor,
@@ -86,7 +85,6 @@ export interface PdfResourceBudget {
   readonly maxDecodedBytes?: number;
   readonly maxOperators?: number;
   readonly maxImagePixels?: number;
-  readonly maxOcrPixels?: number;
   readonly maxCacheBytes?: number;
 }
 
@@ -98,7 +96,6 @@ export interface PdfNormalizedResourceBudget {
   readonly maxDecodedBytes: number;
   readonly maxOperators: number;
   readonly maxImagePixels: number;
-  readonly maxOcrPixels: number;
   readonly maxCacheBytes: number;
 }
 
@@ -139,14 +136,12 @@ export interface PdfEngineIdentity {
 
 export interface PdfEngineOptions {
   readonly defaultPolicy?: PdfPolicy;
-  readonly defaultOcr?: PdfOcrOptions;
 }
 
 export interface PdfOpenRequest {
   readonly source: PdfSource;
   readonly policy?: PdfPolicy;
   readonly passwordProvider?: PdfPasswordProvider;
-  readonly ocr?: PdfOcrOptions;
   readonly signal?: AbortSignal;
 }
 
@@ -166,7 +161,6 @@ export type PdfPageSelection = { readonly kind: "all" } | PdfPageRange | PdfPage
 export type PdfContentChannel =
   | "visible"
   | "accessibility"
-  | "ocr"
   | "annotation"
   | "form-value"
   | "hidden"
@@ -508,7 +502,6 @@ export interface PdfEngine {
   readonly runtime: PdfRuntimeDescriptor;
   readonly capabilities: PdfRuntimeCapabilities;
   readonly defaultPolicy: PdfNormalizedPolicy;
-  readonly defaultOcr: PdfOcrOptions;
   open(request: PdfOpenRequest): Promise<PdfResult<PdfDocument>>;
   dispose(): Promise<void>;
 }

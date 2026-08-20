@@ -1,14 +1,12 @@
 import { buildKnowledgeDocument } from "./knowledge.ts";
 import { buildObservedPages } from "./layout/observed.ts";
 import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts";
-import { applyOcrToObservation, resolveOcrOptions, type PdfResolvedOcrOptions } from "./ocr.ts";
 import { buildPdfDocumentAnalysis } from "./pdf-analysis.ts";
 import { PdfBudgetExceededError, PdfBudgetTracker } from "./pdf-budget.ts";
 import { buildPdfDocumentModel, type PdfDocumentModel } from "./pdf-document-model.ts";
 import { extractPdfFeatures } from "./pdf-features.ts";
 import { extractPdfImages } from "./pdf-images.ts";
 import { PdfObjectStore } from "./pdf-object-store.ts";
-import { buildPdfOcrPageImages } from "./pdf-ocr-image.ts";
 import { verifyPdfSignatures } from "./pdf-signatures.ts";
 import { createPdfByteSource, materializePdfSource, PdfSourceLimitError } from "./pdf-source.ts";
 import { preparePdfStandardPasswordSecurity } from "./pdf-standard-security.ts";
@@ -85,14 +83,12 @@ const DEFAULT_POLICY: PdfNormalizedPolicy = {
     maxDecodedBytes: 256_000_000,
     maxOperators: 10_000_000,
     maxImagePixels: 250_000_000,
-    maxOcrPixels: 100_000_000,
     maxCacheBytes: 256_000_000,
   },
 };
 
 export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   const defaultPolicy = mergePolicy(DEFAULT_POLICY, options.defaultPolicy);
-  const defaultOcr = resolveOcrOptions(undefined, options.defaultOcr);
   const runtime = detectRuntime();
   const capabilities = detectRuntimeCapabilities(runtime);
   const documents = new Set<PdfDocumentSession>();
@@ -103,7 +99,6 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     runtime,
     capabilities,
     defaultPolicy,
-    defaultOcr,
     open,
     dispose,
   };
@@ -128,14 +123,12 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
         }
       }
       const model = await buildPdfDocumentModel(store, policy.repairMode);
-      const ocr = resolveOcrOptions(defaultOcr, request.ocr);
       const document = new PdfDocumentSession(
         source.descriptor,
         bytes,
         store,
         model,
         policy,
-        ocr,
         () => documents.delete(document),
       );
       const features = await document.features();
@@ -177,7 +170,6 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
     disposed = true;
     await Promise.all([...documents].map(async (document) => document.dispose()));
     documents.clear();
-    await defaultOcr.provider?.dispose?.();
   }
 }
 
@@ -188,7 +180,6 @@ class PdfDocumentSession implements PdfDocument {
   readonly #store: PdfObjectStore;
   readonly #model: PdfDocumentModel;
   readonly #policy: PdfNormalizedPolicy;
-  readonly #ocr: PdfResolvedOcrOptions;
   readonly #onDispose: () => void;
   #disposed = false;
   #featuresPromise: Promise<PdfDocumentFeatures> | undefined;
@@ -205,7 +196,6 @@ class PdfDocumentSession implements PdfDocument {
     store: PdfObjectStore,
     model: PdfDocumentModel,
     policy: PdfNormalizedPolicy,
-    ocr: PdfResolvedOcrOptions,
     onDispose: () => void,
   ) {
     this.source = source;
@@ -213,7 +203,6 @@ class PdfDocumentSession implements PdfDocument {
     this.#store = store;
     this.#model = model;
     this.#policy = policy;
-    this.#ocr = ocr;
     this.#onDispose = onDispose;
     this.permissions = resolveDocumentPermissions(store);
   }
@@ -533,26 +522,8 @@ class PdfDocumentSession implements PdfDocument {
       ...base,
       extractedText: buildObservationParagraphText(base),
     };
-    if (this.#ocr.mode === "off") {
-      this.#observationDiagnostics = diagnostics;
-      return observation;
-    }
-    const pageImages = this.#ocr.provider === undefined
-      ? undefined
-      : await buildPdfOcrPageImages(this.#store, this.#model, observation);
-    const ocr = await applyOcrToObservation({
-      source: {
-        bytes: this.#bytes,
-        ...(this.source.fileName !== undefined ? { fileName: this.source.fileName } : {}),
-        ...(this.source.mediaType !== undefined ? { mediaType: this.source.mediaType } : {}),
-        ...(this.source.sha256 !== undefined ? { sha256: this.source.sha256 } : {}),
-      },
-      observation,
-      options: this.#ocr,
-      ...(pageImages !== undefined ? { pageImages } : {}),
-    });
-    this.#observationDiagnostics = [...diagnostics, ...ocr.diagnostics];
-    return ocr.observation;
+    this.#observationDiagnostics = diagnostics;
+    return observation;
   }
 
   async #buildLayout(): Promise<PdfLayoutDocument> {
@@ -583,7 +554,7 @@ class PdfDocumentSession implements PdfDocument {
     pages: PdfPageSelection | undefined,
     channels: readonly PdfContentChannel[] | undefined,
   ): Promise<readonly PdfReadFragment[]> {
-    const selectedChannels = new Set<PdfContentChannel>(channels ?? ["visible", "accessibility", "ocr"]);
+    const selectedChannels = new Set<PdfContentChannel>(channels ?? ["visible", "accessibility"]);
     const selectedPages = selectedPageNumbers(pages, this.summary.pageCount);
     const observation = await this.#observation();
     const fragments: PdfReadFragment[] = [];
@@ -595,11 +566,9 @@ class PdfDocumentSession implements PdfDocument {
         if (mark.kind !== "text") {
           continue;
         }
-        const channel: PdfContentChannel = mark.origin === "ocr"
-          ? "ocr"
-          : mark.visibilityState === "hidden" || mark.hiddenTextCandidate === true
-            ? "hidden"
-            : "visible";
+        const channel: PdfContentChannel = mark.visibilityState === "hidden" || mark.hiddenTextCandidate === true
+          ? "hidden"
+          : "visible";
         if (selectedChannels.has(channel)) {
           fragments.push({
             id: mark.id,
@@ -692,7 +661,7 @@ class PdfDocumentSession implements PdfDocument {
     if (!this.#policy.enforcePermissions || this.permissions.credential !== "user") {
       return;
     }
-    const selected = channels ?? ["visible", "accessibility", "ocr"];
+    const selected = channels ?? ["visible", "accessibility"];
     if (selected.every((channel) => channel === "accessibility") && this.permissions.accessibility) {
       return;
     }
@@ -888,7 +857,6 @@ function mergeBudget(
     maxDecodedBytes: positiveInteger(override?.maxDecodedBytes, defaults.maxDecodedBytes, "maxDecodedBytes"),
     maxOperators: positiveInteger(override?.maxOperators, defaults.maxOperators, "maxOperators"),
     maxImagePixels: positiveInteger(override?.maxImagePixels, defaults.maxImagePixels, "maxImagePixels"),
-    maxOcrPixels: positiveInteger(override?.maxOcrPixels, defaults.maxOcrPixels, "maxOcrPixels"),
     maxCacheBytes: positiveInteger(override?.maxCacheBytes, defaults.maxCacheBytes, "maxCacheBytes"),
   };
 }
@@ -959,9 +927,6 @@ function filterObservation(
     ...observation,
     pages,
     extractedText: "",
-    ...(observation.ocr !== undefined ? {
-      ocr: { ...observation.ocr, pages: observation.ocr.pages.filter((page) => selected.has(page.pageNumber)) },
-    } : {}),
   };
   return { ...base, extractedText: buildObservationParagraphText(base) };
 }
