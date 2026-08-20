@@ -47,7 +47,7 @@ export type PdfFeatureEvidenceSource = "object";
 /**
  * Source of an observed text item.
  */
-export type PdfObservationOrigin = "native-text" | "ocr";
+export type PdfObservationOrigin = "native-text";
 
 /**
  * Encoding form used by the text operand that produced an observed run or glyph.
@@ -91,11 +91,7 @@ export type PdfKnownLimitCode =
   | "knowledge-chunk-heuristic"
   | "knowledge-markdown-heuristic"
   | "table-projection-heuristic"
-  | "table-projection-not-implemented"
-  | "ocr-provider-unavailable"
-  | "ocr-timeout"
-  | "ocr-low-confidence"
-  | "ocr-fusion-heuristic";
+  | "table-projection-not-implemented";
 
 /**
  * Decode state for one recovered stream object.
@@ -106,158 +102,6 @@ export type PdfStreamDecodeState = "available" | "decoded" | "unsupported-filter
  * Observation strategy used to produce the current text and page-mark evidence.
  */
 export type PdfObservationStrategy = "content-stream-interpreter";
-
-/**
- * OCR execution mode. OCR is disabled by default and must be requested explicitly.
- */
-export type PdfOcrMode = "off" | "auto" | "always";
-
-/**
- * Why the OCR fusion layer considered one page.
- */
-export type PdfOcrPageReason = "explicit" | "no-native-text";
-
-/**
- * OCR fusion decision for one page.
- */
-export type PdfOcrFusionDecision =
-  | "applied"
-  | "failed"
-  | "low-confidence"
-  | "provider-unavailable"
-  | "skipped-native-text"
-  | "timeout";
-
-/**
- * Optional page image supplied to an OCR provider.
- */
-export interface PdfOcrPageImage {
-  /** Image bytes supplied to the OCR provider. */
-  readonly bytes: Uint8Array;
-  /** Image media type, for example `image/png`. */
-  readonly mimeType: string;
-  /** Image width in pixels when known. */
-  readonly width?: number;
-  /** Image height in pixels when known. */
-  readonly height?: number;
-  /** Page-space bounds represented by the image, when the source image is a placed page image. */
-  readonly contentBounds?: PdfBoundingBox;
-}
-
-/**
- * Input for an OCR provider for one page.
- */
-export interface PdfOcrPageInput {
-  /** Original document source. */
-  readonly source: PdfDocumentSource;
-  /** One-based page number. */
-  readonly pageNumber: number;
-  /** Page object reference when known. */
-  readonly pageRef?: PdfObjectRef;
-  /** Reason OCR was requested for this page. */
-  readonly reason: PdfOcrPageReason;
-  /** Requested language identifiers. */
-  readonly languages: readonly string[];
-  /** Optional page image supplied by the document session. */
-  readonly pageImage?: PdfOcrPageImage;
-  /** Abort signal for provider work when supported. */
-  readonly signal?: AbortSignal;
-}
-
-/**
- * One OCR text line returned by a provider.
- */
-export interface PdfOcrTextLine {
-  /** Recognized text. */
-  readonly text: string;
-  /** Provider confidence in the range 0..1 when known. */
-  readonly confidence?: number;
-  /** Approximate line bounds in page coordinates when known. */
-  /** Bounds in page-image pixels with a top-left origin. */
-  readonly bbox?: PdfBoundingBox;
-  /** Language identifier when known. */
-  readonly language?: string;
-}
-
-/**
- * OCR result for one page.
- */
-export interface PdfOcrPageResult {
-  /** One-based page number. */
-  readonly pageNumber: number;
-  /** Recognized text lines. */
-  readonly lines: readonly PdfOcrTextLine[];
-  /** Optional provider-specific diagnostic messages. */
-  readonly diagnostics?: readonly string[];
-}
-
-/**
- * OCR provider contract used by the core engine.
- */
-export interface PdfOcrProvider {
-  /** Provider identifier for diagnostics and provenance. */
-  readonly name: string;
-  /**
-   * Recognizes text for one page.
-   *
-   * Providers must be deterministic for identical input and configuration.
-   */
-  recognizePage(input: PdfOcrPageInput): Promise<PdfOcrPageResult>;
-  /** Releases provider-owned workers, WASM instances, or caches. */
-  dispose?(): Promise<void>;
-}
-
-/**
- * OCR options accepted by document-open requests and engine defaults.
- */
-export interface PdfOcrOptions {
-  /** OCR mode. Defaults to `off`. */
-  readonly mode?: PdfOcrMode;
-  /** Provider used when OCR is enabled. */
-  readonly provider?: PdfOcrProvider;
-  /** Language identifiers passed to the provider. Defaults to English. */
-  readonly languages?: readonly string[];
-  /** Minimum accepted line confidence. Defaults to `0.5`. */
-  readonly minConfidence?: number;
-  /** Maximum pages OCR may process for one request. Defaults to `25`. */
-  readonly maxPages?: number;
-  /** Provider timeout per page in milliseconds. Defaults to `30000`. */
-  readonly timeoutMilliseconds?: number;
-}
-
-/**
- * OCR fusion evidence for one page.
- */
-export interface PdfOcrPageEvidence {
-  /** One-based page number. */
-  readonly pageNumber: number;
-  /** Provider identifier when a provider was invoked. */
-  readonly providerName?: string;
-  /** Fusion decision for the page. */
-  readonly decision: PdfOcrFusionDecision;
-  /** Reason OCR was considered for this page. */
-  readonly reason: PdfOcrPageReason;
-  /** Number of OCR lines accepted into observation evidence. */
-  readonly acceptedLineCount: number;
-  /** Number of OCR lines rejected by confidence or empty-text policy. */
-  readonly rejectedLineCount: number;
-  /** Provider or fusion diagnostic messages. */
-  readonly diagnostics: readonly string[];
-}
-
-/**
- * OCR evidence attached to an observation document when OCR is requested.
- */
-export interface PdfOcrDocumentEvidence {
-  /** OCR mode used for the request. */
-  readonly mode: PdfOcrMode;
-  /** Provider identifier when available. */
-  readonly providerName?: string;
-  /** Languages requested from the provider. */
-  readonly languages: readonly string[];
-  /** Page-level OCR fusion evidence. */
-  readonly pages: readonly PdfOcrPageEvidence[];
-}
 
 /**
  * Visibility state recovered for marked content or other observed page evidence.
@@ -283,20 +127,6 @@ export type PdfPageResolutionMethod = "page-tree" | "recovered-page-order" | "st
  * Where a page-level value came from after page-tree inheritance was resolved.
  */
 export type PdfPageValueOrigin = "direct" | "inherited";
-
-/**
- * Raw document input accepted by the engine.
- */
-export interface PdfDocumentSource {
-  /** Document bytes. */
-  readonly bytes: Uint8Array;
-  /** Optional source file name for diagnostics and logs. */
-  readonly fileName?: string;
-  /** Optional caller-supplied media type hint. */
-  readonly mediaType?: string;
-  /** Optional caller-supplied SHA-256 digest of the source bytes. */
-  readonly sha256?: string;
-}
 
 /**
  * Axis-aligned rectangle in page-space units.
@@ -1131,8 +961,6 @@ export interface PdfObservedDocument {
   readonly extractedText: string;
   /** Observed pages in source order. */
   readonly pages: readonly PdfObservedPage[];
-  /** OCR evidence when OCR was requested for this observation. */
-  readonly ocr?: PdfOcrDocumentEvidence;
   /** Known implementation limits that materially affect this observation result. */
   readonly knownLimits: readonly PdfKnownLimitCode[];
 }

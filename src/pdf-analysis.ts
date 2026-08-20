@@ -761,7 +761,6 @@ function createUnboundedContentBudget(): PdfBudgetTracker {
     maxDecodedBytes: Number.MAX_SAFE_INTEGER,
     maxOperators: Number.MAX_SAFE_INTEGER,
     maxImagePixels: Number.MAX_SAFE_INTEGER,
-    maxOcrPixels: Number.MAX_SAFE_INTEGER,
     maxCacheBytes: Number.MAX_SAFE_INTEGER,
   });
 }

@@ -13,7 +13,6 @@ const limits: PdfNormalizedResourceBudget = {
   maxDecodedBytes: 1_000_000,
   maxOperators: 10_000,
   maxImagePixels: 1_000_000,
-  maxOcrPixels: 1_000_000,
   maxCacheBytes: 1_000_000,
 };
 

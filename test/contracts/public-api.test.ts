@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
 
-import { createPdfEngine, type PdfDocument, type PdfOcrProvider, type PdfResult } from "../../src/index.ts";
+import { createPdfEngine, type PdfDocument, type PdfResult } from "../../src/index.ts";
 import {
   buildPdfWithImageResource,
   buildPdfWithCyclicPageBranch,
@@ -125,57 +125,6 @@ test("native feature catalogs and accessibility content remain typed and searcha
   const metadata = valueOf(await document.search({ query: "Research", channels: ["metadata"] }));
   assert.equal(metadata.matches[0]?.pageNumber, undefined);
   assert.equal(metadata.matches[0]?.channel, "metadata");
-  await engine.dispose();
-});
-
-test("OCR receives bounded internal page imagery and returns page-space provenance", async () => {
-  let receivedImage = false;
-  const provider: PdfOcrProvider = {
-    name: "offline-test",
-    recognizePage(input) {
-      const image = input.pageImage;
-      assert.notEqual(image, undefined);
-      assert.deepEqual(Array.from(image?.bytes.slice(0, 8) ?? []), [137, 80, 78, 71, 13, 10, 26, 10]);
-      assert.deepEqual(image?.contentBounds, { x: 144, y: 600, width: 12, height: 12 });
-      receivedImage = true;
-      return Promise.resolve({
-        pageNumber: input.pageNumber,
-        lines: [{
-          text: "Scanned Evidence",
-          confidence: 1,
-          bbox: { x: 0, y: 0, width: 1, height: 1 },
-        }],
-      });
-    },
-  };
-  const engine = createPdfEngine();
-  const document = valueOf(await engine.open({
-    source: { kind: "bytes", bytes: buildPdfWithImageResource() },
-    ocr: { mode: "always", provider },
-  }));
-  const observation = valueOf(await document.extract());
-  const ocrMark = observation.pages[0]?.marks.find((mark) => mark.kind === "text" && mark.origin === "ocr");
-  assert.equal(receivedImage, true);
-  if (ocrMark?.kind !== "text") {
-    assert.fail("OCR did not emit a text mark.");
-  }
-  assert.equal(ocrMark.text, "Scanned Evidence");
-  assert.deepEqual(ocrMark.bbox, { x: 144, y: 600, width: 12, height: 12 });
-  await engine.dispose();
-});
-
-test("OCR limitations remain visible in operation diagnostics", async () => {
-  const engine = createPdfEngine();
-  const document = valueOf(await engine.open({
-    source: { kind: "bytes", bytes: buildPdfWithImageResource() },
-    ocr: { mode: "always" },
-  }));
-  const extracted = await document.extract();
-  assert.equal(extracted.status, "partial");
-  assert.equal(extracted.diagnostics[0]?.code, "ocr-provider-unavailable");
-  const searched = await document.search({ query: "absent" });
-  assert.equal(searched.status, "partial");
-  assert.equal(searched.diagnostics[0]?.code, "ocr-provider-unavailable");
   await engine.dispose();
 });
 
@@ -345,6 +294,5 @@ test("expected document failures are discriminated results while API misuse thro
     source: { kind: "bytes", bytes: buildPdfWithPageContents([]) },
     policy: { resourceBudget: { maxBytes: 0 } },
   }), TypeError);
-  assert.throws(() => createPdfEngine({ defaultOcr: { minConfidence: 2 } }), TypeError);
   await engine.dispose();
 });

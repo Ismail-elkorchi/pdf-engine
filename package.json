@@ -28,10 +28,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "import": "./dist/index.js"
-    },
-    "./ocr/tesseract": {
-      "types": "./dist/ocr/tesseract.d.ts",
-      "import": "./dist/ocr/tesseract.js"
     }
   },
   "files": [
@@ -59,7 +55,7 @@
     "test:contracts": "node --experimental-strip-types --test test/contracts/*.test.ts",
     "test:property": "node --experimental-strip-types --test test/property/*.test.ts",
     "test:node:lower": "node --experimental-strip-types --test test/unit/*.test.ts test/contracts/*.test.ts test/property/*.test.ts",
-    "test:coverage:node-lower": "c8 --all --src src --exclude 'test/**' --exclude 'scripts/**' --report-dir coverage/node-lower --reporter text-summary --reporter json-summary --reporter lcov npm run test:node:lower",
+    "test:coverage:node-lower": "node scripts/clean-coverage.mjs && c8 --all --src src --exclude 'test/**' --exclude 'scripts/**' --report-dir coverage/node-lower --reporter text-summary --reporter json-summary --reporter lcov npm run test:node:lower",
     "test:runtime:node": "node --experimental-strip-types test/runtime/run-portable-runtime-tests.ts --report=reports/test-runtime-node.json",
     "test:runtime:deno": "deno run --allow-read=./src,./test,./jsr --allow-write=./reports test/runtime/run-portable-runtime-tests.ts --report=reports/test-runtime-deno.json",
     "test:runtime:bun": "bun test/runtime/run-portable-runtime-tests.ts --report=reports/test-runtime-bun.json",

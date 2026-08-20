@@ -7,7 +7,6 @@ export type PdfBudgetKind =
   | "decoded-bytes"
   | "operators"
   | "image-pixels"
-  | "ocr-pixels"
   | "cache-bytes";
 
 export class PdfBudgetExceededError extends Error {
@@ -29,10 +28,8 @@ export class PdfBudgetTracker {
   #decodedBytes = 0;
   #operators = 0;
   #imagePixels = 0;
-  #ocrPixels = 0;
   #cacheBytes = 0;
   readonly #imagePixelKeys = new Set<string>();
-  readonly #ocrPixelKeys = new Set<string>();
 
   constructor(limits: PdfNormalizedResourceBudget) {
     this.limits = limits;
@@ -65,16 +62,6 @@ export class PdfBudgetTracker {
     this.#imagePixels = this.#next("image-pixels", this.#imagePixels, count, this.limits.maxImagePixels);
     if (key !== undefined) {
       this.#imagePixelKeys.add(key);
-    }
-  }
-
-  ocrPixels(count: number, key?: string): void {
-    if (key !== undefined && this.#ocrPixelKeys.has(key)) {
-      return;
-    }
-    this.#ocrPixels = this.#next("ocr-pixels", this.#ocrPixels, count, this.limits.maxOcrPixels);
-    if (key !== undefined) {
-      this.#ocrPixelKeys.add(key);
     }
   }
 
