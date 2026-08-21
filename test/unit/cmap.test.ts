@@ -71,9 +71,26 @@ test("decodePdfHexTextWithUnicodeCMap reports partial decodes truthfully", () =>
   const decoded = decodePdfHexTextWithUnicodeCMap("<418004>", unicodeCMap);
 
   assert.deepEqual(decoded, {
-    text: "A",
+    text: "A\ufffd",
     complete: false,
     sourceUnitCount: 2,
     mappedUnitCount: 1,
+  });
+});
+
+test("decodePdfHexTextWithUnicodeCMap preserves mapped text after an unmapped code", () => {
+  const unicodeCMap = parsePdfUnicodeCMap(unicodeCMapText);
+  assert.ok(unicodeCMap);
+  if (!unicodeCMap) {
+    return;
+  }
+
+  const decoded = decodePdfHexTextWithUnicodeCMap("<41800442>", unicodeCMap);
+
+  assert.deepEqual(decoded, {
+    text: "A\ufffdB",
+    complete: false,
+    sourceUnitCount: 3,
+    mappedUnitCount: 2,
   });
 });

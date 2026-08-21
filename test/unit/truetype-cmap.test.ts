@@ -60,6 +60,52 @@ function buildFormat4Subtable(codePoint: number, glyphId: number): Uint8Array {
   );
 }
 
+function buildOverlappingFormat4Subtable(segmentCount: number): Uint8Array {
+  return concatBytes(
+    uint16(4),
+    uint16(16 + segmentCount * 8),
+    uint16(0),
+    uint16(segmentCount * 2),
+    uint16(0),
+    uint16(0),
+    uint16(0),
+    ...Array.from({ length: segmentCount }, () => uint16(0xfffe)),
+    uint16(0),
+    ...Array.from({ length: segmentCount }, () => uint16(0)),
+    ...Array.from({ length: segmentCount }, () => uint16(1)),
+    ...Array.from({ length: segmentCount }, () => uint16(0)),
+  );
+}
+
+function buildFormat0Subtable(codePoint: number, glyphId: number): Uint8Array {
+  const glyphs = new Uint8Array(256);
+  glyphs[codePoint] = glyphId;
+  return concatBytes(uint16(0), uint16(262), uint16(0), glyphs);
+}
+
+function buildFormat6Subtable(firstCode: number, glyphIds: readonly number[]): Uint8Array {
+  return concatBytes(
+    uint16(6),
+    uint16(10 + glyphIds.length * 2),
+    uint16(0),
+    uint16(firstCode),
+    uint16(glyphIds.length),
+    ...glyphIds.map(uint16),
+  );
+}
+
+function buildFormat10Subtable(firstCode: number, glyphIds: readonly number[]): Uint8Array {
+  return concatBytes(
+    uint16(10),
+    uint16(0),
+    uint32(20 + glyphIds.length * 2),
+    uint32(0),
+    uint32(firstCode),
+    uint32(glyphIds.length),
+    ...glyphIds.map(uint16),
+  );
+}
+
 function buildFormat12Subtable(startCharCode: number, endCharCode: number, startGlyphId: number): Uint8Array {
   return concatBytes(
     uint16(12),
@@ -70,6 +116,19 @@ function buildFormat12Subtable(startCharCode: number, endCharCode: number, start
     uint32(startCharCode),
     uint32(endCharCode),
     uint32(startGlyphId),
+  );
+}
+
+function buildFormat13Subtable(startCharCode: number, endCharCode: number, glyphId: number): Uint8Array {
+  return concatBytes(
+    uint16(13),
+    uint16(0),
+    uint32(28),
+    uint32(0),
+    uint32(1),
+    uint32(startCharCode),
+    uint32(endCharCode),
+    uint32(glyphId),
   );
 }
 
@@ -173,6 +232,23 @@ test("parseTrueTypeGlyphUnicodeMap reads a minimal format 12 cmap table", () => 
   assert.equal(glyphMap?.get(9), "😀");
 });
 
+test("parseTrueTypeGlyphUnicodeMap reads compact cmap formats", () => {
+  const cases = [
+    { format: 0, subtable: buildFormat0Subtable(0x41, 5), glyphId: 5, text: "A" },
+    { format: 6, subtable: buildFormat6Subtable(0x391, [8]), glyphId: 8, text: "Α" },
+    { format: 10, subtable: buildFormat10Subtable(0x1f642, [9]), glyphId: 9, text: "🙂" },
+    { format: 13, subtable: buildFormat13Subtable(0x3400, 0x3402, 10), glyphId: 10, text: "㐀" },
+  ] as const;
+
+  for (const entry of cases) {
+    const fontBytes = buildSfnt([{
+      tag: "cmap",
+      bytes: buildCmapTable([{ platformId: 0, encodingId: entry.format, subtable: entry.subtable }]),
+    }]);
+    assert.equal(parseTrueTypeGlyphUnicodeMap(fontBytes)?.get(entry.glyphId), entry.text);
+  }
+});
+
 test("parseTrueTypeGlyphUnicodeMap prefers higher-priority encoding records", () => {
   const fontBytes = buildSfnt([
     {
@@ -213,6 +289,33 @@ test("parseTrueTypeGlyphUnicodeMap rejects truncated cmap tables", () => {
   const truncatedFontBytes = validFontBytes.slice(0, validFontBytes.byteLength - 1);
 
   assert.equal(parseTrueTypeGlyphUnicodeMap(truncatedFontBytes), undefined);
+});
+
+test("parseTrueTypeGlyphUnicodeMap keeps subtables inside the declared cmap table", () => {
+  const fontBytes = buildSfnt([{
+    tag: "cmap",
+    bytes: buildCmapTable([{
+      platformId: 0,
+      encodingId: 0,
+      subtable: buildFormat0Subtable(0x41, 5),
+    }]),
+  }]);
+  new DataView(fontBytes.buffer).setUint32(24, 18, false);
+
+  assert.equal(parseTrueTypeGlyphUnicodeMap(fontBytes), undefined);
+});
+
+test("parseTrueTypeGlyphUnicodeMap bounds overlapping format 4 ranges", () => {
+  const fontBytes = buildSfnt([{
+    tag: "cmap",
+    bytes: buildCmapTable([{
+      platformId: 3,
+      encodingId: 1,
+      subtable: buildOverlappingFormat4Subtable(5),
+    }]),
+  }]);
+
+  assert.equal(parseTrueTypeGlyphUnicodeMap(fontBytes), undefined);
 });
 
 test("parseTrueTypeGlyphUnicodeMap returns undefined when cmap is absent", () => {

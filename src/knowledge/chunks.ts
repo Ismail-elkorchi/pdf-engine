@@ -208,10 +208,6 @@ function sameBlockSequence(
 }
 
 function shouldInlineKnowledgeTableChunk(table: PdfKnowledgeTable): boolean {
-  if (table.heuristic === "contract-award-sequence") {
-    return true;
-  }
-
   if (table.heuristic !== "field-label-form") {
     return false;
   }

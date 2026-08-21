@@ -1,4 +1,5 @@
 import { type PdfBudgetTracker } from "./pdf-budget.ts";
+import { type PdfByteSequence } from "./pdf-source.ts";
 import {
   type PdfArrayValue,
   type PdfBooleanValue,
@@ -41,13 +42,13 @@ export interface PdfParsedIndirectObject {
 }
 
 export class PdfSyntaxParser {
-  readonly #bytes: Uint8Array;
+  readonly #bytes: PdfByteSequence;
   readonly #budget: PdfBudgetTracker;
   readonly #repairStreams: boolean;
   #repaired = false;
 
-  constructor(bytes: Uint8Array, budget: PdfBudgetTracker, repairStreams: boolean = false) {
-    this.#bytes = bytes;
+  constructor(bytes: PdfByteSequence | Uint8Array, budget: PdfBudgetTracker, repairStreams: boolean = false) {
+    this.#bytes = bytes instanceof Uint8Array ? new Uint8ArrayByteSequence(bytes) : bytes;
     this.#budget = budget;
     this.#repairStreams = repairStreams;
   }
@@ -61,13 +62,13 @@ export class PdfSyntaxParser {
   }
 
   byteAt(offset: number): number | undefined {
-    return offset < 0 || offset >= this.#bytes.byteLength ? undefined : this.#bytes[offset];
+    return this.#bytes.byteAt(offset);
   }
 
   parseValue(offset: number, depth: number = 0): PdfParsedValue {
     this.#budget.depth(depth);
     const start = this.skipWhitespace(offset);
-    const current = this.#bytes[start];
+    const current = this.#bytes.byteAt(start);
     if (current === undefined) {
       throw new PdfSyntaxError("Expected a PDF value", start);
     }
@@ -82,7 +83,7 @@ export class PdfSyntaxParser {
       return this.#parseArray(start, depth + 1);
     }
     if (current === 0x3c) {
-      return this.#bytes[start + 1] === 0x3c
+      return this.#bytes.byteAt(start + 1) === 0x3c
         ? this.#parseDictionary(start, depth + 1)
         : this.#parseHexadecimalString(start);
     }
@@ -157,7 +158,7 @@ export class PdfSyntaxParser {
         dictionary: parsedValue.value,
         source: range(nextOffset, recoveredEndstream + 9),
         dataSource: range(streamStart, dataEnd),
-        rawBytes: Uint8Array.from(this.#bytes.subarray(streamStart, dataEnd)),
+        rawBytes: this.#bytes.slice(streamStart, dataEnd),
       };
       nextOffset = this.skipWhitespace(recoveredEndstream + 9);
     }
@@ -185,17 +186,20 @@ export class PdfSyntaxParser {
   skipWhitespace(offset: number): number {
     let cursor = Math.max(0, offset);
     while (cursor < this.#bytes.byteLength) {
-      const byte = this.#bytes[cursor];
+      const byte = this.#bytes.byteAt(cursor);
       if (byte === 0x25) {
         cursor += 1;
         while (cursor < this.#bytes.byteLength) {
-          const commentByte = this.#bytes[cursor];
+          const commentByte = this.#bytes.byteAt(cursor);
+          if (commentByte === undefined) {
+            return cursor;
+          }
           cursor += 1;
           if (commentByte === 0x0a) {
             break;
           }
           if (commentByte === 0x0d) {
-            if (this.#bytes[cursor] === 0x0a) {
+            if (this.#bytes.byteAt(cursor) === 0x0a) {
               cursor += 1;
             }
             break;
@@ -216,8 +220,8 @@ export class PdfSyntaxParser {
     let cursor = offset;
     let value = 0;
     let digits = 0;
-    while (cursor < this.#bytes.byteLength && isDigit(this.#bytes[cursor])) {
-      value = value * 10 + ((this.#bytes[cursor] ?? 0) - 0x30);
+    while (cursor < this.#bytes.byteLength && isDigit(this.#bytes.byteAt(cursor))) {
+      value = value * 10 + ((this.#bytes.byteAt(cursor) ?? 0) - 0x30);
       if (!Number.isSafeInteger(value)) {
         throw new PdfSyntaxError("PDF integer exceeds the safe integer range", offset);
       }
@@ -228,15 +232,15 @@ export class PdfSyntaxParser {
   }
 
   matchesKeyword(offset: number, keyword: string): boolean {
-    if (!isBoundary(this.#bytes[offset - 1])) {
+    if (!isBoundary(this.#bytes.byteAt(offset - 1))) {
       return false;
     }
     for (let index = 0; index < keyword.length; index += 1) {
-      if (this.#bytes[offset + index] !== keyword.charCodeAt(index)) {
+      if (this.#bytes.byteAt(offset + index) !== keyword.charCodeAt(index)) {
         return false;
       }
     }
-    return isBoundary(this.#bytes[offset + keyword.length]);
+    return isBoundary(this.#bytes.byteAt(offset + keyword.length));
   }
 
   findKeyword(keyword: string, offset: number, limit: number = this.#bytes.byteLength): number {
@@ -290,23 +294,30 @@ export class PdfSyntaxParser {
 
   #matchesRepairKeyword(offset: number, keyword: string): boolean {
     for (let index = 0; index < keyword.length; index += 1) {
-      if (this.#bytes[offset + index] !== keyword.charCodeAt(index)) {
+      if (this.#bytes.byteAt(offset + index) !== keyword.charCodeAt(index)) {
         return false;
       }
     }
-    return isBoundary(this.#bytes[offset + keyword.length]);
+    return isBoundary(this.#bytes.byteAt(offset + keyword.length));
   }
 
   #parseName(start: number): PdfParsedValue {
     let cursor = start + 1;
     const bytes: number[] = [];
-    while (cursor < this.#bytes.byteLength && !isDelimiter(this.#bytes[cursor])) {
-      if (this.#bytes[cursor] === 0x23 && isHex(this.#bytes[cursor + 1]) && isHex(this.#bytes[cursor + 2])) {
-        bytes.push((hexValue(this.#bytes[cursor + 1] ?? 0) << 4) | hexValue(this.#bytes[cursor + 2] ?? 0));
+    while (cursor < this.#bytes.byteLength) {
+      const byte = this.#bytes.byteAt(cursor);
+      if (byte === undefined) {
+        throw new PdfSyntaxError("Name crosses an unloaded byte range", cursor);
+      }
+      if (isDelimiter(byte)) {
+        break;
+      }
+      if (byte === 0x23 && isHex(this.#bytes.byteAt(cursor + 1)) && isHex(this.#bytes.byteAt(cursor + 2))) {
+        bytes.push((hexValue(this.#bytes.byteAt(cursor + 1) ?? 0) << 4) | hexValue(this.#bytes.byteAt(cursor + 2) ?? 0));
         cursor += 3;
         continue;
       }
-      bytes.push(this.#bytes[cursor] ?? 0);
+      bytes.push(byte);
       cursor += 1;
     }
     const rawBytes = Uint8Array.from(bytes);
@@ -324,14 +335,17 @@ export class PdfSyntaxParser {
     let cursor = start + 1;
     let depth = 1;
     while (cursor < this.#bytes.byteLength) {
-      const byte = this.#bytes[cursor];
+      const byte = this.#bytes.byteAt(cursor);
+      if (byte === undefined) {
+        throw new PdfSyntaxError("Literal string crosses an unloaded byte range", cursor);
+      }
       if (byte === 0x5c) {
-        const escaped = this.#bytes[cursor + 1];
+        const escaped = this.#bytes.byteAt(cursor + 1);
         if (escaped === undefined) {
           throw new PdfSyntaxError("Unterminated literal string escape", cursor);
         }
         if (escaped === 0x0d || escaped === 0x0a) {
-          cursor += escaped === 0x0d && this.#bytes[cursor + 2] === 0x0a ? 3 : 2;
+          cursor += escaped === 0x0d && this.#bytes.byteAt(cursor + 2) === 0x0a ? 3 : 2;
           continue;
         }
         const simpleEscape = escapedByte(escaped);
@@ -343,8 +357,8 @@ export class PdfSyntaxParser {
         if (isOctal(escaped)) {
           let octal = escaped - 0x30;
           let digits = 1;
-          while (digits < 3 && isOctal(this.#bytes[cursor + 1 + digits])) {
-            octal = octal * 8 + ((this.#bytes[cursor + 1 + digits] ?? 0) - 0x30);
+          while (digits < 3 && isOctal(this.#bytes.byteAt(cursor + 1 + digits))) {
+            octal = octal * 8 + ((this.#bytes.byteAt(cursor + 1 + digits) ?? 0) - 0x30);
             digits += 1;
           }
           bytes.push(octal & 0xff);
@@ -385,8 +399,8 @@ export class PdfSyntaxParser {
   #parseHexadecimalString(start: number): PdfParsedValue {
     const nibbles: number[] = [];
     let cursor = start + 1;
-    while (cursor < this.#bytes.byteLength && this.#bytes[cursor] !== 0x3e) {
-      const byte = this.#bytes[cursor];
+    while (cursor < this.#bytes.byteLength && this.#bytes.byteAt(cursor) !== 0x3e) {
+      const byte = this.#bytes.byteAt(cursor);
       if (isWhitespace(byte)) {
         cursor += 1;
         continue;
@@ -397,7 +411,7 @@ export class PdfSyntaxParser {
       nibbles.push(hexValue(byte ?? 0));
       cursor += 1;
     }
-    if (this.#bytes[cursor] !== 0x3e) {
+    if (this.#bytes.byteAt(cursor) !== 0x3e) {
       throw new PdfSyntaxError("Unterminated hexadecimal string", start);
     }
     if (nibbles.length % 2 !== 0) {
@@ -422,7 +436,7 @@ export class PdfSyntaxParser {
     let cursor = start + 1;
     while (true) {
       cursor = this.skipWhitespace(cursor);
-      if (this.#bytes[cursor] === 0x5d) {
+      if (this.#bytes.byteAt(cursor) === 0x5d) {
         const end = cursor + 1;
         const value: PdfArrayValue = { kind: "array", items, source: range(start, end) };
         return { value, nextOffset: end };
@@ -441,7 +455,7 @@ export class PdfSyntaxParser {
     let cursor = start + 2;
     while (true) {
       cursor = this.skipWhitespace(cursor);
-      if (this.#bytes[cursor] === 0x3e && this.#bytes[cursor + 1] === 0x3e) {
+      if (this.#bytes.byteAt(cursor) === 0x3e && this.#bytes.byteAt(cursor + 1) === 0x3e) {
         const end = cursor + 2;
         const value: PdfDictionaryValue = { kind: "dictionary", entries, source: range(start, end) };
         return { value, nextOffset: end };
@@ -487,13 +501,13 @@ export class PdfSyntaxParser {
 
   #readNumber(start: number): { readonly value: number; readonly integer: boolean; readonly nextOffset: number } {
     let cursor = start;
-    if (this.#bytes[cursor] === 0x2b || this.#bytes[cursor] === 0x2d) {
+    if (this.#bytes.byteAt(cursor) === 0x2b || this.#bytes.byteAt(cursor) === 0x2d) {
       cursor += 1;
     }
     let digits = 0;
     let decimalPoints = 0;
     while (cursor < this.#bytes.byteLength) {
-      const byte = this.#bytes[cursor];
+      const byte = this.#bytes.byteAt(cursor);
       if (isDigit(byte)) {
         digits += 1;
         cursor += 1;
@@ -509,7 +523,7 @@ export class PdfSyntaxParser {
     if (digits === 0) {
       throw new PdfSyntaxError("Malformed number", start);
     }
-    const value = Number(TEXT_DECODER.decode(this.#bytes.subarray(start, cursor)));
+    const value = Number(TEXT_DECODER.decode(this.#bytes.slice(start, cursor)));
     if (!Number.isFinite(value) || (decimalPoints === 0 && !Number.isSafeInteger(value))) {
       throw new PdfSyntaxError("PDF number is outside the supported finite range", start);
     }
@@ -517,13 +531,33 @@ export class PdfSyntaxParser {
   }
 
   skipStreamLineBreak(offset: number): number {
-    if (this.#bytes[offset] === 0x0d && this.#bytes[offset + 1] === 0x0a) {
+    if (this.#bytes.byteAt(offset) === 0x0d && this.#bytes.byteAt(offset + 1) === 0x0a) {
       return offset + 2;
     }
-    if (this.#bytes[offset] === 0x0d || this.#bytes[offset] === 0x0a) {
+    if (this.#bytes.byteAt(offset) === 0x0d || this.#bytes.byteAt(offset) === 0x0a) {
       return offset + 1;
     }
     throw new PdfSyntaxError("The stream keyword must be followed by a line break", offset);
+  }
+}
+
+class Uint8ArrayByteSequence implements PdfByteSequence {
+  readonly #bytes: Uint8Array;
+
+  constructor(bytes: Uint8Array) {
+    this.#bytes = bytes;
+  }
+
+  get byteLength(): number {
+    return this.#bytes.byteLength;
+  }
+
+  byteAt(offset: number): number | undefined {
+    return offset < 0 || offset >= this.byteLength ? undefined : this.#bytes[offset];
+  }
+
+  slice(start: number, end: number): Uint8Array {
+    return this.#bytes.slice(start, end);
   }
 }
 

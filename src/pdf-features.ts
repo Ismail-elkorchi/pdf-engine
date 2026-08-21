@@ -53,7 +53,7 @@ export async function extractPdfFeatures(
   const attachments = await collectAttachments(store, model.catalog);
   const signatures = await collectSignatures(store, formFields);
   const optionalContentGroups = await collectOptionalContentGroups(store, model.catalog);
-  const activeContent = await collectActiveContent(store);
+  const activeContent = await collectActiveContent(store, model);
   const findings = await buildFindings(store, model, policy, {
     annotations,
     outlines,
@@ -77,6 +77,43 @@ export async function extractPdfFeatures(
     optionalContentGroups,
     activeContent,
   };
+}
+
+export async function extractPdfAdmissionFindings(
+  store: PdfObjectStore,
+  model: PdfDocumentModel,
+  policy: PdfNormalizedPolicy,
+): Promise<readonly PdfFeatureFinding[]> {
+  const activeContent = await collectActiveContent(store, model);
+  const attachments = policy.embeddedFiles === "deny"
+    ? await collectAttachments(store, model.catalog)
+    : [];
+  const findings: PdfFeatureFinding[] = [];
+  for (const item of activeContent) {
+    if (item.kind !== "javascript" && item.kind !== "launch") {
+      continue;
+    }
+    const javascript = item.kind === "javascript";
+    findings.push({
+      kind: javascript ? "javascript-actions" : "launch-actions",
+      action: javascript ? policy.javascriptActions : policy.launchActions,
+      evidenceSource: "object",
+      ...(item.objectRef !== undefined ? { objectRef: item.objectRef, actionRef: item.objectRef } : {}),
+      actionName: javascript ? "JavaScript" : "Launch",
+      message: `${javascript ? "JavaScript" : "Launch"} action is present and will not be executed.`,
+    });
+  }
+  for (const attachment of attachments) {
+    findings.push({
+      kind: "embedded-files",
+      action: policy.embeddedFiles,
+      evidenceSource: "object",
+      objectRef: attachment.objectRef,
+      embeddedFileRef: attachment.objectRef,
+      message: "An embedded file is present and requires explicit extraction.",
+    });
+  }
+  return findings;
 }
 
 async function collectMetadata(
@@ -698,31 +735,113 @@ async function collectOptionalContentGroups(
   return groups;
 }
 
-async function collectActiveContent(store: PdfObjectStore): Promise<readonly PdfActiveContent[]> {
+async function collectActiveContent(
+  store: PdfObjectStore,
+  model: PdfDocumentModel,
+): Promise<readonly PdfActiveContent[]> {
   const active: PdfActiveContent[] = [];
-  for (const object of await store.all()) {
-    if (object.value.kind !== "dictionary") {
-      continue;
+  const visited = new Set<string>();
+  const roots: PdfValue[] = [];
+  const addRoot = (value: PdfValue | undefined): void => {
+    if (value !== undefined) {
+      roots.push(value);
     }
-    const actionName = pdfAsName(await store.resolve(pdfDictionaryGet(object.value, "S")));
-    const subtype = pdfAsName(await store.resolve(pdfDictionaryGet(object.value, "Subtype")));
+  };
+  addRoot(pdfDictionaryGet(model.catalog, "OpenAction"));
+  addRoot(pdfDictionaryGet(model.catalog, "AA"));
+  addRoot(pdfDictionaryGet(model.catalog, "Outlines"));
+  addRoot(pdfDictionaryGet(model.catalog, "AcroForm"));
+  const names = await store.resolveDictionary(pdfDictionaryGet(model.catalog, "Names"));
+  addRoot(names === undefined ? undefined : pdfDictionaryGet(names, "JavaScript"));
+  for (const page of model.pages) {
+    addRoot(pdfDictionaryGet(page.dictionary, "AA"));
+    page.annotations.forEach((ref) => roots.push(referenceValue(ref)));
+  }
+
+  const visit = async (
+    value: PdfValue,
+    objectRef: PdfReference | undefined,
+    path: readonly number[],
+  ): Promise<void> => {
+    if (value.kind === "reference") {
+      const key = pdfReferenceKey(value.value);
+      if (visited.has(key)) {
+        return;
+      }
+      visited.add(key);
+      const object = await store.get(value.value);
+      if (object !== undefined) {
+        await visit(object.value, object.ref, []);
+      }
+      return;
+    }
+    if (value.kind === "array") {
+      for (const [index, item] of value.items.entries()) {
+        await visit(item, objectRef, [...path, index]);
+      }
+      return;
+    }
+    if (value.kind !== "dictionary") {
+      return;
+    }
+
+    const actionName = pdfAsName(await store.resolve(pdfDictionaryGet(value, "S")));
+    const subtype = pdfAsName(await store.resolve(pdfDictionaryGet(value, "Subtype")));
     const kind = classifyActiveContent(actionName, subtype);
-    if (kind === undefined) {
-      continue;
+    if (kind !== undefined) {
+      const payloadSource = pdfDictionaryGet(value, "JS");
+      const payloadRef = pdfAsReference(payloadSource);
+      const payloadValue = await store.resolve(payloadSource);
+      const payloadStream = payloadRef === undefined ? undefined : await decodeOptionalStream(store, payloadRef);
+      const payload = payloadValue?.kind === "string" ? payloadValue.bytes : payloadStream?.bytes;
+      const pathSuffix = path.length === 0 ? "root" : path.map(String).join("-");
+      const idSuffix = objectRef === undefined
+        ? `direct-${pathSuffix}`
+        : `${String(objectRef.objectNumber)}-${String(objectRef.generationNumber)}-${pathSuffix}`;
+      active.push({
+        id: `active-${idSuffix}`,
+        kind,
+        ...(objectRef !== undefined ? { objectRef } : {}),
+        ...(payload !== undefined ? { payload: Uint8Array.from(payload) } : {}),
+      });
     }
-    const payloadSource = pdfDictionaryGet(object.value, "JS");
-    const payloadRef = pdfAsReference(payloadSource);
-    const payloadValue = await store.resolve(payloadSource);
-    const payloadStream = payloadRef === undefined ? undefined : await decodeOptionalStream(store, payloadRef);
-    const payload = payloadValue?.kind === "string" ? payloadValue.bytes : payloadStream?.bytes;
-    active.push({
-      id: `active-${String(object.ref.objectNumber)}-${String(object.ref.generationNumber)}`,
-      kind,
-      objectRef: object.ref,
-      ...(payload !== undefined ? { payload: Uint8Array.from(payload) } : {}),
-    });
+
+    for (const [index, entry] of value.entries.entries()) {
+      if (SKIPPED_ACTIVE_CONTENT_KEYS.has(entry.key.value)) {
+        continue;
+      }
+      await visit(entry.value, objectRef, [...path, index]);
+    }
+  };
+
+  for (const [index, root] of roots.entries()) {
+    await visit(root, undefined, [index]);
   }
   return active;
+}
+
+const SKIPPED_ACTIVE_CONTENT_KEYS = new Set([
+  "AP",
+  "Contents",
+  "D",
+  "Dest",
+  "DR",
+  "EF",
+  "F",
+  "JS",
+  "Metadata",
+  "P",
+  "Parent",
+  "Resources",
+  "XFA",
+]);
+
+function referenceValue(ref: PdfReference): PdfValue {
+  return {
+    kind: "reference",
+    value: ref,
+    source: { start: 0, end: 0 },
+  };
 }
 
 async function buildFindings(

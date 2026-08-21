@@ -19,7 +19,7 @@ export interface PdfPageModel {
   readonly pageNumber: number;
   readonly ref: PdfReference;
   readonly dictionary: PdfDictionaryValue;
-  readonly contents: readonly PdfReference[];
+  readonly contentsValue?: PdfValue;
   readonly annotations: readonly PdfReference[];
   readonly resources?: PdfDictionaryValue;
   readonly mediaBox?: PdfBoundingBox;
@@ -90,11 +90,12 @@ async function visitPageTree(
     const nextInherited = await inheritPageValues(store, object.value, inherited);
     if (type === "Page") {
       store.budget.page();
+      const contentsValue = pdfDictionaryGet(object.value, "Contents");
       pages.push({
         pageNumber: pages.length + 1,
         ref,
         dictionary: object.value,
-        contents: await resolveReferenceArray(store, pdfDictionaryGet(object.value, "Contents")),
+        ...(contentsValue !== undefined ? { contentsValue } : {}),
         annotations: await resolveReferenceArray(store, pdfDictionaryGet(object.value, "Annots")),
         ...(nextInherited.resources !== undefined ? { resources: nextInherited.resources } : {}),
         ...(nextInherited.mediaBox !== undefined ? { mediaBox: nextInherited.mediaBox } : {}),
@@ -139,6 +140,13 @@ async function inheritPageValues(
   };
 }
 
+export function resolvePageContentReferences(
+  store: PdfObjectStore,
+  page: PdfPageModel,
+): Promise<readonly PdfReference[]> {
+  return resolveReferenceArray(store, page.contentsValue);
+}
+
 export async function resolveReferenceArray(
   store: PdfObjectStore,
   value: PdfValue | undefined,
@@ -148,9 +156,9 @@ export async function resolveReferenceArray(
   }
   const direct = pdfAsReference(value);
   if (direct !== undefined) {
-    const object = await store.get(direct);
-    if (object?.value.kind === "array") {
-      return referencesFromArray(object.value);
+    if (await store.isArrayObject(direct)) {
+      const object = await store.get(direct);
+      return object?.value.kind === "array" ? referencesFromArray(object.value) : [];
     }
     return [direct];
   }

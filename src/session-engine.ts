@@ -4,11 +4,11 @@ import { buildLayoutDocument, buildObservationParagraphText } from "./layout.ts"
 import { buildPdfDocumentAnalysis } from "./pdf-analysis.ts";
 import { PdfBudgetExceededError, PdfBudgetTracker } from "./pdf-budget.ts";
 import { buildPdfDocumentModel, type PdfDocumentModel } from "./pdf-document-model.ts";
-import { extractPdfFeatures } from "./pdf-features.ts";
+import { extractPdfAdmissionFindings, extractPdfFeatures } from "./pdf-features.ts";
 import { extractPdfImages } from "./pdf-images.ts";
 import { PdfObjectStore } from "./pdf-object-store.ts";
 import { verifyPdfSignatures } from "./pdf-signatures.ts";
-import { createPdfByteSource, materializePdfSource, PdfSourceLimitError } from "./pdf-source.ts";
+import { createPdfByteSource, loadPdfSource, PdfSourceLimitError, type PdfSourceData } from "./pdf-source.ts";
 import { preparePdfStandardPasswordSecurity } from "./pdf-standard-security.ts";
 import { PdfStreamDecodeError } from "./pdf-stream.ts";
 import { PdfSyntaxError } from "./pdf-syntax.ts";
@@ -112,9 +112,9 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       throwIfAborted(request.signal);
       const policy = mergePolicy(defaultPolicy, request.policy);
       const source = createPdfByteSource(request.source);
-      const bytes = await materializePdfSource(source, policy.resourceBudget.maxBytes, request.signal);
+      const data = await loadPdfSource(source, policy.resourceBudget.maxBytes, request.signal);
       const budget = new PdfBudgetTracker(policy.resourceBudget);
-      const { store } = await PdfObjectStore.open(bytes, budget, policy.repairMode);
+      const { store } = await PdfObjectStore.open(data, budget, policy.repairMode);
       if (store.encrypt !== undefined) {
         const unlock = await unlockStore(store, request, source.descriptor, policy.passwordPolicy);
         diagnostics.push(...unlock.diagnostics);
@@ -125,18 +125,14 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
       const model = await buildPdfDocumentModel(store, policy.repairMode);
       const document = new PdfDocumentSession(
         source.descriptor,
-        bytes,
+        data,
         store,
         model,
         policy,
         () => documents.delete(document),
       );
-      const features = await document.features();
-      if (features.status === "blocked" || features.status === "failed" || features.status === "cancelled") {
-        await document.dispose();
-        return features;
-      }
-      const denied = features.value.findings.filter((finding) => finding.action === "deny");
+      const admissionFindings = await extractPdfAdmissionFindings(store, model, policy);
+      const denied = admissionFindings.filter((finding) => finding.action === "deny");
       if (denied.length > 0) {
         await document.dispose();
         return {
@@ -173,33 +169,36 @@ export function createPdfEngine(options: PdfEngineOptions = {}): PdfEngine {
   }
 }
 
+interface PdfObservationProduct {
+  readonly value: PdfObservedDocument;
+  readonly diagnostics: readonly PdfDiagnostic[];
+}
+
 class PdfDocumentSession implements PdfDocument {
   readonly source: PdfSourceDescriptor;
   readonly permissions: PdfDocumentPermissions;
-  readonly #bytes: Uint8Array;
+  readonly #data: PdfSourceData;
   readonly #store: PdfObjectStore;
   readonly #model: PdfDocumentModel;
   readonly #policy: PdfNormalizedPolicy;
   readonly #onDispose: () => void;
   #disposed = false;
   #featuresPromise: Promise<PdfDocumentFeatures> | undefined;
-  #observationPromise: Promise<PdfObservedDocument> | undefined;
-  #observationDiagnostics: readonly PdfDiagnostic[] = [];
+  readonly #observationPromises = new Map<string, Promise<PdfObservationProduct>>();
   #layoutPromise: Promise<PdfLayoutDocument> | undefined;
   #knowledgePromise: Promise<PdfKnowledgeDocument> | undefined;
-  #imagesPromise: Promise<PdfImages> | undefined;
-  #imageBytesPromise: Promise<PdfImages> | undefined;
+  readonly #imagesPromises = new Map<string, Promise<PdfImages>>();
 
   constructor(
     source: PdfSourceDescriptor,
-    bytes: Uint8Array,
+    data: PdfSourceData,
     store: PdfObjectStore,
     model: PdfDocumentModel,
     policy: PdfNormalizedPolicy,
     onDispose: () => void,
   ) {
     this.source = source;
-    this.#bytes = bytes;
+    this.#data = data;
     this.#store = store;
     this.#model = model;
     this.#policy = policy;
@@ -210,7 +209,7 @@ class PdfDocumentSession implements PdfDocument {
   get summary(): PdfStructureSummary {
     return {
       pdfVersion: this.#store.version,
-      byteLength: this.#bytes.byteLength,
+      byteLength: this.#data.byteLength,
       pageCount: this.#model.pages.length,
       objectCount: this.#store.objectCount,
       revisionCount: this.#store.sections.length,
@@ -291,66 +290,73 @@ class PdfDocumentSession implements PdfDocument {
   }
 
   extract(options: PdfExtractOptions = {}): Promise<PdfResult<PdfObservedDocument>> {
+    let diagnostics: readonly PdfDiagnostic[] = [];
     return this.#run(options.signal, async () => {
       this.#assertChannelsAllowed(options.channels);
-      this.#observationPromise ??= this.#buildObservation();
-      const observation = await this.#observationPromise;
-      return filterObservation(observation, options.pages);
-    }, () => this.#observationDiagnostics);
+      const observation = await this.#observation(options.pages);
+      diagnostics = observation.diagnostics;
+      return observation.value;
+    }, () => diagnostics);
   }
 
   layout(options: PdfLayoutOptions = {}): Promise<PdfResult<PdfLayoutDocument>> {
+    let diagnostics: readonly PdfDiagnostic[] = [];
     return this.#run(options.signal, async () => {
       this.#assertChannelsAllowed(options.channels);
+      const observation = await this.#observation(options.pages);
+      diagnostics = observation.diagnostics;
       if (options.pages === undefined || options.pages.kind === "all") {
-        this.#layoutPromise ??= this.#buildLayout();
+        this.#layoutPromise ??= Promise.resolve(buildLayoutDocument(observation.value));
         return this.#layoutPromise;
       }
-      const observation = await this.#observation();
-      return buildLayoutDocument(filterObservation(observation, options.pages));
-    }, () => this.#observationDiagnostics);
+      return buildLayoutDocument(observation.value);
+    }, () => diagnostics);
   }
 
   knowledge(options: PdfKnowledgeOptions = {}): Promise<PdfResult<PdfKnowledgeDocument>> {
+    let diagnostics: readonly PdfDiagnostic[] = [];
     return this.#run(options.signal, async () => {
       this.#assertChannelsAllowed(options.channels);
+      const observation = await this.#observation(options.pages);
+      diagnostics = observation.diagnostics;
       if (options.pages === undefined || options.pages.kind === "all") {
-        this.#knowledgePromise ??= this.#buildKnowledge();
+        this.#layoutPromise ??= Promise.resolve(buildLayoutDocument(observation.value));
+        this.#knowledgePromise ??= this.#layoutPromise.then((layout) =>
+          buildKnowledgeDocument(layout, observation.value)
+        );
         return this.#knowledgePromise;
       }
-      const observation = filterObservation(await this.#observation(), options.pages);
-      return buildKnowledgeDocument(buildLayoutDocument(observation), observation);
-    }, () => this.#observationDiagnostics);
+      return buildKnowledgeDocument(buildLayoutDocument(observation.value), observation.value);
+    }, () => diagnostics);
   }
 
   images(options: PdfImageOptions = {}): Promise<PdfResult<PdfImages>> {
+    let diagnostics: readonly PdfDiagnostic[] = [];
     return this.#run(options.signal, async () => {
       this.#assertCopyAllowed();
       const selectedPages = selectedPageNumbers(options.pages, this.summary.pageCount);
-      const images = options.includeBytes === true
-        ? await (this.#imageBytesPromise ??= extractPdfImages(
-            this.#store,
-            this.#model,
-            await this.#observation(),
-            { includeBytes: true },
-          ))
-        : await (this.#imagesPromise ??= extractPdfImages(
-            this.#store,
-            this.#model,
-            await this.#observation(),
-            {},
-          ));
-      return filterImages(images, selectedPages);
-    }, () => this.#observationDiagnostics);
+      const observation = await this.#observation(options.pages);
+      diagnostics = observation.diagnostics;
+      const cacheKey = `${options.includeBytes === true ? "bytes" : "metadata"}:${pageSelectionKey(options.pages, selectedPages)}`;
+      let images = this.#imagesPromises.get(cacheKey);
+      if (images === undefined) {
+        images = extractPdfImages(this.#store, this.#model, observation.value, options);
+        this.#imagesPromises.set(cacheKey, images);
+      }
+      return images;
+    }, () => diagnostics);
   }
 
   search(request: PdfSearchRequest): Promise<PdfResult<PdfSearchResults>> {
+    let diagnostics: readonly PdfDiagnostic[] = [];
     return this.#run(request.signal, async () => {
       this.#assertChannelsAllowed(request.channels);
       if (request.query.length === 0) {
         throw new TypeError("Search query must not be empty.");
       }
-      const fragments = await this.#fragments(request.pages, request.channels);
+      const observation = await this.#observation(request.pages);
+      diagnostics = observation.diagnostics;
+      const fragments = await this.#fragments(observation.value, request.channels);
       const query = request.caseSensitive === true
         ? request.query
         : normalizeSearchText(request.query);
@@ -384,17 +390,20 @@ class PdfDocumentSession implements PdfDocument {
         }
       }
       return { query: request.query, matches, truncated };
-    }, () => this.#observationDiagnostics);
+    }, () => diagnostics);
   }
 
   read(request: PdfReadRequest): Promise<PdfResult<PdfReadResult>> {
+    let diagnostics: readonly PdfDiagnostic[] = [];
     return this.#run(request.signal, async () => {
       this.#assertChannelsAllowed(request.channels);
       if (!Number.isSafeInteger(request.maxCharacters) || request.maxCharacters <= 0) {
         throw new TypeError("maxCharacters must be a positive safe integer.");
       }
       const elementIds = request.elementIds === undefined ? undefined : new Set(request.elementIds);
-      const fragments = (await this.#fragments(request.pages, request.channels))
+      const observation = await this.#observation(request.pages);
+      diagnostics = observation.diagnostics;
+      const fragments = (await this.#fragments(observation.value, request.channels))
         .filter((fragment) => elementIds === undefined || elementIds.has(fragment.id));
       const selected: PdfReadFragment[] = [];
       let count = 0;
@@ -458,7 +467,7 @@ class PdfDocumentSession implements PdfDocument {
         characterCount: count,
         ...(nextCursor !== undefined ? { nextCursor } : {}),
       };
-    }, () => this.#observationDiagnostics);
+    }, () => diagnostics);
   }
 
   attachment(request: { readonly id: string; readonly signal?: AbortSignal }): Promise<PdfResult<PdfAttachmentPayload>> {
@@ -486,7 +495,8 @@ class PdfDocumentSession implements PdfDocument {
         throw new TypeError("Signature validationTime must be a valid Date.");
       }
       const features = await this.#featureCatalog();
-      return verifyPdfSignatures(this.#bytes, this.#store, features.signatures, request);
+      const bytes = await this.#data.materialize(request.signal);
+      return verifyPdfSignatures(bytes, this.#store, features.signatures, request);
     });
   }
 
@@ -496,53 +506,64 @@ class PdfDocumentSession implements PdfDocument {
     }
     this.#disposed = true;
     this.#featuresPromise = undefined;
-    this.#observationPromise = undefined;
-    this.#observationDiagnostics = [];
+    this.#observationPromises.clear();
     this.#layoutPromise = undefined;
     this.#knowledgePromise = undefined;
-    this.#imagesPromise = undefined;
-    this.#imageBytesPromise = undefined;
+    this.#imagesPromises.clear();
     this.#onDispose();
     return Promise.resolve();
   }
 
-  async #buildObservation(): Promise<PdfObservedDocument> {
+  async #buildObservation(pageNumbers?: ReadonlySet<number>): Promise<PdfObservationProduct> {
     const diagnostics: PdfDiagnostic[] = [];
-    const features = await this.#featureCatalog();
-    const analysis = await buildPdfDocumentAnalysis(this.#store, this.#model);
-    const observed = buildObservedPages({ analysis, featureFindings: features.findings }, diagnostics);
+    const analysis = await buildPdfDocumentAnalysis(this.#store, this.#model, {
+      ...(pageNumbers !== undefined ? { pageNumbers } : {}),
+    });
+    const observed = buildObservedPages({ analysis, featureFindings: [] }, diagnostics);
+    if (observed.hasFontMappingGap) {
+      diagnostics.push(diagnostic(
+        "native-text-unicode-mapping-incomplete",
+        "observation",
+        "medium",
+        "Some native text codes could not be mapped to Unicode without guessing.",
+      ));
+    }
+    if (observed.hasLiteralFontEncodingGap) {
+      diagnostics.push(diagnostic(
+        "native-text-encoding-incomplete",
+        "observation",
+        "medium",
+        "Some native literal text bytes could not be mapped through the declared font encoding.",
+      ));
+    }
     const base: PdfObservedDocument = {
       kind: "pdf-observation",
       strategy: "content-stream-interpreter",
       extractedText: "",
       pages: observed.pages,
-      knownLimits: [],
+      knownLimits: [
+        ...(observed.hasFontMappingGap ? ["native-text-unicode-mapping-incomplete" as const] : []),
+        ...(observed.hasLiteralFontEncodingGap ? ["native-text-encoding-incomplete" as const] : []),
+      ],
     };
     const observation: PdfObservedDocument = {
       ...base,
       extractedText: buildObservationParagraphText(base),
     };
-    this.#observationDiagnostics = diagnostics;
+    return { value: observation, diagnostics };
+  }
+
+  async #observation(selection?: PdfPageSelection): Promise<PdfObservationProduct> {
+    const pageNumbers = selection === undefined || selection.kind === "all"
+      ? undefined
+      : selectedPageNumbers(selection, this.summary.pageCount);
+    const key = pageSelectionKey(selection, pageNumbers);
+    let observation = this.#observationPromises.get(key);
+    if (observation === undefined) {
+      observation = this.#buildObservation(pageNumbers);
+      this.#observationPromises.set(key, observation);
+    }
     return observation;
-  }
-
-  async #buildLayout(): Promise<PdfLayoutDocument> {
-    return buildLayoutDocument(await this.#observation());
-  }
-
-  async #buildKnowledge(): Promise<PdfKnowledgeDocument> {
-    const observation = await this.#observation();
-    return buildKnowledgeDocument(await this.#layout(), observation);
-  }
-
-  async #observation(): Promise<PdfObservedDocument> {
-    this.#observationPromise ??= this.#buildObservation();
-    return this.#observationPromise;
-  }
-
-  async #layout(): Promise<PdfLayoutDocument> {
-    this.#layoutPromise ??= this.#buildLayout();
-    return this.#layoutPromise;
   }
 
   async #featureCatalog(): Promise<PdfDocumentFeatures> {
@@ -551,12 +572,11 @@ class PdfDocumentSession implements PdfDocument {
   }
 
   async #fragments(
-    pages: PdfPageSelection | undefined,
+    observation: PdfObservedDocument,
     channels: readonly PdfContentChannel[] | undefined,
   ): Promise<readonly PdfReadFragment[]> {
     const selectedChannels = new Set<PdfContentChannel>(channels ?? ["visible", "accessibility"]);
-    const selectedPages = selectedPageNumbers(pages, this.summary.pageCount);
-    const observation = await this.#observation();
+    const selectedPages = new Set(observation.pages.map((page) => page.pageNumber));
     const fragments: PdfReadFragment[] = [];
     for (const page of observation.pages) {
       if (!selectedPages.has(page.pageNumber)) {
@@ -914,32 +934,6 @@ function booleanOption(value: boolean | undefined, fallback: boolean, name: stri
   return value;
 }
 
-function filterObservation(
-  observation: PdfObservedDocument,
-  selection: PdfPageSelection | undefined,
-): PdfObservedDocument {
-  if (selection === undefined || selection.kind === "all") {
-    return observation;
-  }
-  const selected = selectedPageNumbers(selection, observation.pages.length);
-  const pages = observation.pages.filter((page) => selected.has(page.pageNumber));
-  const base: PdfObservedDocument = {
-    ...observation,
-    pages,
-    extractedText: "",
-  };
-  return { ...base, extractedText: buildObservationParagraphText(base) };
-}
-
-function filterImages(images: PdfImages, selectedPages: ReadonlySet<number>): PdfImages {
-  const placements = images.placements.filter((placement) => selectedPages.has(placement.pageNumber));
-  const resourceIds = new Set(placements.map((placement) => placement.resourceId));
-  return {
-    resources: images.resources.filter((resource) => resourceIds.has(resource.id)),
-    placements,
-  };
-}
-
 function filterStructureElements(
   elements: PdfDocumentFeatures["structureTree"],
   selectedPages: ReadonlySet<number>,
@@ -981,6 +975,16 @@ function selectedPageNumbers(selection: PdfPageSelection | undefined, pageCount:
     pages.add(page);
   }
   return pages;
+}
+
+function pageSelectionKey(
+  selection: PdfPageSelection | undefined,
+  pages: ReadonlySet<number> | undefined,
+): string {
+  if (selection === undefined || selection.kind === "all") {
+    return "all";
+  }
+  return [...(pages ?? [])].toSorted((left, right) => left - right).join(",");
 }
 
 function readFilterNames(value: PdfValue): readonly string[] {

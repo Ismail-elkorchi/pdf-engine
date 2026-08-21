@@ -29,8 +29,6 @@ const ROW_SEQUENCE_MIN_ROWS = 2;
 const COMPACT_ROW_SEQUENCE_MAX_HEADER_TOKENS = 18;
 const COMPACT_ROW_SEQUENCE_MAX_ROW_TOKENS = 32;
 const COMPACT_ROW_SEQUENCE_MAX_COLUMNS = 8;
-const CONTRACT_AWARD_HEADERS = ["Serial No.", "Contract Description", "Contractor", "Amount", "Remarks"] as const;
-const CONTRACT_AWARD_MIN_ROWS = 2;
 const COMPACT_MEASUREMENT_UNITS = new Set([
   "%",
   "a",
@@ -104,12 +102,6 @@ export function collectProjectedTableCandidates(
         : projectStackedHeaderSequenceTable(page, observationPage, runToBlock);
     addCandidateIfNonOverlapping(candidates, stackedHeaderCandidate);
 
-    const contractAwardCandidate =
-      observationPage === undefined
-        ? undefined
-        : projectContractAwardSequenceTable(page, observationPage, runToBlock);
-    addCandidateIfNonOverlapping(candidates, contractAwardCandidate);
-
     const fieldValueCandidate = projectFieldValueFormTable(page);
     addCandidateIfNonOverlapping(candidates, fieldValueCandidate);
 
@@ -162,7 +154,7 @@ function collectRegionScopedCandidates(
 
 function projectRegionTextTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
   const blocks = page.blocks
-    .filter((block) => block.role !== "header" && block.role !== "footer")
+    .filter((block) => isTableScopedPage(page) || (block.role !== "header" && block.role !== "footer"))
     .sort((left, right) => left.readingOrder - right.readingOrder);
   if (blocks.length < 3) {
     return undefined;
@@ -279,7 +271,7 @@ function createRegionScopedObservationPage(
 function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
   const anchoredBlocks = page.blocks
     .filter((block): block is AnchoredLayoutBlock => block.anchor !== undefined)
-    .filter((block) => block.role !== "header" && block.role !== "footer");
+    .filter((block) => isTableScopedPage(page) || (block.role !== "header" && block.role !== "footer"));
   if (anchoredBlocks.length < 8) {
     return undefined;
   }
@@ -295,26 +287,79 @@ function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | 
     }
 
     const columnAnchors = headerBlocks.map((block) => block.anchor.x);
+    const headerCells: ProjectedTableCellSeed[] = headerBlocks.map((block, columnIndex) => ({
+      columnIndex,
+      text: normalizeCellText(block.text),
+      blocks: [block],
+    }));
     const rowSeeds: ProjectedTableRowSeed[] = [
       {
-        cells: headerBlocks.map((block, columnIndex) => ({
-          columnIndex,
-          text: normalizeCellText(block.text),
-          blocks: [block],
-        })),
+        cells: headerCells,
       },
     ];
 
     let previousCenterY = headerBand.centerY;
+    let headerClosed = false;
     for (const candidateBand of rowBands.slice(rowIndex + 1)) {
       const fontSize = candidateBand.blocks[0]?.fontSize ?? headerBlocks[0]?.fontSize ?? 12;
       const rowGap = previousCenterY - candidateBand.centerY;
-      if (rowGap > Math.max(20, fontSize * 2.8)) {
+      const maximumRowGap = isTableScopedPage(page)
+        ? Math.max(80, fontSize * 10)
+        : Math.max(20, fontSize * 2.8);
+      if (rowGap > maximumRowGap) {
         break;
       }
 
+      if (
+        rowSeeds.length === 1 &&
+        !headerClosed &&
+        rowGap <= Math.max(16, fontSize * 2) &&
+        candidateBand.blocks.length < headerBlocks.length &&
+        candidateBand.blocks.every((block) =>
+          normalizeCellText(block.text).length <= 40 &&
+          !looksLikeNumericCell(block.text) &&
+          !looksLikeRowIdentifier(block.text)
+        )
+      ) {
+        attachHeaderContinuation(headerCells, candidateBand.blocks, columnAnchors);
+        previousCenterY = candidateBand.centerY;
+        continue;
+      }
+
+      if (candidateBand.blocks.some((block) => looksLikeRowIdentifier(block.text))) {
+        headerClosed = true;
+      }
       const rowCells = matchBlocksToColumns(candidateBand.blocks, columnAnchors);
+      if (
+        headerClosed &&
+        rowCells.length > 0 &&
+        candidateBand.blocks.some((block) => looksLikeRowIdentifier(block.text))
+      ) {
+        rowSeeds.push({ cells: rowCells });
+        previousCenterY = candidateBand.centerY;
+        continue;
+      }
+      if (isTableScopedPage(page) && rowSeeds.length > 1 && rowCells.length > 0) {
+        rowSeeds.push({ cells: rowCells });
+        previousCenterY = candidateBand.centerY;
+        continue;
+      }
       if (rowCells.length < GRID_ROW_CELL_MIN_COUNT) {
+        if (
+          rowSeeds.length === 1 &&
+          !headerClosed &&
+          rowGap <= Math.max(40, fontSize * 4) &&
+          candidateBand.blocks.length <= 2 &&
+          candidateBand.blocks.every((block) =>
+            normalizeCellText(block.text).length <= 40 &&
+            !looksLikeNumericCell(block.text) &&
+            !looksLikeRowIdentifier(block.text)
+          )
+        ) {
+          attachHeaderContinuation(headerCells, candidateBand.blocks, columnAnchors);
+          previousCenterY = candidateBand.centerY;
+          continue;
+        }
         if (rowSeeds.length > 1) {
           break;
         }
@@ -325,12 +370,13 @@ function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | 
       previousCenterY = candidateBand.centerY;
     }
 
-    const bodyRowCount = rowSeeds.length - 1;
+    const projectedRows = mergeGridContinuationRows(rowSeeds);
+    const bodyRowCount = projectedRows.length - 1;
     if (bodyRowCount < ROW_SEQUENCE_MIN_ROWS) {
       continue;
     }
 
-    const headers = rowSeeds[0]?.cells.map((cell) => cell.text).filter((text) => text.length > 0) ?? [];
+    const headers = projectedRows[0]?.cells.map((cell) => cell.text).filter((text) => text.length > 0) ?? [];
     if (headers.length < GRID_HEADER_ROW_MIN_COLUMNS) {
       continue;
     }
@@ -339,11 +385,11 @@ function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | 
       pageNumber: page.pageNumber,
       heuristic: "layout-grid",
       headers,
-      blockIds: dedupeStrings(rowSeeds.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
+      blockIds: dedupeStrings(projectedRows.flatMap((row) => row.cells.flatMap((cell) => cell.blocks.map((block) => block.id)))),
       confidence: Number(
         Math.min(0.86, 0.48 + headers.length * 0.035 + bodyRowCount * 0.03).toFixed(2),
       ),
-      rows: rowSeeds,
+      rows: projectedRows,
     };
     const score = headers.length * 10 + bodyRowCount;
     if (score > selectedScore) {
@@ -353,6 +399,100 @@ function projectLayoutGridTable(page: PdfLayoutPage): ProjectedTableCandidate | 
   }
 
   return selectedCandidate;
+}
+
+function mergeGridContinuationRows(rows: readonly ProjectedTableRowSeed[]): readonly ProjectedTableRowSeed[] {
+  const header = rows[0];
+  if (header === undefined) return [];
+  const merged: ProjectedTableRowSeed[] = [header];
+  let current: ProjectedTableCellSeed[] | undefined;
+  const flush = (): void => {
+    if (current !== undefined) merged.push({ cells: current.map(orderMergedCellEvidence) });
+    current = undefined;
+  };
+  for (const row of rows.slice(1)) {
+    const startsRow = row.cells.some((cell) => looksLikeRowIdentifier(cell.text));
+    if (startsRow) {
+      flush();
+      current = row.cells.map((cell) => ({ ...cell, blocks: [...cell.blocks] }));
+      continue;
+    }
+    if (current === undefined) {
+      merged.push(row);
+      continue;
+    }
+    for (const cell of row.cells) {
+      const existingIndex = current.findIndex((candidate) => candidate.columnIndex === cell.columnIndex);
+      if (existingIndex < 0) {
+        current.push({ ...cell, blocks: [...cell.blocks] });
+        continue;
+      }
+      const existing = current[existingIndex];
+      if (existing === undefined) continue;
+      current[existingIndex] = {
+        ...existing,
+        text: joinCellText(existing.text, cell.text),
+        blocks: [...existing.blocks, ...cell.blocks],
+      };
+    }
+    current.sort((left, right) => left.columnIndex - right.columnIndex);
+  }
+  flush();
+  return merged;
+}
+
+function orderMergedCellEvidence(cell: ProjectedTableCellSeed): ProjectedTableCellSeed {
+  const blocks = dedupeById(cell.blocks);
+  if (blocks.length < 2 || blocks.some((block) => block.anchor === undefined)) return cell;
+  const columns: PdfLayoutBlock[][] = [];
+  for (const block of [...blocks].sort((left, right) => (left.anchor?.x ?? 0) - (right.anchor?.x ?? 0))) {
+    const x = block.anchor?.x;
+    if (x === undefined) continue;
+    const column = columns.find((candidate) => {
+      const candidateX = candidate[0]?.anchor?.x;
+      return candidateX !== undefined && Math.abs(candidateX - x) <= Math.max(18, (block.fontSize ?? 12) * 2);
+    });
+    if (column === undefined) columns.push([block]);
+    else column.push(block);
+  }
+  const orderedBlocks = columns
+    .toSorted((left, right) => (left[0]?.anchor?.x ?? 0) - (right[0]?.anchor?.x ?? 0))
+    .flatMap((column) => column.toSorted((left, right) =>
+      (right.anchor?.y ?? 0) - (left.anchor?.y ?? 0) || left.readingOrder - right.readingOrder
+    ));
+  return {
+    ...cell,
+    text: orderedBlocks.map((block) => normalizeCellText(block.text)).filter((text) => text.length > 0).join(" "),
+    blocks: orderedBlocks,
+  };
+}
+
+function isTableScopedPage(page: PdfLayoutPage): boolean {
+  return page.regions?.length === 1 && page.regions[0]?.kind === "table";
+}
+
+function attachHeaderContinuation(
+  headerCells: ProjectedTableCellSeed[],
+  blocks: readonly AnchoredLayoutBlock[],
+  columnAnchors: readonly number[],
+): void {
+  for (const block of blocks) {
+    const columnIndex = columnAnchors
+      .map((anchor, index) => ({ index, distance: Math.abs(anchor - block.anchor.x) }))
+      .toSorted((left, right) => left.distance - right.distance)[0]?.index;
+    if (columnIndex === undefined) continue;
+    const cell = headerCells[columnIndex];
+    if (cell === undefined) continue;
+    headerCells[columnIndex] = {
+      ...cell,
+      text: joinCellText(cell.text, block.text),
+      blocks: [...cell.blocks, block],
+    };
+  }
+}
+
+function looksLikeRowIdentifier(text: string): boolean {
+  return /^\d{1,8}(?:[.)]|\s)\S/u.test(normalizeCellText(text));
 }
 
 function projectRowSequenceTable(
@@ -568,61 +708,6 @@ function projectStackedHeaderSequenceTable(
   };
 }
 
-function projectContractAwardSequenceTable(
-  layoutPage: PdfLayoutPage,
-  observationPage: PdfObservedPage,
-  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
-): ProjectedTableCandidate | undefined {
-  const headerEndIndex = findContractAwardHeaderEndIndex(observationPage.runs);
-  if (headerEndIndex === undefined) {
-    return undefined;
-  }
-
-  const bodyRows = collectContractAwardRows(observationPage.runs.slice(headerEndIndex + 1));
-  if (bodyRows.length < CONTRACT_AWARD_MIN_ROWS) {
-    return undefined;
-  }
-
-  const headerBlocks = toRunBlocks(observationPage.runs.slice(0, headerEndIndex + 1), runToBlock);
-  const rows: ProjectedTableRowSeed[] = [
-    {
-      cells: CONTRACT_AWARD_HEADERS.map((header, columnIndex) => ({
-        columnIndex,
-        text: header,
-        blocks: headerBlocks,
-      })),
-    },
-  ];
-  const blockIds = new Set<string>(headerBlocks.map((block) => block.id));
-
-  for (const bodyRow of bodyRows) {
-    const projectedRow = projectContractAwardRow(bodyRow, runToBlock);
-    if (!projectedRow) {
-      continue;
-    }
-
-    rows.push(projectedRow);
-    for (const cell of projectedRow.cells) {
-      for (const block of cell.blocks) {
-        blockIds.add(block.id);
-      }
-    }
-  }
-
-  if (rows.length - 1 < CONTRACT_AWARD_MIN_ROWS) {
-    return undefined;
-  }
-
-  return {
-    pageNumber: layoutPage.pageNumber,
-    heuristic: "contract-award-sequence",
-    headers: [...CONTRACT_AWARD_HEADERS],
-    blockIds: [...blockIds],
-    confidence: Number(Math.min(0.81, 0.54 + (rows.length - 1) * 0.03).toFixed(2)),
-    rows,
-  };
-}
-
 function findSelectedHeaderRunGroup(
   runs: readonly PdfObservedTextRun[],
 ): { readonly startIndex: number; readonly runs: readonly PdfObservedTextRun[] } | undefined {
@@ -660,128 +745,6 @@ function findSelectedHeaderRunGroup(
   }
 
   return selectedGroup;
-}
-
-function findContractAwardHeaderEndIndex(runs: readonly PdfObservedTextRun[]): number | undefined {
-  const headerWindow = runs.slice(0, 32).map((run) => normalizeCellText(run.text)).join(" ").toLowerCase();
-  if (
-    !headerWindow.includes("serial no.") ||
-    !headerWindow.includes("contract description") ||
-    !headerWindow.includes("remarks")
-  ) {
-    return undefined;
-  }
-
-  const firstRowIndex = runs.findIndex((run, index) =>
-    index > 0 && looksLikeContractAwardRowStart(normalizeCellText(run.text))
-  );
-  return firstRowIndex <= 0 ? undefined : firstRowIndex - 1;
-}
-
-function collectContractAwardRows(
-  runs: readonly PdfObservedTextRun[],
-): readonly (readonly PdfObservedTextRun[])[] {
-  const rows: PdfObservedTextRun[][] = [];
-  let currentRow: PdfObservedTextRun[] = [];
-
-  for (const run of runs) {
-    const text = normalizeCellText(run.text);
-    if (text.length === 0) {
-      continue;
-    }
-
-    if (looksLikeContractAwardRowStart(text)) {
-      if (currentRow.length > 0) {
-        rows.push(currentRow);
-      }
-      currentRow = [run];
-      continue;
-    }
-
-    if (currentRow.length === 0) {
-      continue;
-    }
-
-    currentRow.push(run);
-  }
-
-  if (currentRow.length > 0) {
-    rows.push(currentRow);
-  }
-
-  return rows.filter((row) => row.length >= 4);
-}
-
-function projectContractAwardRow(
-  rowRuns: readonly PdfObservedTextRun[],
-  runToBlock: ReadonlyMap<string, PdfLayoutBlock>,
-): ProjectedTableRowSeed | undefined {
-  const rowStartText = normalizeCellText(rowRuns[0]?.text ?? "");
-  const rowStartParts = rowStartText.split(/\s+/u);
-  const serialNumber = rowStartParts[0];
-  const descriptionStart = rowStartParts.slice(1).join(" ");
-  if (!serialNumber || !/^\d{1,3}$/u.test(serialNumber) || descriptionStart.length === 0) {
-    return undefined;
-  }
-
-  const descriptionParts = [descriptionStart];
-  let runIndex = 1;
-  while (runIndex < rowRuns.length) {
-    const text = normalizeCellText(rowRuns[runIndex]?.text ?? "");
-    if (text.length === 0) {
-      runIndex += 1;
-      continue;
-    }
-
-    if (looksLikeContractCodeRun(text) || looksLikeAwardAmountRun(text)) {
-      break;
-    }
-
-    descriptionParts.push(text);
-    runIndex += 1;
-  }
-
-  while (runIndex < rowRuns.length && looksLikeContractCodeRun(normalizeCellText(rowRuns[runIndex]?.text ?? ""))) {
-    runIndex += 1;
-  }
-
-  const contractorRuns: PdfObservedTextRun[] = [];
-  while (runIndex < rowRuns.length) {
-    const text = normalizeCellText(rowRuns[runIndex]?.text ?? "");
-    if (text.length === 0) {
-      runIndex += 1;
-      continue;
-    }
-
-    if (looksLikeAwardAmountRun(text) || looksLikeContractAwardRemark(text)) {
-      break;
-    }
-
-    contractorRuns.push(rowRuns[runIndex] as PdfObservedTextRun);
-    runIndex += 1;
-  }
-
-  const trailerText = rowRuns.slice(runIndex).map((run) => normalizeCellText(run.text)).join(" ");
-  const descriptionText = normalizeCellText(descriptionParts.join(" "));
-  const contractorText = normalizeContractAwardContractor(
-    contractorRuns.map((run) => normalizeCellText(run.text)).join(" "),
-  );
-  const amountText = extractContractAwardAmount(trailerText);
-  const remarkText = extractContractAwardRemark(trailerText);
-  if (!descriptionText || !contractorText || !amountText || !remarkText) {
-    return undefined;
-  }
-
-  const rowBlocks = toRunBlocks(rowRuns, runToBlock);
-  return {
-    cells: [
-      { columnIndex: 0, text: serialNumber, blocks: rowBlocks },
-      { columnIndex: 1, text: descriptionText, blocks: rowBlocks },
-      { columnIndex: 2, text: contractorText, blocks: rowBlocks },
-      { columnIndex: 3, text: amountText, blocks: rowBlocks },
-      { columnIndex: 4, text: remarkText, blocks: rowBlocks },
-    ],
-  };
 }
 
 function collectSequenceDataRuns(
@@ -884,19 +847,6 @@ function looksLikeStackedHeaderBodyRows(
 
     return row.length >= 4;
   });
-}
-
-function normalizeContractAwardContractor(text: string): string {
-  let normalizedText = normalizeCellText(text).replace(/^Shopping\s+/u, "");
-  normalizedText = normalizedText.replace(/\b(?:P\.?\s?O\.?\s?Box|PR Box|Box)\b.*$/iu, "").trim();
-  const companyMatch = normalizedText.match(
-    /^(.+?\b(?:Limited|Ltd|Ltd\.|Company|Companies|Enterprise|Enterprises|Centre|Services|Systems|Press)\b)/u,
-  );
-  if (companyMatch?.[1]) {
-    return companyMatch[1];
-  }
-
-  return normalizedText;
 }
 
 function chunkSequenceRuns(
@@ -1104,7 +1054,7 @@ function looksLikeGridHeaderRow(blocks: readonly AnchoredLayoutBlock[]): boolean
     return false;
   }
 
-  if (texts.some((text) => text.length > 32 || looksLikeNumericCell(text))) {
+  if (texts.some((text) => text.length > 64 || looksLikeNumericCell(text))) {
     return false;
   }
 
@@ -1158,32 +1108,6 @@ function compareBlocksByX(left: AnchoredLayoutBlock, right: AnchoredLayoutBlock)
 function isHeaderRunText(text: string): boolean {
   const normalized = normalizeCellText(text);
   return normalized.length > 0 && normalized.length <= 24 && !normalized.includes(":") && !looksLikeNumericCell(normalized);
-}
-
-function looksLikeContractAwardRowStart(text: string): boolean {
-  return /^\d{1,3}\s+\S/u.test(text);
-}
-
-function looksLikeContractCodeRun(text: string): boolean {
-  return /^(?:[A-Z]{2,}\/){2,}[A-Z0-9/‐-]+$/u.test(text) || /^[‐-][A-Z0-9/\s]+$/u.test(text);
-}
-
-function looksLikeAwardAmountRun(text: string): boolean {
-  return /\d[\d,.]*\s*(?:GHS|GHȻ|GBP|USD|EUR|£)/u.test(text);
-}
-
-function extractContractAwardAmount(text: string): string | undefined {
-  const match = text.match(/\d[\d,.]*\s*(?:GHS|GHȻ|GBP|USD|EUR|£)/u);
-  return match?.[0];
-}
-
-function extractContractAwardRemark(text: string): string | undefined {
-  const match = text.match(/\b(?:Completed|Awarded|Cancelled|Ongoing)\b/iu);
-  return match?.[0];
-}
-
-function looksLikeContractAwardRemark(text: string): boolean {
-  return extractContractAwardRemark(text) !== undefined;
 }
 
 function isSequenceDataRunText(text: string): boolean {

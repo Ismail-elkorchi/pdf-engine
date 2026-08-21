@@ -57,10 +57,11 @@ export function decodePdfHexTextWithUnicodeCMap(
 
   let offset = 0;
   let text = "";
+  let sourceUnitCount = 0;
   let mappedUnitCount = 0;
 
   while (offset < normalizedHex.length) {
-    let matched = false;
+    let sourceHex: string | undefined;
 
     for (const codeLength of codeLengths) {
       const nextOffset = offset + codeLength * 2;
@@ -68,37 +69,35 @@ export function decodePdfHexTextWithUnicodeCMap(
         continue;
       }
 
-      const sourceHex = normalizedHex.slice(offset, nextOffset);
-      if (!matchesAnyCodeSpaceRange(sourceHex, unicodeCMap.codeSpaceRanges)) {
+      const candidate = normalizedHex.slice(offset, nextOffset);
+      if (!matchesAnyCodeSpaceRange(candidate, unicodeCMap.codeSpaceRanges)) {
         continue;
       }
-
-      const mappedText = decodeMappedSourceHex(sourceHex, unicodeCMap);
-      if (mappedText === undefined) {
-        continue;
-      }
-
-      text += mappedText;
-      offset = nextOffset;
-      mappedUnitCount += 1;
-      matched = true;
+      sourceHex = candidate;
       break;
     }
 
-    if (!matched) {
-      return {
-        text,
-        complete: false,
-        sourceUnitCount: mappedUnitCount + 1,
-        mappedUnitCount,
-      };
+    if (sourceHex === undefined) {
+      const fallbackLength = codeLengths.findLast((codeLength) => offset + codeLength * 2 <= normalizedHex.length) ?? 1;
+      sourceHex = normalizedHex.slice(offset, Math.min(normalizedHex.length, offset + fallbackLength * 2));
     }
+
+    sourceUnitCount += 1;
+    offset += sourceHex.length;
+    const mappedText = decodeMappedSourceHex(sourceHex, unicodeCMap);
+    if (mappedText === undefined) {
+      text += "\ufffd";
+      continue;
+    }
+
+    text += mappedText;
+    mappedUnitCount += 1;
   }
 
   return {
     text,
-    complete: true,
-    sourceUnitCount: mappedUnitCount,
+    complete: mappedUnitCount === sourceUnitCount,
+    sourceUnitCount,
     mappedUnitCount,
   };
 }

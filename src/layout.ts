@@ -4,84 +4,86 @@ import type {
   PdfLayoutBlock,
   PdfLayoutDocument,
   PdfLayoutInferenceRecord,
+  PdfLayoutPage,
   PdfLayoutRegion,
   PdfLayoutRole,
-  PdfLayoutPage,
   PdfObjectRef,
-  PdfPoint,
   PdfObservedDocument,
   PdfObservedPage,
   PdfObservedTextRun,
+  PdfPoint,
   PdfWritingMode,
 } from "./contracts.ts";
 
-interface RepeatedBoundarySets {
-  readonly headers: ReadonlySet<string>;
-  readonly footers: ReadonlySet<string>;
-}
-
-interface GroupedBlockSeed {
+interface LayoutBlockSeed {
   readonly id: string;
   readonly pageNumber: number;
-  readonly readingOrder: number;
   readonly text: string;
-  readonly lastLineText?: string;
-  readonly startsParagraph: boolean;
   readonly runIds: readonly string[];
   readonly glyphIds: readonly string[];
-  readonly writingMode?: PdfWritingMode;
   readonly resolutionMethod: PdfObservedPage["resolutionMethod"];
   readonly pageRef?: PdfObjectRef;
   readonly anchor?: PdfPoint;
   readonly bbox?: PdfBoundingBox;
   readonly fontSize?: number;
-  readonly inferences?: readonly PdfLayoutInferenceRecord[];
-  readonly hasGeneratorPathTrace?: boolean;
+  readonly writingMode?: PdfWritingMode;
+  readonly paragraphContinuation?: boolean;
+  readonly paragraphBoundary?: boolean;
+  readonly inferences: readonly PdfLayoutInferenceRecord[];
 }
 
-interface GroupedLayoutBlock extends PdfLayoutBlock {
-  readonly hasGeneratorPathTrace?: boolean;
+interface OrderedLayoutBlock extends LayoutBlockSeed {
+  readonly readingOrder: number;
 }
 
 interface GroupedLayoutPage {
   readonly pageNumber: number;
   readonly resolutionMethod: PdfObservedPage["resolutionMethod"];
   readonly pageRef?: PdfObjectRef;
-  readonly blocks: readonly GroupedLayoutBlock[];
+  readonly blocks: readonly OrderedLayoutBlock[];
 }
 
-const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
-const groupedLayoutPagesByObservation = new WeakMap<PdfObservedDocument, readonly GroupedLayoutPage[]>();
+interface RepeatedBoundaryEvidence {
+  readonly keys: ReadonlySet<string>;
+}
+
+interface TableEvidence {
+  readonly blockIds: ReadonlySet<string>;
+  readonly headerBlockIds: ReadonlySet<string>;
+  readonly region?: PdfLayoutRegion;
+}
+
+interface FormEvidence {
+  readonly region?: PdfLayoutRegion;
+}
+
+interface PeripheralBands {
+  readonly headers: ReadonlySet<string>;
+  readonly footers: ReadonlySet<string>;
+}
+
+interface VisualRow {
+  readonly blocks: readonly OrderedLayoutBlock[];
+  readonly y: number;
+}
+
+const groupedPagesByObservation = new WeakMap<PdfObservedDocument, readonly GroupedLayoutPage[]>();
 
 export function buildObservationParagraphText(observation: PdfObservedDocument): string {
-  return serializeObservationPages(getGroupedLayoutPages(observation));
+  const groupedPages = getGroupedPages(observation);
+  const repeated = collectRepeatedBoundaryEvidence(groupedPages);
+  return serializePages(classifyPages(groupedPages, repeated));
 }
 
 export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayoutDocument {
-  const groupedPages = getGroupedLayoutPages(observation);
-  const publicGroupedPages = groupedPages.map((page) => ({
-    pageNumber: page.pageNumber,
-    resolutionMethod: page.resolutionMethod,
-    ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
-    blocks: page.blocks.map((block) => toPublicLayoutBlock(block)),
-  }));
-  const repeatedBoundarySets = buildRepeatedBoundarySets(publicGroupedPages);
-  const pages = publicGroupedPages.map((page) => {
-    const blocks = page.blocks.map((block, blockIndex) => classifyLayoutBlock(block, blockIndex, repeatedBoundarySets, page.blocks));
-    return {
-      pageNumber: page.pageNumber,
-      resolutionMethod: page.resolutionMethod,
-      ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
-      blocks,
-      regions: inferLayoutRegions(page.pageNumber, blocks),
-    };
-  });
-
+  const groupedPages = getGroupedPages(observation);
+  const repeated = collectRepeatedBoundaryEvidence(groupedPages);
+  const pages = classifyPages(groupedPages, repeated);
   return {
     kind: "pdf-layout",
     strategy: "line-blocks",
     pages,
-    extractedText: serializeLayoutPages(pages),
+    extractedText: serializePages(pages),
     knownLimits: dedupeKnownLimits([
       ...observation.knownLimits,
       "layout-block-heuristic",
@@ -92,3689 +94,1386 @@ export function buildLayoutDocument(observation: PdfObservedDocument): PdfLayout
   };
 }
 
-function getGroupedLayoutPages(observation: PdfObservedDocument): readonly GroupedLayoutPage[] {
-  const cachedPages = groupedLayoutPagesByObservation.get(observation);
-  if (cachedPages !== undefined) {
-    return cachedPages;
+function getGroupedPages(observation: PdfObservedDocument): readonly GroupedLayoutPage[] {
+  const cached = groupedPagesByObservation.get(observation);
+  if (cached !== undefined) {
+    return cached;
   }
-
-  const groupedPages = observation.pages.map((page) => groupPageIntoBlocks(page));
-  groupedLayoutPagesByObservation.set(observation, groupedPages);
-  return groupedPages;
+  const grouped = observation.pages.map(groupPage);
+  groupedPagesByObservation.set(observation, grouped);
+  return grouped;
 }
 
-function toPublicLayoutBlock(block: GroupedLayoutBlock): PdfLayoutBlock {
-  const { hasGeneratorPathTrace, lastLineText, ...publicBlock } = block as GroupedLayoutBlock & { readonly lastLineText?: string };
-  void hasGeneratorPathTrace;
-  void lastLineText;
-  return publicBlock;
-}
-
-function mergeRunBoundingBoxes(runs: readonly PdfObservedTextRun[]): PdfBoundingBox | undefined {
-  const boxes = runs.map((run) => run.bbox).filter((bbox): bbox is PdfBoundingBox => bbox !== undefined);
-  if (boxes.length === 0) {
-    return undefined;
-  }
-
-  const left = Math.min(...boxes.map((bbox) => bbox.x));
-  const top = Math.min(...boxes.map((bbox) => bbox.y));
-  const right = Math.max(...boxes.map((bbox) => bbox.x + bbox.width));
-  const bottom = Math.max(...boxes.map((bbox) => bbox.y + bbox.height));
-  return {
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-  };
-}
-
-function groupPageIntoBlocks(page: PdfObservedPage): GroupedLayoutPage {
-  const pageWritingMode = resolvePageWritingMode(page);
-  const hasGeneratorPathTrace = page.runs.some((run) => looksLikeGeneratorPathTraceText(normalizeBlockText(run.text)));
-  const lineBlocks: GroupedBlockSeed[] = [];
-  let currentRuns: PdfObservedTextRun[] = [];
-
-  function flushCurrentRuns(): void {
-    if (currentRuns.length === 0) {
-      return;
-    }
-
-    const firstRun = currentRuns[0] as PdfObservedTextRun;
-    const blockIndex = lineBlocks.length + 1;
-    const bbox = mergeRunBoundingBoxes(currentRuns);
-    const text = currentRuns.map((run) => run.text).join(" ").replaceAll(/\s+/g, " ").trim();
-    lineBlocks.push({
-      id: `block-${page.pageNumber}-${blockIndex}`,
-      pageNumber: page.pageNumber,
-      readingOrder: blockIndex - 1,
-      text,
-      lastLineText: text,
-      startsParagraph: blockIndex === 1,
-      runIds: currentRuns.map((run) => run.id),
-      glyphIds: currentRuns.flatMap((run) => run.glyphIds),
-      ...(pageWritingMode !== undefined ? { writingMode: pageWritingMode } : {}),
-      resolutionMethod: page.resolutionMethod,
-      ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
-      ...(firstRun.anchor !== undefined ? { anchor: firstRun.anchor } : {}),
-      ...(bbox !== undefined ? { bbox } : {}),
-      ...(firstRun.fontSize !== undefined ? { fontSize: firstRun.fontSize } : {}),
-      ...(hasGeneratorPathTrace ? { hasGeneratorPathTrace: true } : {}),
-    });
-    currentRuns = [];
-  }
-
-  for (const run of page.runs) {
-    if (currentRuns.length === 0) {
-      currentRuns.push(run);
-      continue;
-    }
-
-    const previousRun = currentRuns[currentRuns.length - 1] as PdfObservedTextRun;
-    if (shouldStartNewBlock(previousRun, run, pageWritingMode)) {
-      flushCurrentRuns();
-    }
-    currentRuns.push(run);
-  }
-
-  flushCurrentRuns();
-  const mergedBlocks = mergeAdjacentBlocks(lineBlocks, pageWritingMode);
-  const structuredBlocks = splitStructuredBlocks(mergedBlocks, pageWritingMode);
-  const orderedBlocks = splitLeadingCarryOverTailBlocks(
-    orderPageBlocks(structuredBlocks, pageWritingMode),
-    pageWritingMode,
-  );
-  const filteredBlocks = filterPeripheralBlocks(orderedBlocks);
-  const paragraphBlocks = annotateParagraphStarts(filteredBlocks, pageWritingMode);
-
+function groupPage(page: PdfObservedPage): GroupedLayoutPage {
+  const writingMode = pageWritingMode(page);
+  const seeds = groupRuns(page, writingMode);
+  const ordered = orderBlocks(seeds, writingMode);
+  const split = splitLeadingSentenceTails(ordered, writingMode).map((block, index) => ({
+    ...block,
+    readingOrder: index,
+  }));
   return {
     pageNumber: page.pageNumber,
     resolutionMethod: page.resolutionMethod,
     ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
-    blocks: paragraphBlocks.map((block) => ({
-      ...block,
-      ...(pageWritingMode !== undefined ? { writingMode: pageWritingMode } : {}),
-      role: "unknown" as const,
-      roleConfidence: 0.4,
-    })),
+    blocks: split,
   };
 }
 
-function shouldStartNewBlock(
-  previousRun: PdfObservedTextRun,
-  currentRun: PdfObservedTextRun,
+function groupRuns(
+  page: PdfObservedPage,
+  writingMode: PdfWritingMode | undefined,
+): readonly LayoutBlockSeed[] {
+  const groups: PdfObservedTextRun[][] = [];
+  let current: PdfObservedTextRun[] = [];
+  const flush = (): void => {
+    if (current.length > 0) {
+      groups.push(current);
+      current = [];
+    }
+  };
+
+  for (const run of page.runs) {
+    const previous = current.at(-1);
+    if (previous !== undefined && startsVisualLine(previous, run, writingMode)) {
+      flush();
+    }
+    current.push(run);
+  }
+  flush();
+
+  return groups.flatMap((runs, index) => {
+    const text = joinRunText(runs);
+    if (text.length === 0) {
+      return [];
+    }
+    const first = runs[0] as PdfObservedTextRun;
+    const bbox = mergeRunBoundingBoxes(runs);
+    const fontSize = dominantFontSize(runs);
+    return [{
+      id: `block-${String(page.pageNumber)}-${String(index + 1)}`,
+      pageNumber: page.pageNumber,
+      text,
+      runIds: runs.map((run) => run.id),
+      glyphIds: runs.flatMap((run) => run.glyphIds),
+      resolutionMethod: page.resolutionMethod,
+      ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
+      ...(first.anchor !== undefined ? { anchor: first.anchor } : {}),
+      ...(bbox !== undefined ? { bbox } : {}),
+      ...(fontSize !== undefined ? { fontSize } : {}),
+      ...(writingMode !== undefined ? { writingMode } : {}),
+      inferences: [],
+    }];
+  });
+}
+
+function startsVisualLine(
+  previous: PdfObservedTextRun,
+  current: PdfObservedTextRun,
   writingMode: PdfWritingMode | undefined,
 ): boolean {
-  if (shouldPreserveShortTailRunBoundary(previousRun, currentRun, writingMode)) {
-    return true;
+  if (!previous.anchor || !current.anchor) {
+    return current.startsNewLine === true;
   }
-
-  if (continuesRunOnSameLine(previousRun, currentRun, writingMode)) {
-    return false;
-  }
-
-  if (currentRun.startsNewLine) {
-    return true;
-  }
-
-  if (previousRun.anchor && currentRun.anchor) {
-    const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
-    if (writingMode === "vertical") {
-      if (Math.abs(previousRun.anchor.x - currentRun.anchor.x) > Math.max(6, fontSize * 0.6)) {
-        return true;
-      }
-      if (currentRun.anchor.y > previousRun.anchor.y + Math.max(8, fontSize * 0.75)) {
-        return true;
-      }
-      return false;
-    }
-
-    if (Math.abs(previousRun.anchor.y - currentRun.anchor.y) > Math.max(3, fontSize * 0.5)) {
-      return true;
-    }
-    if (currentRun.anchor.x < previousRun.anchor.x - Math.max(6, fontSize * 0.5)) {
-      return true;
-    }
-  }
-
-  return false;
-}
-
-function shouldPreserveShortTailRunBoundary(
-  previousRun: PdfObservedTextRun,
-  currentRun: PdfObservedTextRun,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousRun.anchor || !currentRun.anchor) {
-    return false;
-  }
-
-  const previousText = normalizeBlockText(previousRun.text);
-  const currentText = normalizeBlockText(currentRun.text);
-  if (
-    previousText.length === 0 ||
-    currentText.length === 0 ||
-    previousText.length > 8 ||
-    !/[.!?]["')\]]*$/u.test(previousText) ||
-    !startsLikeSentence(currentText) ||
-    endsWithHyphenatedContinuation(previousText) ||
-    startsWithContinuation(currentText)
-  ) {
-    return false;
-  }
-
-  const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
-  const baselineGap = Math.abs(previousRun.anchor.y - currentRun.anchor.y);
-  const forwardAdvance = currentRun.anchor.x - previousRun.anchor.x;
-  return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(3, fontSize * 0.35);
-}
-
-function continuesRunOnSameLine(
-  previousRun: PdfObservedTextRun,
-  currentRun: PdfObservedTextRun,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousRun.anchor || !currentRun.anchor) {
-    return false;
-  }
-
-  const fontSize = currentRun.fontSize ?? previousRun.fontSize ?? 12;
-  const baselineGap = Math.abs(previousRun.anchor.y - currentRun.anchor.y);
-  const forwardAdvance = currentRun.anchor.x - previousRun.anchor.x;
-  if (hasLargeInlineGap(previousRun.anchor, currentRun.anchor, previousRun.bbox, fontSize)) {
-    return false;
-  }
-
-  return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(3, fontSize * 0.35);
-}
-
-function hasLargeInlineGap(
-  previousAnchor: PdfPoint,
-  currentAnchor: PdfPoint,
-  previousBox: PdfBoundingBox | undefined,
-  fontSize: number,
-): boolean {
-  if (!previousBox) {
-    return false;
-  }
-
-  const inlineGap = currentAnchor.x - (previousBox.x + previousBox.width);
-  return inlineGap > Math.max(48, fontSize * 4);
-}
-
-function mergeAdjacentBlocks(
-  blocks: readonly GroupedBlockSeed[],
-  writingMode: PdfWritingMode | undefined,
-): readonly GroupedBlockSeed[] {
-  const mergedBlocks: GroupedBlockSeed[] = [];
-
-  for (const block of blocks) {
-    const previousBlock = mergedBlocks.at(-1);
-    if (!previousBlock || !shouldMergeAdjacentBlocks(previousBlock, block, writingMode)) {
-      mergedBlocks.push({
-        ...block,
-        readingOrder: mergedBlocks.length,
-      });
-      continue;
-    }
-
-    mergedBlocks[mergedBlocks.length - 1] = {
-      ...previousBlock,
-      text: joinBlockText(previousBlock, block, writingMode),
-      ...(block.lastLineText !== undefined ? { lastLineText: block.lastLineText } : {}),
-      startsParagraph: previousBlock.startsParagraph,
-      runIds: [...previousBlock.runIds, ...block.runIds],
-      glyphIds: [...previousBlock.glyphIds, ...block.glyphIds],
-    };
-  }
-
-  return mergedBlocks;
-}
-
-function orderPageBlocks(
-  blocks: readonly GroupedBlockSeed[],
-  writingMode: PdfWritingMode | undefined,
-): readonly GroupedBlockSeed[] {
+  const fontSize = Math.max(previous.fontSize ?? 12, current.fontSize ?? 12);
   if (writingMode === "vertical") {
-    const semanticFormOrderedBlocks = orderCompactFormBlocksBySemanticSequenceWhenSupported(blocks, {
-      preserveExistingOrder: true,
-    });
-    if (semanticFormOrderedBlocks) {
-      return assignSemanticFormOrderInference(semanticFormOrderedBlocks);
-    }
+    const columnChanged = Math.abs(previous.anchor.x - current.anchor.x) > Math.max(3, fontSize * 0.4);
+    const movedBack = current.anchor.y > previous.anchor.y + Math.max(4, fontSize * 0.5);
+    return columnChanged || movedBack || current.startsNewLine === true;
   }
-
-  if (writingMode !== "vertical") {
-    return orderHorizontalBlocks(blocks);
+  const rowChanged = Math.abs(previous.anchor.y - current.anchor.y) > Math.max(2.5, fontSize * 0.3);
+  const movedBack = current.anchor.x < previous.anchor.x - Math.max(4, fontSize * 0.4);
+  if (rowChanged || movedBack || (isShortSentenceTail(previous.text) && beginsSentence(current.text))) {
+    return true;
   }
-
-  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
-  const unanchoredBlocks = blocks.filter((block) => block.anchor === undefined);
-  if (anchoredBlocks.length < 2) {
-    return blocks.map((block, blockIndex) => ({ ...block, readingOrder: blockIndex }));
-  }
-
-  const columns: GroupedBlockSeed[][] = [];
-  const sortedBlocks = [...anchoredBlocks].sort((left, right) => {
-    const leftAnchor = left.anchor as PdfPoint;
-    const rightAnchor = right.anchor as PdfPoint;
-    if (leftAnchor.x !== rightAnchor.x) {
-      return rightAnchor.x - leftAnchor.x;
-    }
-    return rightAnchor.y - leftAnchor.y;
-  });
-
-  for (const block of sortedBlocks) {
-    const anchor = block.anchor as PdfPoint;
-    const fontSize = block.fontSize ?? 12;
-    const threshold = Math.max(14, fontSize * 1.4);
-    const column = columns.find((candidate) => {
-      const candidateAnchor = candidate[0]?.anchor;
-      return candidateAnchor !== undefined && Math.abs(candidateAnchor.x - anchor.x) <= threshold;
-    });
-    if (column) {
-      column.push(block);
-      continue;
-    }
-    columns.push([block]);
-  }
-
-  const orderedBlocks = columns
-    .map((column) => [...column].sort((left, right) => (right.anchor as PdfPoint).y - (left.anchor as PdfPoint).y))
-    .flat();
-  orderedBlocks.push(...unanchoredBlocks);
-
-  return orderedBlocks.map((block, blockIndex) => ({
-    ...block,
-    readingOrder: blockIndex,
-  }));
+  const previousRight = previous.bbox === undefined
+    ? previous.anchor.x + normalizeText(previous.text).length * fontSize * 0.45
+    : previous.bbox.x + previous.bbox.width;
+  const horizontalGap = current.anchor.x - previousRight;
+  return horizontalGap > Math.max(20, fontSize * 2);
 }
 
-function orderHorizontalBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
-  const semanticFormOrderedBlocks = orderCompactFormBlocksBySemanticSequenceWhenSupported(blocks);
-  if (semanticFormOrderedBlocks) {
-    return assignSemanticFormOrderInference(semanticFormOrderedBlocks);
+function joinRunText(runs: readonly PdfObservedTextRun[]): string {
+  let text = "";
+  for (const run of runs) {
+    const current = normalizeText(run.text);
+    if (current.length === 0) {
+      continue;
+    }
+    if (text.length === 0) {
+      text = current;
+      continue;
+    }
+    text += shouldJoinWithoutSpace(text, current) ? current : ` ${current}`;
+  }
+  return text.trim();
+}
+
+function shouldJoinWithoutSpace(previous: string, current: string): boolean {
+  return previous.endsWith("-") || /^[,.;:!?%)\]}]/u.test(current) || /[(\[{/]$/u.test(previous);
+}
+
+function mergeRunBoundingBoxes(runs: readonly PdfObservedTextRun[]): PdfBoundingBox | undefined {
+  return mergeBoundingBoxes(runs.flatMap((run) => run.bbox === undefined ? [] : [run.bbox]));
+}
+
+function dominantFontSize(runs: readonly PdfObservedTextRun[]): number | undefined {
+  const sizes = runs.flatMap((run) => run.fontSize === undefined ? [] : [run.fontSize]);
+  if (sizes.length === 0) {
+    return undefined;
+  }
+  const counts = new Map<number, number>();
+  for (const size of sizes) {
+    counts.set(size, (counts.get(size) ?? 0) + 1);
+  }
+  return [...counts.entries()]
+    .toSorted(([leftSize, leftCount], [rightSize, rightCount]) => rightCount - leftCount || rightSize - leftSize)[0]?.[0];
+}
+
+function orderBlocks(
+  blocks: readonly LayoutBlockSeed[],
+  writingMode: PdfWritingMode | undefined,
+): readonly OrderedLayoutBlock[] {
+  if (blocks.length <= 1) {
+    return blocks.map((block, readingOrder) => withReadingOrder(block, readingOrder, "content-order", 0.72));
+  }
+  if (writingMode === "vertical") {
+    return [...blocks]
+      .toSorted(compareVerticalBlocks)
+      .map((block, readingOrder) => withReadingOrder(block, readingOrder, "geometry-line-order", 0.78));
   }
 
-  const formOrderedBlocks = orderCompactFormBlocksWhenSupported(blocks);
-  if (formOrderedBlocks) {
-    return assignReadingOrderInference(
-      formOrderedBlocks,
-      "geometry-form-order",
-      0.66,
-      "Compact form fields had stable page anchors, so field-label order was inferred from page geometry.",
-      "inferred",
-    );
+  const anchored = blocks.filter(hasAnchor);
+  if (anchored.length < Math.max(2, Math.ceil(blocks.length * 0.6))) {
+    return blocks.map((block, readingOrder) => withReadingOrder(block, readingOrder, "content-order", 0.62));
   }
 
-  const columnOrderedBlocks = orderHorizontalColumnsWhenSupported(blocks);
-  if (columnOrderedBlocks) {
-    return assignReadingOrderInference(
-      columnOrderedBlocks,
-      "geometry-column-order",
-      0.72,
-      "Anchored text formed separated column groups with overlapping vertical ranges.",
-      "inferred",
-    );
+  const visualRows = clusterVisualRows(anchored);
+  const ordinalGrid = hasOrdinalGridEvidence(visualRows);
+  const grid = (
+    rowsFormGrid(visualRows) && gridRegionCoverage(visualRows, anchored.length) >= 0.4
+  ) || (ordinalGrid && ordinalGridCoverage(visualRows) >= 0.5);
+  const rowMajorFields = rowsFormCompactFieldGrid(visualRows);
+  const columns = grid || rowMajorFields || ordinalGrid ? undefined : detectTextColumns(anchored);
+  const orderedAnchored = grid
+    ? orderLogicalGridRows(visualRows)
+    : ordinalGrid
+      ? orderPartialOrdinalGrid(visualRows)
+      : rowMajorFields
+        ? visualRows.flatMap((row) => row.blocks)
+    : columns === undefined
+      ? [...anchored].toSorted(compareLineOrder)
+      : columns.flatMap((column) => [...column].toSorted(compareLineOrder));
+  const anchoredIds = new Set(orderedAnchored.map((block) => block.id));
+  const unanchored = blocks.filter((block) => !anchoredIds.has(block.id));
+  const ordered = [...orderedAnchored, ...unanchored];
+  const method = columns === undefined ? "geometry-line-order" : "geometry-column-order";
+  const confidence = grid ? 0.86 : columns === undefined ? 0.8 : 0.84;
+  return ordered.map((block, readingOrder) => withReadingOrder(block, readingOrder, method, confidence));
+}
+
+function orderLogicalGridRows(rows: readonly VisualRow[]): readonly OrderedLayoutBlock[] {
+  const ordinalRows = repeatedOrdinalRowIndexes(rows);
+  const primaryIndexes = ordinalRows.length >= 2
+    ? ordinalRows
+    : rows.flatMap((row, index) => row.blocks.length >= 3 ? [index] : []);
+  if (primaryIndexes.length < 2) {
+    return rows.flatMap((row) => row.blocks);
   }
-
-  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
-  if (anchoredBlocks.length < 2) {
-    return assignReadingOrderInference(
-      blocks,
-      "observed-content-order",
-      0.28,
-      "No stable text anchors were available, so observed content order was preserved.",
-      "abstained",
-    );
-  }
-
-  const orderedBlocks = [
-    ...anchoredBlocks.toSorted(compareHorizontalBlocks),
-    ...blocks.filter((block) => block.anchor === undefined),
-  ];
-
-  return assignReadingOrderInference(
-    orderedBlocks,
-    "geometry-line-order",
-    0.68,
-    "Anchored text was ordered top-to-bottom and left-to-right in page space.",
-    "inferred",
+  const firstPrimaryIndex = primaryIndexes[0];
+  if (firstPrimaryIndex === undefined) return rows.flatMap((row) => row.blocks);
+  const primaryIndexSet = new Set(primaryIndexes);
+  const headerStart = ordinalRows.length >= 2
+    ? logicalHeaderStart(rows, firstPrimaryIndex)
+    : firstPrimaryIndex;
+  const headerIndexes = new Set(
+    ordinalRows.length >= 2
+      ? Array.from({ length: firstPrimaryIndex - headerStart }, (_, index) => headerStart + index)
+      : [],
   );
-}
-
-interface SemanticFormFieldBlock {
-  readonly block: GroupedBlockSeed;
-  readonly rank: number;
-}
-
-function assignSemanticFormOrderInference(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
-  return assignReadingOrderInference(
-    blocks,
-    "semantic-form-order",
-    0.58,
-    "Compact form field labels had compressed anchors, so ordering used explicit field-label sequence evidence.",
-    "inferred",
-  );
-}
-
-function orderCompactFormBlocksBySemanticSequenceWhenSupported(
-  blocks: readonly GroupedBlockSeed[],
-  options: { readonly preserveExistingOrder?: boolean } = {},
-): readonly GroupedBlockSeed[] | undefined {
-  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
-  if (anchoredBlocks.length < 4 || anchoredBlocks.length !== blocks.length || !hasCompactFormOrderingContext(blocks)) {
-    return undefined;
-  }
-
-  const fieldBlocks = blocks
-    .map((block) => {
-      const rank = semanticFormFieldRank(block.text);
-      return rank === undefined ? undefined : { block, rank };
-    })
-    .filter((entry): entry is SemanticFormFieldBlock => entry !== undefined);
-  if (fieldBlocks.length < 3 || !hasCompressedFormFieldAnchors(fieldBlocks) || !hasSemanticFormFieldSequenceEvidence(fieldBlocks)) {
-    return undefined;
-  }
-
-  const orderedFieldBlocks = [...fieldBlocks].sort(compareSemanticFormFieldBlocks);
-  if (fieldBlockIds(fieldBlocks) === fieldBlockIds(orderedFieldBlocks)) {
-    return options.preserveExistingOrder === true ? blocks : undefined;
-  }
-
-  const fieldBlockIdSet = new Set(fieldBlocks.map((entry) => entry.block.id));
-  const firstFieldIndex = blocks.findIndex((block) => fieldBlockIdSet.has(block.id));
-  if (firstFieldIndex < 0) {
-    return undefined;
-  }
-
-  return [
-    ...blocks.slice(0, firstFieldIndex),
-    ...orderedFieldBlocks.map((entry) => entry.block),
-    ...blocks.slice(firstFieldIndex).filter((block) => !fieldBlockIdSet.has(block.id)),
-  ];
-}
-
-function orderCompactFormBlocksWhenSupported(
-  blocks: readonly GroupedBlockSeed[],
-): readonly GroupedBlockSeed[] | undefined {
-  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
-  if (anchoredBlocks.length < 4 || anchoredBlocks.length !== blocks.length || !hasCompactFormOrderingContext(blocks)) {
-    return undefined;
-  }
-
-  const fieldBlocks = anchoredBlocks.filter(looksLikeCompactFormOrderingFieldBlock);
-  if (fieldBlocks.length < 3 || !fieldOrderDiffersFromGeometry(fieldBlocks)) {
-    return undefined;
-  }
-
-  return [...anchoredBlocks].sort(compareHorizontalBlocks);
-}
-
-function hasCompactFormOrderingContext(blocks: readonly GroupedBlockSeed[]): boolean {
-  const pageText = normalizeBlockText(blocks.map((block) => block.text).join(" ")).toLowerCase();
-  if (!/\b(?:application|applicant|claimant|consent|form|gender|patient|signature|signed|authorized)\b/u.test(pageText)) {
-    return false;
-  }
-
-  const fieldLabelCount = blocks.filter(looksLikeCompactFormOrderingFieldBlock).length;
-  if (fieldLabelCount < 3) {
-    return false;
-  }
-
-  return blocks.some((block) => looksLikeNumberedListPrompt(normalizeBlockText(block.text))) ||
-    blocks.some((block) => looksLikeFormBoundaryMetadata(normalizeBlockText(block.text))) ||
-    /\b(?:form|gender)\b/u.test(pageText);
-}
-
-function looksLikeCompactFormOrderingFieldBlock(block: GroupedBlockSeed): boolean {
-  if (block.anchor === undefined) {
-    return false;
-  }
-
-  const normalized = normalizeBlockText(block.text);
-  if (countLabelMarkers(normalized) === 0) {
-    return false;
-  }
-
-  return looksLikeFieldChoiceParagraphStart(normalized) ||
-    looksLikeFormFooterFieldClusterText(normalized) ||
-    looksLikeShortFieldLabel(normalized, block.fontSize) ||
-    looksLikeFieldLikeClusterText(normalized, block.fontSize);
-}
-
-function fieldOrderDiffersFromGeometry(blocks: readonly GroupedBlockSeed[]): boolean {
-  const observedIds = blocks.map((block) => block.id).join("\u001f");
-  const geometryIds = [...blocks].sort(compareHorizontalBlocks).map((block) => block.id).join("\u001f");
-  return observedIds !== geometryIds;
-}
-
-function hasCompressedFormFieldAnchors(fields: readonly SemanticFormFieldBlock[]): boolean {
-  const yValues = fields.map((entry) => entry.block.anchor?.y).filter((value): value is number => value !== undefined);
-  if (yValues.length < 3) {
-    return false;
-  }
-
-  const fontSizes = fields.map((entry) => entry.block.fontSize ?? 12).sort((left, right) => left - right);
-  const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] ?? 12;
-  const ySpan = Math.max(...yValues) - Math.min(...yValues);
-  return ySpan <= Math.max(22, medianFontSize * 1.85);
-}
-
-function hasSemanticFormFieldSequenceEvidence(fields: readonly SemanticFormFieldBlock[]): boolean {
-  const hasIdentity = fields.some((entry) => entry.rank < 20);
-  const hasChoice = fields.some((entry) => entry.rank >= 20 && entry.rank < 30);
-  const hasLocation = fields.some((entry) => entry.rank >= 30);
-  return hasIdentity && hasChoice && hasLocation;
-}
-
-function compareSemanticFormFieldBlocks(left: SemanticFormFieldBlock, right: SemanticFormFieldBlock): number {
-  if (left.rank !== right.rank) {
-    return left.rank - right.rank;
-  }
-
-  return left.block.readingOrder - right.block.readingOrder;
-}
-
-function fieldBlockIds(fields: readonly SemanticFormFieldBlock[]): string {
-  return fields.map((entry) => entry.block.id).join("\u001f");
-}
-
-function semanticFormFieldRank(text: string): number | undefined {
-  const normalized = normalizeBlockText(text).toLowerCase();
-  if (countLabelMarkers(normalized) === 0) {
-    return undefined;
-  }
-
-  if (/\b(?:first\s+name|last\s+name|full\s+name|given\s+name|family\s+name|name)\b/u.test(normalized)) {
-    return 10;
-  }
-
-  if (/\b(?:birth\s+date|date\s+of\s+birth|dob|date)\b/u.test(normalized)) {
-    return 12;
-  }
-
-  if (/\b(?:gender|female|male|non-binary)\b/u.test(normalized)) {
-    return 20;
-  }
-
-  if (/\b(?:address|city|country|postal|postcode|region|state|zip)\b/u.test(normalized)) {
-    return 30;
-  }
-
-  return undefined;
-}
-
-function orderHorizontalColumnsWhenSupported(
-  blocks: readonly GroupedBlockSeed[],
-): readonly GroupedBlockSeed[] | undefined {
-  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined && !looksLikeProductionMetadata(block.text));
-  if (anchoredBlocks.length < 4) {
-    return undefined;
-  }
-
-  const fontSizes = anchoredBlocks.map((block) => block.fontSize ?? 12).sort((left, right) => left - right);
-  const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] ?? 12;
-  const columnThreshold = Math.max(64, medianFontSize * 5.5);
-  const xGapThreshold = Math.max(80, medianFontSize * 6);
-  const clusters: GroupedBlockSeed[][] = [];
-
-  for (const block of [...anchoredBlocks].sort(compareBlockAnchorX)) {
-    const anchor = block.anchor as PdfPoint;
-    const nearestCluster = clusters.find((cluster) => {
-      const centerX = averageAnchorX(cluster);
-      return Math.abs(centerX - anchor.x) <= columnThreshold;
-    });
-    if (nearestCluster) {
-      nearestCluster.push(block);
-      continue;
-    }
-    clusters.push([block]);
-  }
-
-  const columnClusters = clusters
-    .filter((cluster) => cluster.length >= 2)
-    .sort((left, right) => averageAnchorX(left) - averageAnchorX(right));
-  if (columnClusters.length < 2) {
-    return undefined;
-  }
-
-  for (let clusterIndex = 1; clusterIndex < columnClusters.length; clusterIndex += 1) {
-    const previousCluster = columnClusters[clusterIndex - 1] as readonly GroupedBlockSeed[];
-    const currentCluster = columnClusters[clusterIndex] as readonly GroupedBlockSeed[];
-    if (averageAnchorX(currentCluster) - averageAnchorX(previousCluster) < xGapThreshold) {
-      return undefined;
-    }
-  }
-
-  if (columnClustersFormRowGrid(columnClusters, medianFontSize)) {
-    return undefined;
-  }
-
-  if (!columnClustersHaveVerticalOverlap(columnClusters, medianFontSize)) {
-    return undefined;
-  }
-
-  const columnBlockIds = new Set(columnClusters.flat().map((block) => block.id));
-  const bodyAnchors = columnClusters.flat().map((block) => block.anchor as PdfPoint);
-  const maxColumnY = Math.max(...bodyAnchors.map((anchor) => anchor.y));
-  const minColumnY = Math.min(...bodyAnchors.map((anchor) => anchor.y));
-  const boundaryBand = Math.max(18, medianFontSize * 1.5);
-  const prefixBlocks: GroupedBlockSeed[] = [];
-  const suffixBlocks: GroupedBlockSeed[] = [];
-  const ambiguousBlocks: GroupedBlockSeed[] = [];
-
-  for (const block of blocks) {
-    if (columnBlockIds.has(block.id)) {
-      continue;
-    }
-
-    if (!block.anchor) {
-      suffixBlocks.push(block);
-      continue;
-    }
-
-    if (block.anchor.y > maxColumnY + boundaryBand) {
-      prefixBlocks.push(block);
-      continue;
-    }
-
-    if (block.anchor.y < minColumnY - boundaryBand) {
-      suffixBlocks.push(block);
-      continue;
-    }
-
-    ambiguousBlocks.push(block);
-  }
-
-  if (ambiguousBlocks.length > 0) {
-    return undefined;
-  }
-
-  return [
-    ...prefixBlocks.sort(compareHorizontalBlocks),
-    ...columnClusters.flatMap((cluster) => [...cluster].sort(compareHorizontalBlocks)),
-    ...suffixBlocks.sort(compareHorizontalBlocks),
-  ];
-}
-
-function columnClustersFormRowGrid(
-  clusters: readonly (readonly GroupedBlockSeed[])[],
-  medianFontSize: number,
-): boolean {
-  if (clusters.length < 3) {
-    return false;
-  }
-
-  const baselineTolerance = Math.max(3, medianFontSize * 0.35);
-  const requiredMatchingClusters = Math.min(2, clusters.length - 1);
-  const blocks = clusters.flatMap((cluster, clusterIndex) =>
-    cluster.map((block) => ({ block, clusterIndex }))
-  );
-  const alignedBlocks = blocks.filter(({ block, clusterIndex }) => {
-    const y = (block.anchor as PdfPoint).y;
-    const matchingClusters = clusters.reduce((count, cluster, candidateIndex) => {
-      if (candidateIndex === clusterIndex) {
-        return count;
+  const logicalRows: { readonly startIndex: number; blocks: OrderedLayoutBlock[] }[] = [];
+  const extras: { readonly rowIndex: number; readonly blocks: readonly OrderedLayoutBlock[] }[] = [];
+  let current: { readonly startIndex: number; blocks: OrderedLayoutBlock[] } | undefined;
+  for (let rowIndex = 0; rowIndex < rows.length; rowIndex += 1) {
+    const row = rows[rowIndex] as VisualRow;
+    if (headerIndexes.has(rowIndex)) {
+      if (rowIndex === headerStart) {
+        const headerBlocks = [...headerIndexes].flatMap((index) => rows[index]?.blocks ?? []);
+        extras.push({ rowIndex, blocks: orderLogicalRowCells(headerBlocks) });
       }
-      return cluster.some((candidate) => Math.abs((candidate.anchor as PdfPoint).y - y) <= baselineTolerance)
-        ? count + 1
-        : count;
-    }, 0);
-    return matchingClusters >= requiredMatchingClusters;
-  });
-
-  return alignedBlocks.length / blocks.length >= 0.6;
-}
-
-function compareBlockAnchorX(left: GroupedBlockSeed, right: GroupedBlockSeed): number {
-  const leftAnchor = left.anchor as PdfPoint;
-  const rightAnchor = right.anchor as PdfPoint;
-  return leftAnchor.x - rightAnchor.x;
-}
-
-function averageAnchorX(blocks: readonly GroupedBlockSeed[]): number {
-  return blocks.reduce((sum, block) => sum + (block.anchor?.x ?? 0), 0) / blocks.length;
-}
-
-function columnClustersHaveVerticalOverlap(
-  clusters: readonly (readonly GroupedBlockSeed[])[],
-  medianFontSize: number,
-): boolean {
-  const ranges = clusters.map((cluster) => {
-    const yValues = cluster.map((block) => (block.anchor as PdfPoint).y);
-    return {
-      min: Math.min(...yValues),
-      max: Math.max(...yValues),
-    };
-  });
-  const sharedMin = Math.max(...ranges.map((range) => range.min));
-  const sharedMax = Math.min(...ranges.map((range) => range.max));
-  const tolerance = Math.max(8, medianFontSize * 0.5);
-  if (sharedMax - sharedMin < tolerance) {
-    return false;
+      continue;
+    }
+    if (primaryIndexSet.has(rowIndex)) {
+      current = { startIndex: rowIndex, blocks: [...row.blocks] };
+      logicalRows.push(current);
+      continue;
+    }
+    if (current === undefined) {
+      extras.push({ rowIndex, blocks: row.blocks });
+      continue;
+    }
+    const previousVisualRow = rows[rowIndex - 1];
+    const gap = previousVisualRow === undefined ? 0 : previousVisualRow.y - row.y;
+    const fontSize = median(row.blocks.flatMap((block) => block.fontSize === undefined ? [] : [block.fontSize])) ?? 12;
+    if (gap > Math.max(30, fontSize * 3) || !rowOverlapsLogicalColumns(row, current.blocks)) {
+      extras.push({ rowIndex, blocks: row.blocks });
+      current = undefined;
+      continue;
+    }
+    current.blocks.push(...row.blocks);
   }
 
-  return clusters.every((cluster) => cluster.some((block) => {
-    const y = (block.anchor as PdfPoint).y;
-    return y >= sharedMin - tolerance && y <= sharedMax + tolerance;
-  }));
+  const orderedByRow = new Map<number, readonly OrderedLayoutBlock[]>();
+  for (const logical of logicalRows) {
+    orderedByRow.set(logical.startIndex, orderLogicalRowCells(logical.blocks));
+  }
+  for (const extra of extras) {
+    orderedByRow.set(extra.rowIndex, extra.blocks);
+  }
+  return [...orderedByRow.entries()]
+    .toSorted(([left], [right]) => left - right)
+    .flatMap(([, blocks]) => blocks);
 }
 
-function assignReadingOrderInference(
-  blocks: readonly GroupedBlockSeed[],
+function logicalHeaderStart(rows: readonly VisualRow[], firstPrimaryIndex: number): number {
+  let start = firstPrimaryIndex;
+  for (let index = firstPrimaryIndex - 1; index >= 0; index -= 1) {
+    const row = rows[index];
+    const below = rows[index + 1];
+    if (row === undefined || below === undefined) break;
+    const fontSize = median(row.blocks.flatMap((block) => block.fontSize === undefined ? [] : [block.fontSize])) ?? 12;
+    const gap = row.y - below.y;
+    const compact = row.blocks.every((block) =>
+      normalizeText(block.text).length <= 40 && !looksLikeSentence(block.text)
+    );
+    if (!compact || gap > Math.max(24, fontSize * 3)) break;
+    start = index;
+  }
+  return start;
+}
+
+function repeatedOrdinalRowIndexes(rows: readonly VisualRow[]): readonly number[] {
+  const candidates = rows.flatMap((row, rowIndex) => {
+    const leftmost = Math.min(...row.blocks.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.x]));
+    return row.blocks.flatMap((block) => {
+      const text = normalizeText(block.text);
+      const anchor = block.anchor;
+      const match = /^(\d{1,8})(?:[.)]|\s)/u.exec(text);
+      return anchor !== undefined && anchor.x <= leftmost + 12 && match?.[1] !== undefined
+        ? [{ rowIndex, x: anchor.x, value: Number(match[1]) }]
+        : [];
+    });
+  });
+  const clusters: { x: number; entries: { readonly rowIndex: number; readonly value: number }[] }[] = [];
+  for (const candidate of candidates) {
+    const cluster = clusters.find((value) => Math.abs(value.x - candidate.x) <= 12);
+    if (cluster === undefined) {
+      clusters.push({ x: candidate.x, entries: [{ rowIndex: candidate.rowIndex, value: candidate.value }] });
+    } else {
+      cluster.entries.push({ rowIndex: candidate.rowIndex, value: candidate.value });
+      cluster.x = average([cluster.x, candidate.x]);
+    }
+  }
+  const strongest = clusters
+    .filter((cluster) => ordinalValuesIdentifyRows(cluster.entries))
+    .toSorted((left, right) => right.entries.length - left.entries.length)[0];
+  return strongest === undefined
+    ? []
+    : [...new Set(strongest.entries.map((entry) => entry.rowIndex))].toSorted((left, right) => left - right);
+}
+
+function ordinalValuesIdentifyRows(entries: readonly { readonly rowIndex: number; readonly value: number }[]): boolean {
+  return entries.length >= 3 && new Set(entries.map((entry) => entry.value)).size >= 3;
+}
+
+function rowOverlapsLogicalColumns(row: VisualRow, logicalBlocks: readonly OrderedLayoutBlock[]): boolean {
+  const logicalLeft = Math.min(...logicalBlocks.map((block) => horizontalInterval(block).left));
+  const logicalRight = Math.max(...logicalBlocks.map((block) => horizontalInterval(block).right));
+  return row.blocks.some((block) => {
+    const interval = horizontalInterval(block);
+    return interval.right >= logicalLeft && interval.left <= logicalRight;
+  });
+}
+
+function orderLogicalRowCells(blocks: readonly OrderedLayoutBlock[]): readonly OrderedLayoutBlock[] {
+  const clusters: OrderedLayoutBlock[][] = [];
+  for (const block of [...blocks].toSorted(compareX)) {
+    const cluster = clusters.find((candidate) => candidate.some((member) =>
+      horizontalIntervalsOverlap(member, block) ||
+      Math.abs((member.anchor?.x ?? 0) - (block.anchor?.x ?? 0)) <= Math.max(12, (block.fontSize ?? 12) * 2)
+    ));
+    if (cluster === undefined) clusters.push([block]);
+    else cluster.push(block);
+  }
+  return clusters
+    .toSorted((left, right) => compareX(left[0] as OrderedLayoutBlock, right[0] as OrderedLayoutBlock))
+    .flatMap((cluster) => cluster.toSorted((left, right) =>
+      (right.anchor?.y ?? 0) - (left.anchor?.y ?? 0) || compareX(left, right)
+    ));
+}
+
+function withReadingOrder(
+  block: LayoutBlockSeed,
+  readingOrder: number,
   method: string,
   confidence: number,
-  reason: string,
-  status: PdfLayoutInferenceRecord["status"],
-): readonly GroupedBlockSeed[] {
-  return blocks.map((block, blockIndex) => {
-    const blockStatus = block.anchor ? status : "abstained";
-    const blockReason = block.anchor
-      ? reason
-      : "No recovered text anchor was available for this block; observed content order was preserved.";
-    return {
-      ...block,
-      readingOrder: blockIndex,
-      inferences: [
-        ...(block.inferences ?? []),
-        {
-          kind: "reading-order",
-          status: blockStatus,
-          method: block.anchor ? method : "observed-content-order",
-          confidence: block.anchor ? confidence : 0.25,
-          reason: blockReason,
-          evidenceRunIds: block.runIds,
-          evidenceBlockIds: [block.id],
-        },
-      ],
-    };
-  });
+): OrderedLayoutBlock {
+  return {
+    ...block,
+    readingOrder,
+    inferences: [
+      ...block.inferences,
+      {
+        kind: "reading-order",
+        status: "inferred",
+        method,
+        confidence,
+        reason: method === "geometry-column-order"
+          ? "Repeated horizontal bands with vertical overlap support column-major reading order."
+          : method === "geometry-line-order"
+            ? "Page-space anchors support top-to-bottom, left-to-right reading order."
+            : "Geometry was insufficient, so source content order was retained.",
+        evidenceRunIds: block.runIds,
+      },
+    ],
+  };
 }
 
-function compareHorizontalBlocks(left: GroupedBlockSeed, right: GroupedBlockSeed): number {
+function compareVerticalBlocks(left: LayoutBlockSeed, right: LayoutBlockSeed): number {
   const leftAnchor = left.anchor;
   const rightAnchor = right.anchor;
   if (!leftAnchor || !rightAnchor) {
-    return left.readingOrder - right.readingOrder;
+    return leftAnchor ? -1 : rightAnchor ? 1 : 0;
   }
+  return rightAnchor.x - leftAnchor.x || rightAnchor.y - leftAnchor.y;
+}
 
-  const leftFontSize = left.fontSize ?? right.fontSize ?? 12;
-  const rightFontSize = right.fontSize ?? left.fontSize ?? 12;
-  const averageFontSize = (leftFontSize + rightFontSize) / 2;
-  const sameLineThreshold = Math.max(6, averageFontSize * 0.8);
-  if (Math.abs(leftAnchor.y - rightAnchor.y) <= sameLineThreshold) {
+function compareLineOrder(left: LayoutBlockSeed, right: LayoutBlockSeed): number {
+  const leftAnchor = left.anchor;
+  const rightAnchor = right.anchor;
+  if (!leftAnchor || !rightAnchor) {
+    return leftAnchor ? -1 : rightAnchor ? 1 : 0;
+  }
+  const tolerance = Math.max(4, Math.min(9, Math.min(left.fontSize ?? 12, right.fontSize ?? 12) * 1.2));
+  if (Math.abs(leftAnchor.y - rightAnchor.y) <= tolerance) {
     return leftAnchor.x - rightAnchor.x;
   }
-
   return rightAnchor.y - leftAnchor.y;
 }
 
-function splitStructuredBlocks(
-  blocks: readonly GroupedBlockSeed[],
-  writingMode: PdfWritingMode | undefined,
-): readonly GroupedBlockSeed[] {
-  if (writingMode === "vertical") {
-    return blocks;
-  }
-
-  const hasGeneratorPathTrace = blocks.some((block) => looksLikeGeneratorPathTraceText(normalizeBlockText(block.text)));
-  return blocks.flatMap((block) => splitStructuredBlock(block, hasGeneratorPathTrace));
+function compareX(left: LayoutBlockSeed, right: LayoutBlockSeed): number {
+  return (left.anchor?.x ?? Number.POSITIVE_INFINITY) - (right.anchor?.x ?? Number.POSITIVE_INFINITY);
 }
 
-function splitStructuredBlock(
-  block: GroupedBlockSeed,
-  hasGeneratorPathTrace: boolean,
-): readonly GroupedBlockSeed[] {
-  const generatorNoiseSplit = hasGeneratorPathTrace ? splitLeadingGeneratorStatusAndBody(block.text) : undefined;
-  if (generatorNoiseSplit) {
-    const noiseBlock: GroupedBlockSeed = {
-      ...block,
-      id: `${block.id}-noise`,
-      text: generatorNoiseSplit.noise,
-      lastLineText: generatorNoiseSplit.noise,
-    };
-    const bodyBlock: GroupedBlockSeed = {
-      ...block,
-      id: `${block.id}-body`,
-      text: generatorNoiseSplit.body,
-      lastLineText: generatorNoiseSplit.body,
-      startsParagraph: true,
-    };
-
-    return [noiseBlock, bodyBlock];
-  }
-
-  const split = splitInlineHeadingAndBody(block.text);
-  if (!split) {
-    return [block];
-  }
-
-  const headingBlock: GroupedBlockSeed = {
-    ...block,
-    id: `${block.id}-heading`,
-    text: split.heading,
-    lastLineText: split.heading,
-  };
-  const bodyBlock: GroupedBlockSeed = {
-    ...block,
-    id: `${block.id}-body`,
-    text: split.body,
-    lastLineText: split.body,
-    startsParagraph: true,
-  };
-
-  return [headingBlock, bodyBlock];
-}
-
-function splitLeadingCarryOverTailBlocks(
-  blocks: readonly GroupedBlockSeed[],
-  writingMode: PdfWritingMode | undefined,
-): readonly GroupedBlockSeed[] {
-  if (writingMode === "vertical") {
-    return blocks;
-  }
-
-  const splitBlocks: GroupedBlockSeed[] = [];
-  for (const block of blocks) {
-    const previousBlock = splitBlocks.at(-1);
-    const split = previousBlock ? splitLeadingCarryOverTail(block, previousBlock) : undefined;
-    if (!split) {
-      splitBlocks.push(block);
-      continue;
-    }
-
-    splitBlocks.push(split.tailBlock, split.bodyBlock);
-  }
-
-  return splitBlocks.map((block, blockIndex) => ({
-    ...block,
-    readingOrder: blockIndex,
-  }));
-}
-
-function splitLeadingCarryOverTail(
-  block: GroupedBlockSeed,
-  previousBlock: GroupedBlockSeed,
-): {
-  readonly tailBlock: GroupedBlockSeed;
-  readonly bodyBlock: GroupedBlockSeed;
-} | undefined {
-  const previousText = normalizeBlockText(previousBlock.text);
-  const normalized = normalizeBlockText(block.text);
-  const leadingTailSplit = splitLeadingSentenceTail(normalized);
-  const tail = leadingTailSplit?.tail;
-  const body = leadingTailSplit?.body;
-  if (
-    !tail ||
-    !body ||
-    !shouldKeepLeadingCarryOverTailWithPrevious(previousBlock, block, previousText, tail, block.writingMode) ||
-    looksLikeEnumeratedLeadingTail(tail) ||
-    startsWithContinuation(body) ||
-    !startsLikeSentence(body)
-  ) {
-    return undefined;
-  }
-
-  return {
-    tailBlock: {
-      ...block,
-      id: `${block.id}-tail`,
-      text: tail,
-      lastLineText: tail,
-      startsParagraph: false,
-    },
-    bodyBlock: {
-      ...block,
-      id: `${block.id}-body`,
-      text: body,
-      lastLineText: body,
-      startsParagraph: true,
-    },
-  };
-}
-
-function splitLeadingSentenceTail(
-  text: string,
-): { readonly tail: string; readonly body: string } | undefined {
-  for (let index = 0; index < text.length - 1; index += 1) {
-    const current = text[index];
-    if (current !== "." && current !== "!" && current !== "?") {
-      continue;
-    }
-
-    const next = text[index + 1];
-    if (next !== " ") {
-      continue;
-    }
-
-    const tail = text.slice(0, index + 1).trim();
-    const body = text.slice(index + 2).trim();
-    return tail.length > 0 && body.length > 0 ? { tail, body } : undefined;
-  }
-
-  return undefined;
-}
-
-function splitLeadingGeneratorStatusAndBody(
-  text: string,
-): { readonly noise: string; readonly body: string } | undefined {
-  const lines = text
-    .split(/\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  if (lines.length < 2) {
-    return undefined;
-  }
-
-  const [firstLine, ...remainingLines] = lines;
-  if (!firstLine || !looksLikeStandaloneGeneratorStatusText(firstLine)) {
-    return undefined;
-  }
-
-  const body = remainingLines.join("\n").trim();
-  if (
-    body.length === 0 ||
-    (!looksLikeFieldLikeClusterText(normalizeBlockText(body), undefined) &&
-      !/\b(?:gender|female|male|non-binary)\b/iu.test(body))
-  ) {
-    return undefined;
-  }
-
-  return {
-    noise: firstLine,
-    body,
-  };
-}
-
-function splitInlineHeadingAndBody(text: string): { readonly heading: string; readonly body: string } | undefined {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0) {
-    return undefined;
-  }
-
-  const numberedPrefixMatch = normalized.match(/^\d+(?:\.\d+)*[.)]?\s+/u);
-  if (!numberedPrefixMatch) {
-    return undefined;
-  }
-
-  const questionIndex = normalized.indexOf("? ");
-  if (questionIndex <= numberedPrefixMatch[0].length + 6) {
-    return undefined;
-  }
-
-  const heading = normalized.slice(0, questionIndex + 1).trim();
-  const body = normalized.slice(questionIndex + 2).trim();
-  if (!startsLikeSentence(body)) {
-    return undefined;
-  }
-
-  return { heading, body };
-}
-
-function filterPeripheralBlocks(blocks: readonly GroupedBlockSeed[]): readonly GroupedBlockSeed[] {
-  const anchoredBlocks = blocks.filter((block) => block.anchor !== undefined);
-  if (anchoredBlocks.length === 0) {
-    return blocks;
-  }
-
-  const yValues = anchoredBlocks.map((block) => (block.anchor as PdfPoint).y);
-  const minY = Math.min(...yValues);
-  const maxY = Math.max(...yValues);
-  const bandSize = Math.max(24, (maxY - minY) * 0.08);
-  const hasContentsContext = blocks.some((block, blockIndex) =>
-    blockIndex <= 5 && /\bcontents\b/iu.test(normalizeBlockText(block.text))
+function clusterVisualRows(blocks: readonly OrderedLayoutBlock[] | readonly LayoutBlockSeed[]): readonly VisualRow[] {
+  const sorted = [...blocks].filter(hasAnchor).toSorted((left, right) =>
+    (right.anchor?.y ?? 0) - (left.anchor?.y ?? 0) || compareX(left, right)
   );
-  const filteredBlocks = blocks.filter((block, blockIndex) => {
-    if (shouldFilterInlineNoiseBlock(block, blockIndex, blocks, hasContentsContext)) {
-      return false;
+  const rows: { blocks: OrderedLayoutBlock[]; y: number }[] = [];
+  for (const block of sorted) {
+    const y = block.anchor?.y ?? 0;
+    const tolerance = Math.max(3, (block.fontSize ?? 12) * 0.38);
+    const row = rows.find((candidate) =>
+      Math.abs(candidate.y - y) <= tolerance || candidate.blocks.some((member) =>
+        verticalIntervalsOverlap(member, block) || sameCompactRowBand(member, block)
+      )
+    );
+    const orderedBlock = "readingOrder" in block ? block : { ...block, readingOrder: 0 };
+    if (row === undefined) {
+      rows.push({ blocks: [orderedBlock], y });
+    } else {
+      row.blocks.push(orderedBlock);
+      row.y = (row.y * (row.blocks.length - 1) + y) / row.blocks.length;
     }
-
-    if (
-      looksLikeGeneratorPathTraceText(normalizeBlockText(block.text)) ||
-      looksLikeStandaloneGeneratorStatusText(normalizeBlockText(block.text))
-    ) {
-      return false;
-    }
-
-    if (!block.anchor || !looksLikeProductionMetadata(block.text)) {
-      return true;
-    }
-
-    return block.anchor.y < maxY - bandSize && block.anchor.y > minY + bandSize;
-  });
-
-  return filteredBlocks.length > 0 ? filteredBlocks : blocks;
+  }
+  return rows
+    .toSorted((left, right) => right.y - left.y)
+    .map((row) => ({ blocks: orderVisualRowBlocks(row.blocks), y: row.y }));
 }
 
-function looksLikeProductionMetadata(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0) {
+function sameCompactRowBand(left: LayoutBlockSeed, right: LayoutBlockSeed): boolean {
+  if (!left.anchor || !right.anchor) return false;
+  if (normalizeText(left.text).length > 40 || normalizeText(right.text).length > 40) return false;
+  const tolerance = Math.max(5, Math.max(left.fontSize ?? 12, right.fontSize ?? 12) * 0.9);
+  return Math.abs(left.anchor.y - right.anchor.y) <= tolerance;
+}
+
+function verticalIntervalsOverlap(left: LayoutBlockSeed, right: LayoutBlockSeed): boolean {
+  if (!left.bbox || !right.bbox) return false;
+  const top = Math.max(left.bbox.y, right.bbox.y);
+  const bottom = Math.min(left.bbox.y + left.bbox.height, right.bbox.y + right.bbox.height);
+  return bottom >= top;
+}
+
+function orderVisualRowBlocks(blocks: readonly OrderedLayoutBlock[]): readonly OrderedLayoutBlock[] {
+  const clusters: OrderedLayoutBlock[][] = [];
+  for (const block of [...blocks].toSorted(compareX)) {
+    const cluster = clusters.find((candidate) => candidate.some((member) =>
+      horizontalIntervalsOverlap(member, block) ||
+      Math.abs((member.anchor?.x ?? 0) - (block.anchor?.x ?? 0)) <= Math.max(10, (block.fontSize ?? 12) * 1.5)
+    ));
+    if (cluster === undefined) clusters.push([block]);
+    else cluster.push(block);
+  }
+  return clusters
+    .toSorted((left, right) => compareX(left[0] as OrderedLayoutBlock, right[0] as OrderedLayoutBlock))
+    .flatMap((cluster) => cluster.toSorted((left, right) =>
+      (right.anchor?.y ?? 0) - (left.anchor?.y ?? 0) || compareX(left, right)
+    ));
+}
+
+function horizontalIntervalsOverlap(left: LayoutBlockSeed, right: LayoutBlockSeed): boolean {
+  const leftInterval = horizontalInterval(left);
+  const rightInterval = horizontalInterval(right);
+  return Math.min(leftInterval.right, rightInterval.right) >= Math.max(leftInterval.left, rightInterval.left);
+}
+
+function horizontalInterval(block: LayoutBlockSeed): { readonly left: number; readonly right: number } {
+  if (block.bbox !== undefined) {
+    return { left: block.bbox.x, right: block.bbox.x + block.bbox.width };
+  }
+  const left = block.anchor?.x ?? 0;
+  return {
+    left,
+    right: left + normalizeText(block.text).length * (block.fontSize ?? 12) * 0.45,
+  };
+}
+
+function rowsFormGrid(rows: readonly VisualRow[]): boolean {
+  const multiCellRows = rows.filter((row) => row.blocks.length >= 2);
+  if (multiCellRows.length < 2) {
     return false;
   }
+  const numericRows = multiCellRows.filter((row) => row.blocks.some((block) => containsNumericEvidence(block.text)));
+  const cells = multiCellRows.flatMap((row) => row.blocks);
+  const longCellCount = cells.filter((block) => normalizeText(block.text).length > 36).length;
+  const numericCellCount = cells.filter((block) => containsNumericEvidence(block.text)).length;
+  const widestRow = Math.max(...multiCellRows.map((row) => row.blocks.length));
+  if (widestRow < 3 && numericRows.length === 0) {
+    return false;
+  }
+  if (
+    numericRows.length === 0 &&
+    multiCellRows.flatMap((row) => row.blocks).filter((block) => normalizeText(block.text).length <= 24).length <
+      Math.ceil(multiCellRows.flatMap((row) => row.blocks).length * 0.8)
+  ) {
+    return false;
+  }
+  if (
+    longCellCount >= Math.ceil(cells.length * 0.3) &&
+    (widestRow <= 2 || numericCellCount < Math.ceil(cells.length * 0.4))
+  ) {
+    return false;
+  }
+  const reference = multiCellRows.toSorted((left, right) => right.blocks.length - left.blocks.length)[0];
+  if (reference === undefined) {
+    return false;
+  }
+  const referenceXs = reference.blocks.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.x]);
+  return multiCellRows.filter((row) => row.blocks.every((block) => {
+    const anchor = block.anchor;
+    return anchor !== undefined && referenceXs.some((x) =>
+      Math.abs(x - anchor.x) <= Math.max(10, (block.fontSize ?? 12) * 1.5)
+    );
+  })).length >= 2;
+}
 
-  const metadataSignals = [
-    /\bwww\./iu,
-    /\bemail\b/iu,
-    /\btel\./iu,
-    /\bartwork\b/iu,
-    /\bsupplier\b/iu,
-    /\bcomponent\b/iu,
-    /\bdimension\b/iu,
-    /\bbrand solutions\b/iu,
-    /\brepro\b/iu,
-    /\bnon printing colours\b/iu,
-    /\bdiecut\b/iu,
-    /\bpage:\b/iu,
-    /\bdate:\b/iu,
-    /\bpzn:\b/iu,
-    /\bpr\.\s*name\b/iu,
-    /\bprinting number\b/iu,
+function gridRegionCoverage(rows: readonly VisualRow[], blockCount: number): number {
+  if (blockCount === 0) return 0;
+  const multiCellRows = rows.filter((row) => row.blocks.length >= 2);
+  const reference = multiCellRows.toSorted((left, right) => right.blocks.length - left.blocks.length)[0];
+  if (reference === undefined) return 0;
+  const referenceXs = reference.blocks.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.x]);
+  const minimumCells = Math.max(2, reference.blocks.length - 1);
+  const aligned = multiCellRows.filter((row) => row.blocks.length >= minimumCells && row.blocks.every((block) => {
+    const anchor = block.anchor;
+    return anchor !== undefined && referenceXs.some((x) =>
+      Math.abs(x - anchor.x) <= Math.max(10, (block.fontSize ?? 12) * 1.5)
+    );
+  }));
+  if (aligned.length < 2) return 0;
+  return aligned.reduce((count, row) => count + row.blocks.length, 0) / blockCount;
+}
+
+function hasOrdinalGridEvidence(rows: readonly VisualRow[]): boolean {
+  const ordinalIndexes = repeatedOrdinalRowIndexes(rows);
+  if (ordinalIndexes.length < 3) return false;
+  const ordinalRows = ordinalIndexes.flatMap((index) => rows[index] === undefined ? [] : [rows[index]]);
+  if (ordinalRows.filter((row) => row.blocks.length >= 3).length < Math.ceil(ordinalRows.length * 0.7)) {
+    return false;
+  }
+  return true;
+}
+
+function ordinalGridCoverage(rows: readonly VisualRow[]): number {
+  const ordinalIndexes = repeatedOrdinalRowIndexes(rows);
+  const ordinalRows = ordinalIndexes.flatMap((index) => rows[index] === undefined ? [] : [rows[index]]);
+  const upper = ordinalRows[0]?.y;
+  const lower = ordinalRows.at(-1)?.y;
+  if (upper === undefined || lower === undefined) return 0;
+  const coveredBlocks = rows
+    .filter((row) => row.y <= upper && row.y >= lower)
+    .reduce((count, row) => count + row.blocks.length, 0);
+  const totalBlocks = rows.reduce((count, row) => count + row.blocks.length, 0);
+  return totalBlocks > 0 ? coveredBlocks / totalBlocks : 0;
+}
+
+function rowsFormCompactFieldGrid(rows: readonly VisualRow[]): boolean {
+  const multiCellRows = rows.filter((row) =>
+    row.blocks.length >= 2 && row.blocks.every((block) => normalizeText(block.text).length <= 40)
+  );
+  if (multiCellRows.length < 2) return false;
+  const blocks = rows.flatMap((row) => row.blocks);
+  const labels = blocks.filter((block) => normalizeText(block.text).endsWith(":"));
+  const numeric = multiCellRows.flatMap((row) => row.blocks).filter((block) => containsNumericEvidence(block.text));
+  return labels.length >= 2 &&
+    numeric.length < Math.ceil(multiCellRows.flatMap((row) => row.blocks).length * 0.25);
+}
+
+function orderPartialOrdinalGrid(rows: readonly VisualRow[]): readonly OrderedLayoutBlock[] {
+  const ordinalIndexes = repeatedOrdinalRowIndexes(rows);
+  const first = ordinalIndexes[0];
+  if (first === undefined) return rows.flatMap((row) => row.blocks);
+  const headerStart = logicalHeaderStart(rows, first);
+  return [
+    ...rows.slice(0, headerStart).flatMap((row) => row.blocks),
+    ...orderLogicalGridRows(rows.slice(headerStart)),
   ];
-  const signalCount = metadataSignals.filter((pattern) => pattern.test(normalized)).length;
-  if (signalCount >= 2) {
-    return true;
+}
+
+function detectTextColumns(blocks: readonly LayoutBlockSeed[]): readonly (readonly LayoutBlockSeed[])[] | undefined {
+  const sorted = [...blocks].filter(hasAnchor).toSorted(compareX);
+  const medianFontSize = median(sorted.flatMap((block) => block.fontSize === undefined ? [] : [block.fontSize])) ?? 12;
+  const clusters: LayoutBlockSeed[][] = [];
+  for (const block of sorted) {
+    const x = block.anchor?.x ?? 0;
+    const cluster = clusters.find((candidate) =>
+      Math.abs(average(candidate.map((item) => item.anchor?.x ?? 0)) - x) <= Math.max(24, medianFontSize * 3)
+    );
+    if (cluster === undefined) {
+      clusters.push([block]);
+    } else {
+      cluster.push(block);
+    }
   }
-
-  const punctuationGroups = (normalized.match(/[/:|]/g) ?? []).length;
-  if (signalCount >= 1 && punctuationGroups >= 3) {
-    return true;
+  let repeated = clusters.filter((cluster) => cluster.length >= 2).toSorted((left, right) =>
+    average(left.map((block) => block.anchor?.x ?? 0)) - average(right.map((block) => block.anchor?.x ?? 0))
+  );
+  let merged = true;
+  while (merged) {
+    merged = false;
+    for (let index = 0; index < repeated.length - 1; index += 1) {
+      const left = repeated[index];
+      const right = repeated[index + 1];
+      if (left === undefined || right === undefined || !columnBandsOverlap(left, right)) continue;
+      repeated = [
+        ...repeated.slice(0, index),
+        [...left, ...right],
+        ...repeated.slice(index + 2),
+      ];
+      merged = true;
+      break;
+    }
   }
-
-  return looksLikeRevisionStamp(normalized);
+  if (repeated.length < 2 || !columnsOverlapVertically(repeated)) {
+    return detectBalancedColumnSplit(blocks, medianFontSize);
+  }
+  if (repeated.some((column) => !columnHasVerticalContinuity(column))) {
+    return detectBalancedColumnSplit(blocks, medianFontSize);
+  }
+  const assigned = new Set(repeated.flatMap((cluster) => cluster.map((block) => block.id)));
+  if (assigned.size < Math.ceil(blocks.length * 0.65)) {
+    return detectBalancedColumnSplit(blocks, medianFontSize);
+  }
+  const extras = blocks.filter((block) => !assigned.has(block.id));
+  for (const extra of extras) {
+    const x = extra.anchor?.x;
+    if (x === undefined) {
+      repeated[repeated.length - 1]?.push(extra);
+      continue;
+    }
+    const nearest = repeated.toSorted((left, right) =>
+      Math.abs(average(left.map((block) => block.anchor?.x ?? 0)) - x) -
+      Math.abs(average(right.map((block) => block.anchor?.x ?? 0)) - x)
+    )[0];
+    nearest?.push(extra);
+  }
+  return repeated;
 }
 
-function looksLikeBuildTraceText(text: string): boolean {
-  return /\bpdfcpu\b/iu.test(text) ||
-    /\bcreated:\b/iu.test(text) ||
-    /\boptimized\s+for\b/iu.test(text) ||
-    /(?:^|[\s(])(?:testdata|samples?|examples?)\/[^\s)]+/iu.test(text);
+function detectBalancedColumnSplit(
+  blocks: readonly LayoutBlockSeed[],
+  fontSize: number,
+): readonly (readonly LayoutBlockSeed[])[] | undefined {
+  const anchored = blocks.filter(hasAnchor).toSorted(compareX);
+  const minimumSide = Math.max(2, Math.ceil(anchored.length * 0.2));
+  let splitIndex: number | undefined;
+  let splitGap = 0;
+  for (let index = minimumSide; index <= anchored.length - minimumSide; index += 1) {
+    const left = anchored[index - 1];
+    const right = anchored[index];
+    if (left === undefined || right === undefined) continue;
+    const gap = right.anchor.x - left.anchor.x;
+    if (gap > splitGap) {
+      splitGap = gap;
+      splitIndex = index;
+    }
+  }
+  if (splitIndex === undefined || splitGap < Math.max(36, fontSize * 4)) return undefined;
+  const columns = [anchored.slice(0, splitIndex), anchored.slice(splitIndex)];
+  return columns.every(columnHasVerticalContinuity) && columnsOverlapVertically(columns)
+    ? columns
+    : undefined;
 }
 
-function looksLikeGeneratorPathTraceText(text: string): boolean {
-  return /(?:^|[\s(])(?:testdata|samples?|examples?)\/[^\s)]+/iu.test(text);
+function columnHasVerticalContinuity(column: readonly LayoutBlockSeed[]): boolean {
+  const ys = column.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.y]);
+  const uniqueYs = [...new Set(ys.map((y) => Math.round(y * 10) / 10))];
+  if (uniqueYs.length < 2) return false;
+  if (uniqueYs.length === 2) return true;
+  const minimum = Math.min(...ys);
+  const maximum = Math.max(...ys);
+  const span = maximum - minimum;
+  if (span <= 0) return false;
+  if (uniqueYs.length === 3) {
+    const sorted = uniqueYs.toSorted((left, right) => left - right);
+    const gaps = sorted.slice(1).map((value, index) => value - (sorted[index] ?? value));
+    return Math.max(...gaps) <= span * 0.75;
+  }
+  const occupiedBands = new Set(ys.map((y) => Math.min(5, Math.floor(((y - minimum) / span) * 6))));
+  return occupiedBands.size >= 4;
 }
 
-function looksLikeStandaloneGeneratorStatusText(text: string): boolean {
-  const normalized = normalizeBlockText(text).toLowerCase();
-  return normalized === "verified" || normalized === "unchecked" || normalized === "selected";
-}
-
-function shouldFilterInlineNoiseBlock(
-  block: GroupedBlockSeed,
-  blockIndex: number,
-  blocks: readonly GroupedBlockSeed[],
-  hasContentsContext: boolean,
+function columnBandsOverlap(
+  left: readonly LayoutBlockSeed[],
+  right: readonly LayoutBlockSeed[],
 ): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0) {
-    return true;
-  }
-
-  if (looksLikeStandaloneBulletText(normalized)) {
-    return true;
-  }
-
-  return hasContentsContext && looksLikeContentsNoiseBlock(normalized, blockIndex, blocks);
+  const leftBand = medianHorizontalBand(left);
+  const rightBand = medianHorizontalBand(right);
+  const fontSize = median([...left, ...right].flatMap((block) => block.fontSize === undefined ? [] : [block.fontSize])) ?? 12;
+  const leftAnchor = average(left.map((block) => block.anchor?.x ?? 0));
+  const rightAnchor = average(right.map((block) => block.anchor?.x ?? 0));
+  return Math.abs(rightAnchor - leftAnchor) <= Math.max(60, fontSize * 6) &&
+    leftBand.right > rightBand.left - Math.max(4, fontSize * 0.5) &&
+    rightBand.right > leftBand.left + Math.max(4, fontSize * 0.5);
 }
 
-function looksLikeStandaloneBulletText(text: string): boolean {
-  return /^(?:[-*•]|â\s*¢)$/u.test(text);
+function medianHorizontalBand(blocks: readonly LayoutBlockSeed[]): { readonly left: number; readonly right: number } {
+  const intervals = blocks.map(horizontalInterval);
+  return {
+    left: median(intervals.map((interval) => interval.left)) ?? 0,
+    right: median(intervals.map((interval) => interval.right)) ?? 0,
+  };
 }
 
-function looksLikeRevisionStamp(text: string): boolean {
-  return /\b\d{2,}-\d{2,}(?:-\d{2,})+\b/u.test(text) &&
-    /\brev\.[\p{L}\p{N}]+\b/iu.test(text);
+function columnsOverlapVertically(columns: readonly (readonly LayoutBlockSeed[])[]): boolean {
+  const ranges = columns.map((column) => {
+    const ys = column.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.y]);
+    return { minimum: Math.min(...ys), maximum: Math.max(...ys) };
+  });
+  const sharedMinimum = Math.max(...ranges.map((range) => range.minimum));
+  const sharedMaximum = Math.min(...ranges.map((range) => range.maximum));
+  const spans = ranges.map((range) => range.maximum - range.minimum);
+  return sharedMaximum >= sharedMinimum && Math.max(...spans) <= Math.max(80, Math.min(...spans) * 4);
 }
 
-function looksLikeContentsNoiseBlock(
-  text: string,
-  blockIndex: number,
-  blocks: readonly GroupedBlockSeed[],
-): boolean {
-  if (looksLikeDotLeaderNoise(text)) {
-    return true;
-  }
-
-  if (!looksLikeStandalonePageReference(text)) {
-    return false;
-  }
-
-  if (blockIndex <= 0) {
-    return false;
-  }
-
-  return blocks
-    .slice(Math.max(0, blockIndex - 2), blockIndex)
-    .some((candidate) => looksLikeContentsEntryLabel(normalizeBlockText(candidate.text)));
-}
-
-function looksLikeDotLeaderNoise(text: string): boolean {
-  return /^[.\s\u2024\u2027\u2219]{4,}$/u.test(text);
-}
-
-function looksLikeStandalonePageReference(text: string): boolean {
-  return /^(?:\d{1,4}|[ivxlcdm]{1,8})$/iu.test(text);
-}
-
-function looksLikeContentsEntryLabel(text: string): boolean {
-  if (text.length === 0 || text.length > 80 || /[.!?]$/.test(text) || countLabelMarkers(text) > 0) {
-    return false;
-  }
-
-  const words = text.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  return words.length > 0 && words.length <= 8 && looksLikeTitleCaseHeading(text);
-}
-
-function annotateParagraphStarts(
-  blocks: readonly GroupedBlockSeed[],
+function splitLeadingSentenceTails(
+  blocks: readonly OrderedLayoutBlock[],
   writingMode: PdfWritingMode | undefined,
-): readonly GroupedBlockSeed[] {
-  return blocks.map((block, blockIndex) => {
-    const startsParagraph = blockIndex === 0 || shouldStartParagraph(blocks, blockIndex, writingMode);
-    const previousBlock = blocks[blockIndex - 1];
-    const geometryAvailable = block.anchor !== undefined && (blockIndex === 0 || previousBlock?.anchor !== undefined);
+): readonly OrderedLayoutBlock[] {
+  if (writingMode === "vertical") {
+    return blocks;
+  }
+  const output: OrderedLayoutBlock[] = [];
+  for (const block of blocks) {
+    const previous = output.at(-1);
+    if (previous === undefined) {
+      output.push(block);
+      continue;
+    }
+    const split = leadingSentenceTail(block.text);
+    if (
+      split === undefined ||
+      !sameTextColumn(previous, block) ||
+      verticalGap(previous, block) > Math.max(48, (block.fontSize ?? 12) * 4.2) ||
+      endsSentence(previous.text)
+    ) {
+      output.push(block);
+      continue;
+    }
+    output.push(
+      { ...block, id: `${block.id}-tail`, text: split.tail, paragraphContinuation: true },
+      { ...block, id: `${block.id}-body`, text: split.body, paragraphBoundary: true },
+    );
+  }
+  return output;
+}
+
+function leadingSentenceTail(text: string): { readonly tail: string; readonly body: string } | undefined {
+  const normalized = normalizeText(text);
+  const match = normalized.match(/^(.{2,24}?[.!?])\s+([\p{Lu}\p{Lt}][\s\S]+)$/u);
+  if (!match) {
+    return undefined;
+  }
+  const tail = match[1]?.trim() ?? "";
+  const body = match[2]?.trim() ?? "";
+  if (tail.split(/\s+/u).length > 3 || /(?:^|\s)(?:Dr|Mr|Mrs|Ms|Prof|Sr|Jr|St|No|Fig|Eq|Sec|Ch|vs|e\.g|i\.e)\.$/iu.test(tail)) {
+    return undefined;
+  }
+  return tail.length > 0 && body.length > 0 ? { tail, body } : undefined;
+}
+
+function classifyPages(
+  pages: readonly GroupedLayoutPage[],
+  repeated: RepeatedBoundaryEvidence,
+): readonly PdfLayoutPage[] {
+  return pages.map((page) => classifyPage(page, repeated));
+}
+
+function classifyPage(page: GroupedLayoutPage, repeated: RepeatedBoundaryEvidence): PdfLayoutPage {
+  const table = inferTableEvidence(page);
+  const form = inferFormEvidence(page, table.blockIds);
+  const structuralBlockIds = new Set([
+    ...table.blockIds,
+    ...(form.region?.blockIds ?? []),
+  ]);
+  const peripheral = inferPeripheralBands(page.blocks, structuralBlockIds);
+  const medianFontSize = inferBodyFontSize(page.blocks);
+  const initialRoles = page.blocks.map((block, index) => inferRole(
+    block,
+    index,
+    page.blocks,
+    medianFontSize,
+    repeated,
+    peripheral,
+    table,
+  ));
+  const paragraphStarts = inferParagraphStarts(page.blocks, initialRoles, table.blockIds);
+  const blocks = page.blocks.map((block, index): PdfLayoutBlock => {
+    const roleEvidence = initialRoles[index] as { readonly role: PdfLayoutRole; readonly confidence: number; readonly method: string; readonly reason: string };
+    const paragraph = paragraphStarts[index] as { readonly startsParagraph: boolean; readonly confidence: number; readonly reason: string };
     return {
-      ...block,
-      startsParagraph,
+      id: block.id,
+      pageNumber: block.pageNumber,
+      readingOrder: index,
+      text: block.text,
+      role: roleEvidence.role,
+      roleConfidence: roleEvidence.confidence,
+      startsParagraph: paragraph.startsParagraph,
+      runIds: block.runIds,
+      glyphIds: block.glyphIds,
+      ...(block.writingMode !== undefined ? { writingMode: block.writingMode } : {}),
+      resolutionMethod: block.resolutionMethod,
+      ...(block.pageRef !== undefined ? { pageRef: block.pageRef } : {}),
+      ...(block.anchor !== undefined ? { anchor: block.anchor } : {}),
+      ...(block.bbox !== undefined ? { bbox: block.bbox } : {}),
+      ...(block.fontSize !== undefined ? { fontSize: block.fontSize } : {}),
       inferences: [
-        ...(block.inferences ?? []),
+        ...block.inferences,
         {
           kind: "paragraph-flow",
-          status: geometryAvailable ? "inferred" : "abstained",
-          method: geometryAvailable ? "paragraph-geometry" : "observed-content-order",
-          confidence: geometryAvailable ? (startsParagraph ? 0.6 : 0.66) : 0.28,
-          reason: paragraphInferenceReason(startsParagraph, geometryAvailable, blockIndex),
+          status: "inferred",
+          method: "paragraph-geometry",
+          confidence: paragraph.confidence,
+          reason: paragraph.reason,
           evidenceRunIds: block.runIds,
-          evidenceBlockIds: previousBlock ? [previousBlock.id, block.id] : [block.id],
+        },
+        {
+          kind: "structural-role",
+          status: "inferred",
+          method: roleEvidence.method,
+          confidence: roleEvidence.confidence,
+          reason: roleEvidence.reason,
+          evidenceRunIds: block.runIds,
         },
       ],
     };
   });
-}
-
-function paragraphInferenceReason(
-  startsParagraph: boolean,
-  geometryAvailable: boolean,
-  blockIndex: number,
-): string {
-  if (!geometryAvailable) {
-    return "Paragraph flow could not rely on anchors for this boundary, so the observed content order was preserved.";
-  }
-
-  if (blockIndex === 0) {
-    return "First block on the page starts a paragraph by construction.";
-  }
-
-  return startsParagraph
-    ? "Text geometry and boundary cues indicate a new paragraph."
-    : "Text geometry and continuation cues keep this block in the previous paragraph.";
-}
-
-function shouldMergeAdjacentBlocks(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  const previousText = normalizeBlockText(previousBlock.text);
-  const currentText = normalizeBlockText(currentBlock.text);
-
-  if (/^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentBlock.text)) {
-    return false;
-  }
-
-  if (
-    looksLikeStandaloneBulletText(previousText) ||
-    looksLikeStandaloneBulletText(currentText)
-  ) {
-    return false;
-  }
-
-  if (
-    looksLikeBuildTraceText(currentText) &&
-    (looksLikePaginationLine(previousText) || looksLikeHeadingLikeText(previousText, previousBlock.fontSize))
-  ) {
-    return false;
-  }
-
-  if (shouldPreserveShortTailParagraphBoundary(previousBlock, currentBlock, previousText, currentText, writingMode)) {
-    return false;
-  }
-
-  if (shouldKeepLedgerRowsSeparate(previousBlock, currentBlock)) {
-    return false;
-  }
-
-  if (isSameLineBlockContinuation(previousBlock, currentBlock, writingMode)) {
-    return true;
-  }
-
-  if (isHeadingContinuation(previousBlock, currentBlock, writingMode)) {
-    return true;
-  }
-
-  if (writingMode !== "vertical" && endsWithHyphenatedContinuation(previousText) && startsWithContinuation(currentText)) {
-    return true;
-  }
-
-  const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
-  const currentFontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  if (Math.abs(previousFontSize - currentFontSize) > 1) {
-    return false;
-  }
-
-  if (!previousBlock.anchor || !currentBlock.anchor) {
-    return previousBlock.text.length < 40 && currentBlock.text.length < 40;
-  }
-
-  if (writingMode === "vertical") {
-    const verticalGap = previousBlock.anchor.y - currentBlock.anchor.y;
-    const horizontalGap = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
-    if (horizontalGap > Math.max(10, previousFontSize * 0.9)) {
-      return false;
-    }
-    if (verticalGap < -Math.max(10, previousFontSize)) {
-      return false;
-    }
-    if (verticalGap > Math.max(28, previousFontSize * 2.6)) {
-      return false;
-    }
-    return previousBlock.text.length < 30 || !/[.!?:]$/.test(previousBlock.text);
-  }
-
-  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const horizontalDrift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
-  if (verticalGap > Math.max(20, previousFontSize * 2.5)) {
-    return false;
-  }
-  if (horizontalDrift > Math.max(14, previousFontSize)) {
-    return false;
-  }
-
-  if (/[.!?]["')\]]*$/u.test(previousText) && startsLikeSentence(currentText)) {
-    return verticalGap <= Math.max(12, previousFontSize * 1.1);
-  }
-
-  return previousText.length < 60 || !/[.!?:]$/.test(previousText);
-}
-
-function shouldPreserveShortTailParagraphBoundary(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  previousText: string,
-  currentText: string,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  if (!/[.!?]["')\]]*$/u.test(previousText) || !startsLikeSentence(currentText)) {
-    return false;
-  }
-
-  if (
-    endsWithHyphenatedContinuation(previousText) ||
-    startsWithContinuation(currentText)
-  ) {
-    return false;
-  }
-
-  const previousLineText = normalizeBlockText(previousBlock.lastLineText ?? previousText);
-  if (
-    previousLineText.length > 8 ||
-    !/[.!?]["')\]]*$/u.test(previousLineText) ||
-    looksLikeStandaloneBulletText(previousLineText)
-  ) {
-    return false;
-  }
-
-  const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
-  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const horizontalDrift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
-  const forwardAdvance = currentBlock.anchor.x - previousBlock.anchor.x;
-  if (verticalGap <= Math.max(1.5, previousFontSize * 0.18) && forwardAdvance > Math.max(3, previousFontSize * 0.35)) {
-    return true;
-  }
-  return verticalGap <= Math.max(12, previousFontSize * 1.1) && horizontalDrift <= Math.max(14, previousFontSize);
-}
-
-function shouldStartParagraph(
-  blocks: readonly GroupedBlockSeed[],
-  blockIndex: number,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  const previousBlock = blocks[blockIndex - 1] as GroupedBlockSeed;
-  const currentBlock = blocks[blockIndex] as GroupedBlockSeed;
-  const previousText = normalizeBlockText(previousBlock.text);
-  const currentText = normalizeBlockText(currentBlock.text);
-  if (previousText.length === 0 || currentText.length === 0) {
-    return true;
-  }
-
-  if (/^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentText)) {
-    return true;
-  }
-
-  if (
-    looksLikeBuildTraceText(currentText) &&
-    (looksLikePaginationLine(previousText) || looksLikeHeadingLikeText(previousText, previousBlock.fontSize))
-  ) {
-    return true;
-  }
-
-  if (looksLikeFieldChoiceParagraphStart(currentText)) {
-    return true;
-  }
-
-  if (shouldKeepHeadingLeadInParagraph(previousBlock, currentBlock, previousText, currentText, writingMode)) {
-    return false;
-  }
-
-  if (shouldKeepLeadingCarryOverTailWithPrevious(previousBlock, currentBlock, previousText, currentText, writingMode)) {
-    return false;
-  }
-
-  if (shouldKeepParagraphContinuation(previousBlock, currentBlock, previousText, currentText, writingMode)) {
-    return false;
-  }
-
-  if (shouldStartLedgerRowParagraph(blocks, blockIndex)) {
-    return true;
-  }
-
-  if (shouldKeepCompactBlocksInParagraph(previousBlock, currentBlock, previousText, currentText)) {
-    return false;
-  }
-
-  if (
-    looksLikeCompactLabelCluster(previousText, previousBlock.fontSize) ||
-    looksLikeCompactLabelCluster(currentText, currentBlock.fontSize)
-  ) {
-    return true;
-  }
-
-  if (looksLikeExplicitParagraphBoundaryText(currentText, currentBlock.fontSize)) {
-    return true;
-  }
-
-  if (looksLikeExplicitParagraphBoundaryText(previousText, previousBlock.fontSize)) {
-    return true;
-  }
-
-  if (shouldPreserveShortTailParagraphBoundary(previousBlock, currentBlock, previousText, currentText, writingMode)) {
-    return true;
-  }
-
-  if (isSameLineBlockContinuation(previousBlock, currentBlock, writingMode)) {
-    return false;
-  }
-
-  if (isHeadingContinuation(previousBlock, currentBlock, writingMode)) {
-    return false;
-  }
-
-  if (endsWithHyphenatedContinuation(previousText) || startsWithContinuation(currentText)) {
-    return false;
-  }
-
-  const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
-  const currentFontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  if (writingMode === "vertical") {
-    if (!previousBlock.anchor || !currentBlock.anchor) {
-      return true;
-    }
-
-    if (
-      isSingleWordBlockText(previousText) &&
-      isSingleWordBlockText(currentText) &&
-      !previousText.includes(":") &&
-      !currentText.includes(":")
-    ) {
-      return true;
-    }
-
-    const columnShift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
-    if (columnShift > Math.max(10, currentFontSize)) {
-      return true;
-    }
-
-    const verticalGap = previousBlock.anchor.y - currentBlock.anchor.y;
-    return verticalGap > Math.max(36, currentFontSize * 3.5);
-  }
-
-  const endsSentence = /[.!?]["')\]]*$/u.test(previousText);
-  const startsSentence = startsLikeSentence(currentText);
-  const hasShortTail = previousText.length <= 8;
-
-  if (!previousBlock.anchor || !currentBlock.anchor) {
-    return endsSentence && startsSentence;
-  }
-
-  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const indentShift = currentBlock.anchor.x - previousBlock.anchor.x;
-  const outdentShift = previousBlock.anchor.x - currentBlock.anchor.x;
-  if (verticalGap > Math.max(20, Math.max(previousFontSize, currentFontSize) * 1.6)) {
-    return true;
-  }
-
-  if (!endsSentence || !startsSentence) {
-    return false;
-  }
-
-  if (indentShift > Math.max(10, currentFontSize * 0.9)) {
-    return true;
-  }
-  if (outdentShift > Math.max(18, currentFontSize * 1.2)) {
-    return true;
-  }
-  if (verticalGap > Math.max(8, currentFontSize * 0.55)) {
-    return true;
-  }
-
-  return hasShortTail;
-}
-
-function shouldStartLedgerRowParagraph(
-  blocks: readonly GroupedBlockSeed[],
-  blockIndex: number,
-): boolean {
-  const currentBlock = blocks[blockIndex];
-  if (!currentBlock?.anchor || !looksLikeLedgerRowLabelText(currentBlock.text)) {
-    return false;
-  }
-
-  const fontSize = currentBlock.fontSize ?? 12;
-  const sameColumnRows = blocks.filter((candidate) =>
-    candidate.anchor !== undefined &&
-    Math.abs(candidate.anchor.x - currentBlock.anchor!.x) <= Math.max(12, fontSize * 1.2) &&
-    Math.abs(candidate.anchor.y - currentBlock.anchor!.y) <= Math.max(120, fontSize * 12) &&
-    looksLikeLedgerRowLabelText(candidate.text)
-  );
-  if (sameColumnRows.length < 3) {
-    return false;
-  }
-
-  const previousBlock = blocks[blockIndex - 1];
-  const nextBlock = blocks[blockIndex + 1];
-  return [previousBlock, nextBlock].some((candidate) =>
-    candidate?.anchor !== undefined &&
-    Math.abs(candidate.anchor.x - currentBlock.anchor!.x) <= Math.max(12, fontSize * 1.2) &&
-    looksLikeLedgerRowLabelText(candidate.text)
-  );
-}
-
-function looksLikeLedgerRowLabelText(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0 || normalized.length > 80 || /[.!?]$/u.test(normalized)) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 8) {
-    return false;
-  }
-
-  return /[*]{2,}/u.test(normalized) ||
-    /\d+(?:[.,]\d+)?\s*%/u.test(normalized) ||
-    /\b(?:allowance|base|brut|cong[eé]s|contribution|deduction|d[eé]pan|gross|hours?|hrs?|imp[oô]t|net|premium|rate|remuneration|r[eé]mun[eé]ration|retenue|salary|salaire|sant[eé]|suppl|tax|taux|total|wage)\b/iu.test(normalized);
-}
-
-function shouldKeepLedgerRowsSeparate(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-): boolean {
-  if (!previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  return looksLikeLedgerRowLabelText(previousBlock.text) &&
-    looksLikeLedgerRowLabelText(currentBlock.text) &&
-    Math.abs(previousBlock.anchor.x - currentBlock.anchor.x) <= Math.max(12, fontSize * 1.2);
-}
-
-function shouldKeepLeadingCarryOverTailWithPrevious(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  previousText: string,
-  currentText: string,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  if (
-    previousText.length < 24 ||
-    /[.!?]["')\]]*$/u.test(previousText) ||
-    !/[.!?]["')\]]*$/u.test(currentText) ||
-    currentText.length > 18 ||
-    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) ||
-    looksLikeStandaloneBulletText(currentText) ||
-    looksLikeAbbreviatedLeadingTail(currentText)
-  ) {
-    return false;
-  }
-
-  const words = currentText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 3) {
-    return false;
-  }
-
-  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  const horizontalDrift = Math.abs(currentBlock.anchor.x - previousBlock.anchor.x);
-  return horizontalDrift <= Math.max(18, fontSize * 1.5);
-}
-
-function looksLikeAbbreviatedLeadingTail(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (/^(?:dr|mr|mrs|ms|prof|sr|jr|st|fig|eq|ref|no|etc|vs|cf|e\.g|i\.e)\.$/iu.test(normalized)) {
-    return true;
-  }
-
-  return /^(?:\p{Lu}\.){2,}$/u.test(normalized);
-}
-
-function looksLikeEnumeratedLeadingTail(text: string): boolean {
-  return /^(?:\d+|[ivxlcdm]+)[.)]$/iu.test(normalizeBlockText(text));
-}
-
-function shouldKeepHeadingLeadInParagraph(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  previousText: string,
-  currentText: string,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  if (
-    currentText.length < 24 ||
-    !startsLikeSentence(currentText) ||
-    looksLikeExplicitParagraphBoundaryText(currentText, currentBlock.fontSize) ||
-    looksLikeExplicitParagraphBoundaryText(previousText, previousBlock.fontSize) ||
-    /^(?:[-*•]\s+|\d+[.)]\s+)/u.test(currentText)
-  ) {
-    return false;
-  }
-
-  if (/guide$/iu.test(previousText) && /^this guide\b/iu.test(currentText)) {
-    return true;
-  }
-
-  const looksLikeLeadHeading =
-    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) &&
-    /\b(?:guide|summary|overview|background|introduction)\b/iu.test(previousText) &&
-    previousText.length >= 6 &&
-    previousText.length <= 40 &&
-    !looksLikeSectionHeading(previousText) &&
-    !looksLikeStandaloneQuestionHeading(previousText) &&
-    !looksLikeNumberedQuestionHeading(previousText);
-  if (!looksLikeLeadHeading) {
-    return false;
-  }
-
-  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const indentShift = Math.abs(currentBlock.anchor.x - previousBlock.anchor.x);
-  return verticalGap <= Math.max(18, fontSize * 1.4) && indentShift <= Math.max(120, fontSize * 1.2);
-}
-
-function shouldKeepParagraphContinuation(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  previousText: string,
-  currentText: string,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  if (previousText.length < 24 || currentText.length === 0) {
-    return false;
-  }
-
-  if (/[.!?]["')\]]*$/u.test(previousText)) {
-    return false;
-  }
-
-  if (looksLikeExplicitParagraphBoundaryText(currentText, currentBlock.fontSize)) {
-    return false;
-  }
-
-  if (looksLikeExplicitParagraphBoundaryText(previousText, previousBlock.fontSize) && !looksLikeNumberedBodyParagraph(previousText)) {
-    return false;
-  }
-
-  if (looksLikeHeadingLikeText(previousText, previousBlock.fontSize) && !looksLikeNumberedBodyParagraph(previousText)) {
-    return false;
-  }
-
-  if (/^(?:[-*•]\s+|[a-z][.)]\s+)/u.test(currentText)) {
-    return false;
-  }
-
-  if (/^\d+[.)]\s+/u.test(currentText) && !looksLikeNumberedBodyParagraph(currentText)) {
-    return false;
-  }
-
-  if (countTextLines(previousBlock.text) > 4 || countTextLines(currentBlock.text) > 4) {
-    return false;
-  }
-
-  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const indentShift = currentBlock.anchor.x - previousBlock.anchor.x;
-  if (indentShift < -Math.max(10, fontSize * 0.9)) {
-    return false;
-  }
-
-  if (looksLikeNumberedBodyParagraph(previousText)) {
-    return verticalGap <= Math.max(48, fontSize * 4) &&
-      (startsWithContinuation(currentText) || startsLikeSentence(currentText));
-  }
-
-  return verticalGap <= Math.max(18, fontSize * 1.5) &&
-    (startsWithContinuation(currentText) || startsLikeSentence(currentText));
-}
-
-function looksLikeFieldChoiceParagraphStart(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  return /\bgender:/iu.test(normalized) && /\b(?:female|male|non-binary)\b/iu.test(normalized);
-}
-
-function looksLikeConsentOptionClusterText(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0 || normalized.length > 80 || /[.!?:]$/u.test(normalized) || /\d/u.test(normalized)) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}/u.test(word));
-  if (words.length < 3 || words.length > 8) {
-    return false;
-  }
-
-  return /^(?:accept|acknowledge|agree|authorize|certify|confirm|consent|verify)\b/iu.test(normalized);
-}
-
-function shouldKeepCompactBlocksInParagraph(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  previousText: string,
-  currentText: string,
-): boolean {
-  if (!previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const horizontalShift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
-  const previousLineCount = countTextLines(previousBlock.text);
-  const currentLineCount = countTextLines(currentBlock.text);
-
-  if (
-    looksLikeFieldLikeClusterText(previousText, previousBlock.fontSize) &&
-    looksLikeFieldLikeClusterText(currentText, currentBlock.fontSize) &&
-    Math.abs((previousBlock.fontSize ?? fontSize) - (currentBlock.fontSize ?? fontSize)) <= 2 &&
-    horizontalShift <= Math.max(22, fontSize * 1.8) &&
-    verticalGap <= Math.max(48, fontSize * 4.2) &&
-    !/[.!?]$/.test(previousText) &&
-    !/[.!?]$/.test(currentText) &&
-    !(countLabelMarkers(previousText) <= 2 && countLabelMarkers(currentText) >= 3)
-  ) {
-    return true;
-  }
-
-  if (
-    looksLikeCompactLabelCluster(previousText, previousBlock.fontSize) &&
-    looksLikeCompactLabelCluster(currentText, currentBlock.fontSize) &&
-    !(countLabelMarkers(previousText) <= 2 && countLabelMarkers(currentText) >= 3) &&
-    previousLineCount === currentLineCount &&
-    verticalGap <= Math.max(24, fontSize * 2)
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
-function looksLikeFieldLikeClusterText(text: string, fontSize: number | undefined): boolean {
-  if (!looksLikeCompactLabelCluster(text, fontSize)) {
-    return false;
-  }
-
-  const normalized = normalizeBlockText(text);
-  if (countLabelMarkers(normalized) > 0) {
-    return true;
-  }
-
-  if (looksLikeTitleCaseHeading(normalized)) {
-    return true;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 6) {
-    return false;
-  }
-
-  return words.every((word) => isTitleCaseWord(word) || isConnectorWord(word) || /^[\p{N}()/-]+$/u.test(word));
-}
-
-function looksLikeCompactLabelCluster(text: string, fontSize: number | undefined): boolean {
-  if (text.length === 0 || text.length > 80) {
-    return false;
-  }
-
-  if (
-    /^(?:[-*•]\s+|\d+[.)]\s+)/u.test(text) ||
-    /[.!?]$/.test(text) ||
-    looksLikeSectionHeading(text) ||
-    looksLikeStandaloneQuestionHeading(text)
-  ) {
-    return false;
-  }
-
-  const words = text.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 8 || countTextLines(text) > 3) {
-    return false;
-  }
-
-  if (!text.includes(":") && words.length < 2) {
-    return false;
-  }
-
-  return text.includes(":") || looksLikeTitleCaseHeading(text) || (fontSize !== undefined && fontSize <= 12);
-}
-
-function looksLikeExplicitParagraphBoundaryText(text: string, fontSize: number | undefined): boolean {
-  return looksLikeSectionHeading(text) ||
-    looksLikeStandaloneQuestionHeading(text) ||
-    (fontSize !== undefined && fontSize >= 18 && looksLikeHeading(text, fontSize) && !text.includes(":"));
-}
-
-function countTextLines(text: string): number {
-  return text
-    .split(/\n/u)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0)
-    .length;
-}
-
-function isSingleWordBlockText(text: string): boolean {
-  const words = normalizeBlockText(text).split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  return words.length === 1;
-}
-
-function countLabelMarkers(text: string): number {
-  return (text.match(/:/gu) ?? []).length;
-}
-
-function resolvePageWritingMode(page: PdfObservedPage): PdfWritingMode | undefined {
-  if (page.runs.length > 0 && page.runs.every((run) => run.writingMode === "vertical")) {
-    return "vertical";
-  }
-
-  return undefined;
-}
-
-function joinBlockText(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  writingMode: PdfWritingMode | undefined,
-): string {
-  const previousText = previousBlock.text;
-  const currentText = currentBlock.text;
-  if (writingMode !== "vertical" && endsWithHyphenatedContinuation(previousText) && startsWithContinuation(currentText)) {
-    return `${previousText.replace(/[-\u2010-\u2015]$/u, "")}${currentText.trimStart()}`;
-  }
-
-  const normalizedPreviousText = normalizeBlockText(previousText);
-  const normalizedCurrentText = normalizeBlockText(currentText);
-  const useInlineSeparator = shouldKeepCompactBlocksInParagraph(
-    previousBlock,
-    currentBlock,
-    normalizedPreviousText,
-    normalizedCurrentText,
-  );
-  const separator = writingMode === "vertical" && !useInlineSeparator ? "\n" : " ";
-  return `${previousText}${separator}${currentText}`.replaceAll(/[ \t]+/g, " ").trim();
-}
-
-function buildRepeatedBoundarySets(pages: readonly PdfLayoutPage[]): RepeatedBoundarySets {
-  const headerCounts = new Map<string, number>();
-  const footerCounts = new Map<string, number>();
-
-  for (const page of pages) {
-    const firstBlock = page.blocks[0];
-    const lastBlock = page.blocks.at(-1);
-    if (firstBlock) {
-      const key = boundaryKey(firstBlock.text);
-      if (key) {
-        headerCounts.set(key, (headerCounts.get(key) ?? 0) + 1);
-      }
-    }
-    if (lastBlock) {
-      const key = boundaryKey(lastBlock.text);
-      if (key) {
-        footerCounts.set(key, (footerCounts.get(key) ?? 0) + 1);
-      }
-    }
-  }
-
+  const regions = [table.region, form.region].filter((region): region is PdfLayoutRegion => region !== undefined);
   return {
-    headers: new Set(Array.from(headerCounts.entries()).filter(([, count]) => count > 1).map(([key]) => key)),
-    footers: new Set(Array.from(footerCounts.entries()).filter(([, count]) => count > 1).map(([key]) => key)),
+    pageNumber: page.pageNumber,
+    resolutionMethod: page.resolutionMethod,
+    ...(page.pageRef !== undefined ? { pageRef: page.pageRef } : {}),
+    blocks,
+    regions,
   };
+}
+
+function collectRepeatedBoundaryEvidence(pages: readonly GroupedLayoutPage[]): RepeatedBoundaryEvidence {
+  const pageKeys = pages.map((page) => new Set([
+    ...page.blocks.slice(0, 2),
+    ...page.blocks.slice(-2),
+  ].flatMap((block) => {
+    const key = boundaryKey(block.text);
+    return key === undefined ? [] : [key];
+  })));
+  const counts = new Map<string, number>();
+  for (const keys of pageKeys) {
+    for (const key of keys) {
+      counts.set(key, (counts.get(key) ?? 0) + 1);
+    }
+  }
+  return { keys: new Set([...counts].flatMap(([key, count]) => count >= 2 ? [key] : [])) };
 }
 
 function boundaryKey(text: string): string | undefined {
-  const normalized = text.replaceAll(/\s+/g, " ").trim().toLowerCase();
-  if (normalized.length === 0 || normalized.length > 80) {
-    return undefined;
-  }
-  return normalized;
+  const normalized = normalizeText(text).toLowerCase().replaceAll(/\d+/g, "#");
+  return normalized.length >= 3 && normalized.length <= 180 ? normalized : undefined;
 }
 
-function withStructuralRoleInference(
-  block: PdfLayoutBlock,
-  role: PdfLayoutRole,
+function inferRole(
+  block: OrderedLayoutBlock,
+  blockIndex: number,
+  blocks: readonly OrderedLayoutBlock[],
+  medianFontSize: number,
+  repeated: RepeatedBoundaryEvidence,
+  peripheral: PeripheralBands,
+  table: TableEvidence,
+): { readonly role: PdfLayoutRole; readonly confidence: number; readonly method: string; readonly reason: string } {
+  const text = normalizeText(block.text);
+  if (table.headerBlockIds.has(block.id)) {
+    return role("heading", 0.88, "table-header", "The block occupies the header band of a repeated row-and-column structure.");
+  }
+  if (table.blockIds.has(block.id)) {
+    return role("body", 0.9, "table-body", "The block is aligned with non-header rows in a repeated table structure.");
+  }
+  if (looksLikeListItem(text)) {
+    return role("list", 0.86, "list-prefix", "A conventional list prefix is present.");
+  }
+
+  const key = boundaryKey(text);
+  const isRepeated = key !== undefined && repeated.keys.has(key);
+  const fontRatio = medianFontSize <= 0 ? 1 : (block.fontSize ?? medianFontSize) / medianFontSize;
+  if (isRepeated && fontRatio >= 1.25 && looksLikeHeadingCandidate(text, fontRatio, blockIndex, blocks)) {
+    return role("heading", 0.86, "repeated-boundary-heading", "Repeated text is typographically stronger than the page body.");
+  }
+  if (isRepeated && looksLikeRepeatedTableBoundary(block, blocks)) {
+    return role("heading", 0.86, "repeated-boundary-table-heading", "A repeated compact label borders multiple structured data rows.");
+  }
+  if (isRepeated || peripheral.headers.has(block.id) || peripheral.footers.has(block.id)) {
+    const boundaryRole = peripheral.footers.has(block.id) || blockIndex >= blocks.length - Math.max(1, Math.ceil(blocks.length * 0.2))
+      ? "footer"
+      : "header";
+    return role(boundaryRole, isRepeated ? 0.9 : 0.74, isRepeated ? "repeated-boundary" : "page-band",
+      isRepeated ? "Normalized text repeats in a consistent page-boundary position." : "Typography and an isolated page-edge band separate this block from body flow.");
+  }
+  if (looksLikeHeadingCandidate(text, fontRatio, blockIndex, blocks)) {
+    return role("heading", Math.min(0.94, 0.72 + Math.max(0, fontRatio - 1) * 0.18), "typographic-heading",
+      "Relative font size, compactness, casing, and neighboring body evidence support a heading role.");
+  }
+  return role("body", 0.72, "body-flow", "The block participates in ordinary page text flow without stronger structural evidence.");
+}
+
+function role(
+  value: PdfLayoutRole,
   confidence: number,
   method: string,
   reason: string,
-): PdfLayoutBlock {
-  return {
-    ...block,
-    role,
-    roleConfidence: confidence,
-    inferences: [
-      ...(block.inferences ?? []),
-      {
-        kind: "structural-role",
-        status: "inferred",
-        method,
-        confidence,
-        reason,
-        evidenceRunIds: block.runIds,
-        evidenceBlockIds: [block.id],
-      },
-    ],
-  };
+): { readonly role: PdfLayoutRole; readonly confidence: number; readonly method: string; readonly reason: string } {
+  return { role: value, confidence, method, reason };
 }
 
-function classifyLayoutBlock(
-  block: PdfLayoutBlock,
+function looksLikeHeadingCandidate(
+  text: string,
+  fontRatio: number,
   blockIndex: number,
-  repeatedBoundarySets: RepeatedBoundarySets,
-  blocks: readonly PdfLayoutBlock[],
-): PdfLayoutBlock {
-  const key = boundaryKey(block.text);
-  if (key && repeatedBoundarySets.headers.has(key) && blockIndex === 0) {
-    if (shouldTreatRepeatedBoundaryAsBody(block, blockIndex, blocks)) {
-      return withStructuralRoleInference(
-        block,
-        "body",
-        0.62,
-        "repeated-boundary-body",
-        "Repeated text aligned with body-like evidence, so it was not treated as a header.",
-      );
-    }
-
-    if (shouldTreatRepeatedHeaderAsHeading(block, blockIndex, blocks)) {
-      return withStructuralRoleInference(
-        block,
-        "heading",
-        0.66,
-        "repeated-boundary-heading",
-        "Repeated top text also matched heading evidence, so it was kept as a heading.",
-      );
-    }
-
-    if (shouldTreatRepeatedTableBoundaryAsHeading(block, blockIndex, blocks)) {
-      return withStructuralRoleInference(
-        block,
-        "heading",
-        0.66,
-        "repeated-boundary-table-heading",
-        "Repeated top text also matched table-header evidence, so it was kept as a heading.",
-      );
-    }
-
-    return withStructuralRoleInference(
-      block,
-      "header",
-      0.7,
-      "repeated-boundary",
-      "The same short top-of-page text recurred across pages.",
-    );
-  }
-
-  if (key && repeatedBoundarySets.footers.has(key) && blockIndex === blocks.length - 1) {
-    if (shouldTreatRepeatedTableBoundaryAsHeading(block, blockIndex, blocks)) {
-      return withStructuralRoleInference(
-        block,
-        "heading",
-        0.66,
-        "repeated-boundary-table-heading",
-        "Repeated bottom text also matched table-header evidence, so it was kept as a heading.",
-      );
-    }
-
-    if (shouldTreatRepeatedBoundaryAsBody(block, blockIndex, blocks)) {
-      return withStructuralRoleInference(
-        block,
-        "body",
-        0.62,
-        "repeated-boundary-body",
-        "Repeated text aligned with body-like evidence, so it was not treated as a footer.",
-      );
-    }
-
-    return withStructuralRoleInference(
-      block,
-      "footer",
-      0.7,
-      "repeated-boundary",
-      "The same short bottom-of-page text recurred across pages.",
-    );
-  }
-
-  if (looksLikeLeadingMetadataLabel(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "heading",
-      roleConfidence: 0.64,
-    };
-  }
-
-  if (looksLikeNumberedListPrompt(block.text)) {
-    return {
-      ...block,
-      role: "list",
-      roleConfidence: 0.66,
-    };
-  }
-
-  if (looksLikeDocumentRetentionNotice(block.text)) {
-    return {
-      ...block,
-      role: "footer",
-      roleConfidence: 0.58,
-    };
-  }
-
-  if (looksLikeNumberedBodyParagraph(block.text)) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.62,
-    };
-  }
-
-  if (looksLikeSimpleFieldLabelBody(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.6,
-    };
-  }
-
-  if (looksLikeNumberedSectionHeadingBeforeBody(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "heading",
-      roleConfidence: 0.68,
-    };
-  }
-
-  if (looksLikeTableRowDescriptor(block, blockIndex, blocks, "pre-heading")) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.6,
-    };
-  }
-
-  if (looksLikePromotedHeading(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "heading",
-      roleConfidence: 0.65,
-    };
-  }
-
-  if (looksLikeFieldValueBody(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.58,
-    };
-  }
-
-  if (looksLikeFieldLabelBody(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.6,
-    };
-  }
-
-  if (looksLikeCoverTitleHeading(block, blockIndex, blocks)) {
-    return {
-      ...block,
-      role: "heading",
-      roleConfidence: 0.64,
-    };
-  }
-
-  if (looksLikeSectionHeading(block.text)) {
-    return {
-      ...block,
-      role: "heading",
-      roleConfidence: 0.7,
-    };
-  }
-
-  if (/^(?:[-*•]\s+|[a-z][.)]\s+)/u.test(block.text)) {
-    return {
-      ...block,
-      role: "list",
-      roleConfidence: 0.65,
-    };
-  }
-
-  if (
-    looksLikeHeading(block.text, block.fontSize) ||
-    looksLikeStandaloneQuestionHeading(block.text) ||
-    looksLikeFrontMatterHeading(block, blockIndex, blocks) ||
-    continuesHeadingBlock(blocks, blockIndex)
-  ) {
-    return {
-      ...block,
-      role: "heading",
-      roleConfidence: 0.62,
-    };
-  }
-
-  if (block.text.length >= 8) {
-    return {
-      ...block,
-      role: "body",
-      roleConfidence: 0.55,
-    };
-  }
-
-  return block;
-}
-
-function inferLayoutRegions(pageNumber: number, blocks: readonly PdfLayoutBlock[]): readonly PdfLayoutRegion[] {
-  const regions: PdfLayoutRegion[] = [];
-  const tableRegion = inferTableLayoutRegion(pageNumber, blocks);
-  if (tableRegion) {
-    regions.push(tableRegion);
-  }
-
-  const tableBlockIds = new Set(tableRegion?.blockIds ?? []);
-  const formLikeRegion = inferFormLikeLayoutRegion(pageNumber, blocks, tableBlockIds);
-  if (formLikeRegion) {
-    regions.push(formLikeRegion);
-  }
-
-  return regions;
-}
-
-type TableRegionProfile = "measurement-table" | "contract-award-table" | "anchored-grid-table";
-
-function inferTableLayoutRegion(
-  pageNumber: number,
-  blocks: readonly PdfLayoutBlock[],
-): PdfLayoutRegion | undefined {
-  const profile = resolveTableRegionProfile(blocks);
-  if (!profile) {
-    return undefined;
-  }
-
-  const candidateBlocks = selectTableRegionBlocks(blocks, profile);
-  if (!hasEnoughTableRegionEvidence(candidateBlocks, profile)) {
-    return undefined;
-  }
-
-  const confidence = tableRegionConfidence(candidateBlocks, profile);
-  const reason =
-    profile === "measurement-table"
-      ? "Repeated measurement headers and compatible value rows formed one table-like region."
-      : profile === "contract-award-table"
-        ? "Contract-award headers and compatible row evidence formed one table-like region."
-        : "Anchored header and data rows formed one table-like region.";
-  return buildLayoutRegion(
-    `layout-region-${pageNumber}-table-1`,
-    pageNumber,
-    "table",
-    profile,
-    confidence,
-    reason,
-    candidateBlocks,
-  );
-}
-
-function resolveTableRegionProfile(blocks: readonly PdfLayoutBlock[]): TableRegionProfile | undefined {
-  const pageText = normalizeBlockText(blocks.map((block) => block.text).join(" ")).toLowerCase();
-  const measurementSignals = [
-    /\bspecimen\b/u,
-    /\bnominal\s+width\b/u,
-    /\bmeasured\s+width\b/u,
-    /\bresult\b/u,
-  ].filter((pattern) => pattern.test(pageText)).length;
-  if (measurementSignals >= 4 && blocks.some((block) => looksLikeMeasurementTableBlock(block.text))) {
-    return "measurement-table";
-  }
-
-  const contractSignals = [
-    /\bserial\s+no\.?\b/u,
-    /\bcontract\s+description\b/u,
-    /\bcontract(?:or|ors|\/suppliers?| no\.?| amount)\b/u,
-    /\bamount\b/u,
-    /\bremarks\b/u,
-  ].filter((pattern) => pattern.test(pageText)).length;
-  if (contractSignals >= 4 && blocks.some((block) => looksLikeContractAwardDataBlock(block.text))) {
-    return "contract-award-table";
-  }
-
-  const headerLikeCount = blocks.filter((block) => looksLikeTableHeaderLabel(block, blocks)).length;
-  const dataLikeCount = blocks.filter((block, blockIndex) =>
-    looksLikeTableRowDescriptor(block, blockIndex, blocks) || looksLikeTabularDataText(block.text)
-  ).length;
-  return headerLikeCount >= 3 && dataLikeCount >= 2 ? "anchored-grid-table" : undefined;
-}
-
-function selectTableRegionBlocks(
-  blocks: readonly PdfLayoutBlock[],
-  profile: TableRegionProfile,
-): readonly PdfLayoutBlock[] {
-  const selectedBlocks = blocks.filter((block, blockIndex) => {
-    const text = normalizeBlockText(block.text);
-    if (text.length === 0) {
-      return false;
-    }
-
-    if (profile === "measurement-table") {
-      return looksLikeMeasurementTableBlock(text) ||
-        looksLikeMeasurementTableHeaderSignalText(text) ||
-        looksLikeTableRowDescriptor(block, blockIndex, blocks);
-    }
-
-    if (profile === "contract-award-table") {
-      return looksLikeContractAwardHeaderText(text) ||
-        looksLikeContractAwardDataBlock(text) ||
-        looksLikeContractAwardPartyBlock(text) ||
-        looksLikeTableRowDescriptor(block, blockIndex, blocks);
-    }
-
-    return looksLikeTableHeaderLabel(block, blocks) ||
-      looksLikeTableRowDescriptor(block, blockIndex, blocks) ||
-      looksLikeTabularDataText(text);
-  });
-
-  return [...dedupeByBlockId(selectedBlocks)].sort((left, right) => left.readingOrder - right.readingOrder);
-}
-
-function hasEnoughTableRegionEvidence(
-  blocks: readonly PdfLayoutBlock[],
-  profile: TableRegionProfile,
+  blocks: readonly OrderedLayoutBlock[],
 ): boolean {
-  if (profile === "measurement-table") {
-    return countMeasurementHeaderSignals(blocks.map((block) => block.text).join(" ")) >= 4 &&
-      blocks.some((block) => looksLikeMeasurementTableBlock(block.text));
-  }
-
-  if (profile === "contract-award-table") {
-    const headerSignalCount = countContractAwardHeaderSignals(blocks.map((block) => block.text).join(" "));
-    return headerSignalCount >= 4 && blocks.filter((block) => looksLikeContractAwardDataBlock(block.text)).length >= 2;
-  }
-
-  const headerCount = blocks.filter((block) => looksLikeTableHeaderLabel(block, blocks)).length;
-  const dataCount = blocks.filter((block, blockIndex) =>
-    looksLikeTableRowDescriptor(block, blockIndex, blocks) || looksLikeTabularDataText(block.text)
-  ).length;
-  return headerCount >= 3 && dataCount >= 2;
-}
-
-function tableRegionConfidence(
-  blocks: readonly PdfLayoutBlock[],
-  profile: TableRegionProfile,
-): number {
-  const headerBonus =
-    profile === "contract-award-table"
-      ? countContractAwardHeaderSignals(blocks.map((block) => block.text).join(" ")) * 0.035
-      : countMeasurementHeaderSignals(blocks.map((block) => block.text).join(" ")) * 0.035;
-  const dataBonus = blocks.filter((block) => looksLikeTabularDataText(block.text) || looksLikeContractAwardDataBlock(block.text)).length * 0.012;
-  return Number(Math.min(0.84, 0.58 + headerBonus + dataBonus).toFixed(2));
-}
-
-function looksLikeMeasurementTableHeaderText(text: string): boolean {
-  const normalized = normalizeBlockText(text).toLowerCase();
-  return countMeasurementHeaderSignals(normalized) >= 4;
-}
-
-function looksLikeMeasurementTableHeaderSignalText(text: string): boolean {
-  return countMeasurementHeaderSignals(text) >= 1;
-}
-
-function countMeasurementHeaderSignals(text: string): number {
-  const normalized = normalizeBlockText(text).toLowerCase();
-  return [
-    /\bspecimen\b/u,
-    /\bnominal\s+width\b/u,
-    /\bmeasured\s+width\b/u,
-    /\bresult\b/u,
-  ].filter((pattern) => pattern.test(normalized)).length;
-}
-
-function looksLikeMeasurementTableBlock(text: string): boolean {
-  const normalized = normalizeBlockText(text).toLowerCase();
-  return looksLikeMeasurementTableHeaderText(normalized) ||
-    (/\b(?:pass|review|fail|failed)\b/u.test(normalized) && /\b\d+(?:\.\d+)?\s*mm\b/u.test(normalized)) ||
-    (/\b(?:alpha|beta|gamma|delta|sample|specimen)\b/u.test(normalized) && /\b\d+(?:\.\d+)?\s*mm\b/u.test(normalized));
-}
-
-function looksLikeContractAwardHeaderText(text: string): boolean {
-  return countContractAwardHeaderSignals(text) >= 1;
-}
-
-function countContractAwardHeaderSignals(text: string): number {
-  const normalized = normalizeBlockText(text).toLowerCase();
-  return [
-    /\bserial\s+no\.?\b/u,
-    /\bcontract\s+description\b/u,
-    /\bcontract\s+no\.?\b/u,
-    /\bcontractor(?:s)?(?:\/suppliers?)?\b/u,
-    /\bconsultant\b/u,
-    /\bcontract\s+amount\b/u,
-    /\bamount\b/u,
-    /\bremarks\b/u,
-  ].filter((pattern) => pattern.test(normalized)).length;
-}
-
-function looksLikeContractAwardDataBlock(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  return /\b(?:procurement|consultancy|services|supply|rehabilitation|construction|maintenance)\b/iu.test(normalized) ||
-    /\b(?:completed|pending|ongoing|awarded|terminated)\b/iu.test(normalized) ||
-    /[$€£¥]?\d{1,3}(?:,\d{3})+(?:\.\d{2})?\s*(?:ghs|usd|eur|gbp)?\b/iu.test(normalized) ||
-    /\b(?:ghs|usd|eur|gbp)\b/iu.test(normalized);
-}
-
-function looksLikeContractAwardPartyBlock(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0 || normalized.length > 180 || /[.!?]$/u.test(normalized)) {
+  if (text.length === 0 || text.length > 180 || looksLikeSentence(text)) {
     return false;
   }
-
-  const startsWithProcurementMethod = /^(?:cqs|icb|ncb|qcbs|shopping|sss)\b/iu.test(normalized);
-  const namesOrganization = /\b(?:company|consult(?:ant|ing)?|engineering|enterprise|ghana|limited|ltd|motors|press|services|suppliers?)\b/iu.test(normalized);
-  return startsWithProcurementMethod && namesOrganization;
+  const words = text.split(/\s+/u).filter(hasLetterOrNumber);
+  if (words.length === 0 || words.length > 18) {
+    return false;
+  }
+  if (words.length <= 2 && /[.!?]["')\]]*$/u.test(text)) {
+    return false;
+  }
+  if (fontRatio >= 1.2) {
+    return true;
+  }
+  if (/^\d+(?:\.\d+)*[.)]?\s+[\p{Lu}\p{Lt}]/u.test(text) && words.length <= 14) {
+    return true;
+  }
+  const letters = Array.from(text).filter((character) => /\p{L}/u.test(character));
+  const uppercase = letters.filter((character) => character === character.toUpperCase()).length;
+  if (letters.length > 0 && uppercase / letters.length >= 0.82 && text.length <= 90) {
+    return true;
+  }
+  const titleCaseRatio = words.filter((word) => /^[\p{Lu}\p{Lt}\d]/u.test(word)).length / words.length;
+  const next = blocks[blockIndex + 1];
+  const nextLooksBody = next !== undefined && looksLikeSentence(next.text);
+  return titleCaseRatio >= 0.72 && words.length <= 10 && (blockIndex <= 2 || nextLooksBody || fontRatio > 1.05);
 }
 
-function inferFormLikeLayoutRegion(
-  pageNumber: number,
-  blocks: readonly PdfLayoutBlock[],
-  excludedBlockIds: ReadonlySet<string>,
-): PdfLayoutRegion | undefined {
-  const pageText = normalizeBlockText(blocks.map((block) => block.text).join(" ")).toLowerCase();
-  if (!/\b(?:application|applicant|claimant|consent|form|gender|patient|signature|signed|authorized)\b/u.test(pageText)) {
-    return undefined;
+function inferPeripheralBands(
+  blocks: readonly OrderedLayoutBlock[],
+  structuralBlockIds: ReadonlySet<string>,
+): PeripheralBands {
+  const anchored = blocks.filter(hasAnchor).toSorted((left, right) => (right.anchor?.y ?? 0) - (left.anchor?.y ?? 0));
+  if (anchored.length < 4) {
+    return { headers: new Set(), footers: new Set() };
   }
-
-  const candidateBlocks = blocks.filter((block, blockIndex) => {
-    if (excludedBlockIds.has(block.id)) {
-      return false;
+  const medianFontSize = median(anchored.flatMap((block) => block.fontSize === undefined ? [] : [block.fontSize])) ?? 12;
+  const threshold = Math.max(22, medianFontSize * 2.1);
+  const headers = new Set<string>();
+  const footers = new Set<string>();
+  const topSearchLimit = Math.min(2, anchored.length - 1);
+  for (let index = 0; index < topSearchLimit; index += 1) {
+    const current = anchored[index];
+    const next = anchored[index + 1];
+    if (!current || !next) continue;
+    if ((current.anchor?.y ?? 0) - (next.anchor?.y ?? 0) > threshold) {
+      for (const candidate of anchored.slice(0, index + 1)) {
+        if (!structuralBlockIds.has(candidate.id) && (candidate.fontSize ?? medianFontSize) <= medianFontSize * 1.12) {
+          headers.add(candidate.id);
+        }
+      }
+      break;
     }
-
-    const text = normalizeBlockText(block.text);
-    return looksLikeFieldChoiceParagraphStart(text) ||
-      looksLikeConsentOptionClusterText(text) ||
-      looksLikeShortFieldLabel(text, block.fontSize) ||
-      looksLikeFieldLikeClusterText(text, block.fontSize) ||
-      looksLikeFieldLabelBody(block, blockIndex, blocks) ||
-      looksLikeFieldValueBody(block, blockIndex, blocks);
-  });
-  const fieldLikeCount = candidateBlocks.filter((block) =>
-    looksLikeShortFieldLabel(block.text, block.fontSize) || looksLikeFieldLikeClusterText(block.text, block.fontSize)
-  ).length;
-  if (candidateBlocks.length < 4 || fieldLikeCount < 3) {
-    return undefined;
   }
-
-  const confidence = Number(Math.min(0.74, 0.5 + fieldLikeCount * 0.035 + candidateBlocks.length * 0.01).toFixed(2));
-  return buildLayoutRegion(
-    `layout-region-${pageNumber}-form-like-1`,
-    pageNumber,
-    "form-like",
-    "field-cluster",
-    confidence,
-    "Field labels and nearby values formed one form-like region.",
-    [...dedupeByBlockId(candidateBlocks)].sort((left, right) => left.readingOrder - right.readingOrder),
-  );
+  const bottomStart = Math.max(0, anchored.length - 3);
+  for (let index = anchored.length - 2; index >= bottomStart; index -= 1) {
+    const current = anchored[index];
+    const next = anchored[index + 1];
+    if (!current || !next) continue;
+    if ((current.anchor?.y ?? 0) - (next.anchor?.y ?? 0) > threshold) {
+      for (const candidate of anchored.slice(index + 1)) {
+        if (!structuralBlockIds.has(candidate.id) && (candidate.fontSize ?? medianFontSize) <= medianFontSize * 1.12) {
+          footers.add(candidate.id);
+        }
+      }
+      break;
+    }
+  }
+  return { headers, footers };
 }
 
-function buildLayoutRegion(
-  id: string,
-  pageNumber: number,
-  kind: PdfLayoutRegion["kind"],
-  method: string,
+function inferParagraphStarts(
+  blocks: readonly OrderedLayoutBlock[],
+  roles: readonly { readonly role: PdfLayoutRole }[],
+  tableBlockIds: ReadonlySet<string>,
+): readonly { readonly startsParagraph: boolean; readonly confidence: number; readonly reason: string }[] {
+  const compactSequenceIds = collectCompactSequenceIds(blocks);
+  return blocks.map((block, index) => {
+    const previous = blocks[index - 1];
+    const currentRole = roles[index]?.role ?? "body";
+    const previousRole = roles[index - 1]?.role;
+    if (index === 0 || previous === undefined) {
+      return paragraph(true, 0.98, "The first block on a page begins a paragraph.");
+    }
+    if (block.paragraphContinuation === true) {
+      return paragraph(false, 0.96, "The block is an isolated sentence tail carried over from the preceding line.");
+    }
+    if (block.paragraphBoundary === true) {
+      return paragraph(true, 0.96, "The block follows an isolated carry-over tail and begins a new paragraph.");
+    }
+    if (currentRole !== "body" || previousRole !== "body" || tableBlockIds.has(block.id)) {
+      return paragraph(true, 0.9, "A structural role or table-row boundary starts a new paragraph.");
+    }
+    if (compactSequenceIds.has(block.id)) {
+      return paragraph(true, 0.84, "A repeated sequence of compact aligned entries preserves distinct row boundaries.");
+    }
+    if (!sameTextColumn(previous, block)) {
+      return paragraph(true, 0.88, "A horizontal column or indentation change starts a new paragraph.");
+    }
+    const fontSize = Math.max(previous.fontSize ?? 12, block.fontSize ?? 12);
+    const gap = verticalGap(previous, block);
+    if (gap > Math.max(18, fontSize * 1.75)) {
+      return paragraph(true, 0.86, "The vertical gap exceeds ordinary line spacing.");
+    }
+    if (isShortSentenceTail(previous.text) && beginsSentence(block.text)) {
+      return paragraph(true, 0.84, "A short sentence-ending tail is followed by a new sentence.");
+    }
+    return paragraph(false, 0.78, "Alignment and line spacing support continuation of the current paragraph.");
+  });
+}
+
+function collectCompactSequenceIds(blocks: readonly OrderedLayoutBlock[]): ReadonlySet<string> {
+  const result = new Set<string>();
+  let sequence: OrderedLayoutBlock[] = [];
+  const flush = (): void => {
+    if (sequence.length >= 3) sequence.forEach((block) => result.add(block.id));
+    sequence = [];
+  };
+  for (const block of blocks) {
+    const previous = sequence.at(-1);
+    const compact = normalizeText(block.text).length <= 32 && !looksLikeSentence(block.text);
+    const continues = previous === undefined || (
+      sameTextColumn(previous, block) &&
+      verticalGap(previous, block) <= Math.max(24, Math.max(previous.fontSize ?? 12, block.fontSize ?? 12) * 2)
+    );
+    if (!compact || !continues) {
+      flush();
+      if (!compact) continue;
+    }
+    sequence.push(block);
+  }
+  flush();
+  return result;
+}
+
+function looksLikeRepeatedTableBoundary(
+  block: OrderedLayoutBlock,
+  blocks: readonly OrderedLayoutBlock[],
+): boolean {
+  return looksLikeCompactHeaderText(block.text) &&
+    blocks.filter((candidate) => candidate.id !== block.id && containsNumericEvidence(candidate.text)).length >= 2;
+}
+
+function paragraph(
+  startsParagraph: boolean,
   confidence: number,
   reason: string,
-  blocks: readonly PdfLayoutBlock[],
-): PdfLayoutRegion {
-  const blockIds = blocks.map((block) => block.id);
-  const runIds = dedupeStrings(blocks.flatMap((block) => block.runIds));
-  const bbox = mergeBlockBoundingBoxes(blocks);
+): { readonly startsParagraph: boolean; readonly confidence: number; readonly reason: string } {
+  return { startsParagraph, confidence, reason };
+}
+
+function inferTableEvidence(page: GroupedLayoutPage): TableEvidence {
+  const rows = clusterVisualRows(page.blocks);
+  const multiCellRows = rows.filter((row) => row.blocks.length >= 2);
+  const tableBlocks = new Set<string>();
+  const headerBlocks = new Set<string>();
+  let selectedBlocks: readonly OrderedLayoutBlock[] = [];
+
+  if (multiCellRows.length >= 2 && rowsFormGrid(rows)) {
+    const referenceColumns = Math.max(...multiCellRows.map((row) => row.blocks.length));
+    const alignedRows = multiCellRows.filter((row) => row.blocks.length >= Math.max(2, referenceColumns - 1));
+    if (alignedRows.length >= 2) {
+      const header = alignedRows[0] as VisualRow;
+      const numericBodyRows = alignedRows.slice(1).filter((row) => row.blocks.some((block) => containsNumericEvidence(block.text)));
+      const compactBodyRows = alignedRows.slice(1).filter((row) => row.blocks.every((block) => normalizeText(block.text).length <= 80));
+      const rowGaps = alignedRows.slice(1).map((row, index) => Math.abs((alignedRows[index]?.y ?? row.y) - row.y));
+      const compactSpacing = median(rowGaps) !== undefined && (median(rowGaps) ?? Number.POSITIVE_INFINITY) <= 36;
+      if (numericBodyRows.length > 0 || (compactBodyRows.length >= 2 && compactSpacing)) {
+        selectedBlocks = alignedRows.flatMap((row) => row.blocks);
+        header.blocks.forEach((block) => headerBlocks.add(block.id));
+      }
+    }
+  }
+
+  if (selectedBlocks.length === 0) {
+    const sequential = inferSequentialTableBlocks(page.blocks, rows);
+    if (sequential !== undefined) {
+      selectedBlocks = sequential.blocks;
+      sequential.headers.forEach((block) => headerBlocks.add(block.id));
+    }
+  }
+
+  if (selectedBlocks.length === 0) {
+    return { blockIds: tableBlocks, headerBlockIds: headerBlocks };
+  }
+  selectedBlocks.forEach((block) => tableBlocks.add(block.id));
+  const blockIds = selectedBlocks.map((block) => block.id);
+  const runIds = dedupeStrings(selectedBlocks.flatMap((block) => block.runIds));
+  const bbox = mergeBoundingBoxes(selectedBlocks.flatMap((block) => block.bbox === undefined ? [] : [block.bbox]));
+  const confidence = Math.min(0.93, 0.68 + Math.min(0.2, selectedBlocks.length * 0.015));
   return {
-    id,
-    pageNumber,
-    kind,
-    blockIds,
-    confidence,
-    ...(bbox !== undefined ? { bbox } : {}),
-    inferences: [
-      {
+    blockIds: tableBlocks,
+    headerBlockIds: headerBlocks,
+    region: {
+      id: `region-table-${String(page.pageNumber)}-${blockIds[0] ?? "1"}`,
+      pageNumber: page.pageNumber,
+      kind: "table",
+      blockIds,
+      confidence,
+      ...(bbox !== undefined ? { bbox } : {}),
+      inferences: [{
         kind: "region",
         status: "inferred",
-        method,
+        method: "geometry-table",
         confidence,
-        reason,
+        reason: "Repeated row bands, aligned columns, and compact numeric or categorical cells support a table region.",
         evidenceRunIds: runIds,
         evidenceBlockIds: blockIds,
-      },
-    ],
+      }],
+    },
   };
 }
 
-function mergeBlockBoundingBoxes(blocks: readonly PdfLayoutBlock[]): PdfBoundingBox | undefined {
-  const boxes = blocks.map((block) => block.bbox).filter((bbox): bbox is PdfBoundingBox => bbox !== undefined);
-  if (boxes.length === 0) {
-    return undefined;
-  }
-
-  const left = Math.min(...boxes.map((bbox) => bbox.x));
-  const top = Math.min(...boxes.map((bbox) => bbox.y));
-  const right = Math.max(...boxes.map((bbox) => bbox.x + bbox.width));
-  const bottom = Math.max(...boxes.map((bbox) => bbox.y + bbox.height));
-  return {
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-  };
-}
-
-function dedupeByBlockId(blocks: readonly PdfLayoutBlock[]): readonly PdfLayoutBlock[] {
-  const seenIds = new Set<string>();
-  const dedupedBlocks: PdfLayoutBlock[] = [];
-  for (const block of blocks) {
-    if (seenIds.has(block.id)) {
+function inferSequentialTableBlocks(
+  blocks: readonly OrderedLayoutBlock[],
+  rows: readonly VisualRow[],
+): { readonly blocks: readonly OrderedLayoutBlock[]; readonly headers: readonly OrderedLayoutBlock[] } | undefined {
+  for (const row of rows) {
+    if (row.blocks.length < 2 || !rowLooksLikeHeader(row)) {
       continue;
     }
-
-    seenIds.add(block.id);
-    dedupedBlocks.push(block);
-  }
-  return dedupedBlocks;
-}
-
-function dedupeStrings(values: readonly string[]): readonly string[] {
-  return Array.from(new Set(values));
-}
-
-function looksLikeNumberedListPrompt(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  return /^\d+[)]\s+/u.test(normalized) && normalized.endsWith(":") && normalized.length <= 160;
-}
-
-function looksLikeNumberedBodyParagraph(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  const numberedPrefixMatch = normalized.match(/^\d+[.)]\s+/u);
-  if (!numberedPrefixMatch || /^\d+\.\d+/u.test(normalized)) {
-    return false;
-  }
-
-  if (normalized.endsWith(":") || looksLikeNumberedQuestionHeading(normalized)) {
-    return false;
-  }
-
-  const bodyText = normalized.slice(numberedPrefixMatch[0].length);
-  if (bodyText.length < 24 || !/[\p{Ll}]/u.test(bodyText)) {
-    return false;
-  }
-
-  return startsLikeSentence(bodyText) || /[.!?]["')\]]*$/u.test(normalized);
-}
-
-function looksLikeNumberedQuestionHeading(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (!normalized.endsWith("?")) {
-    return false;
-  }
-
-  const numberedPrefixMatch = normalized.match(/^\d+(?:\.\d+)*[.)]\s+/u);
-  if (!numberedPrefixMatch) {
-    return false;
-  }
-
-  const words = normalized
-    .slice(numberedPrefixMatch[0].length)
-    .split(/\s+/u)
-    .filter((word) => /\p{L}|\p{N}/u.test(word));
-  return words.length >= 2 && words.length <= 18;
-}
-
-function looksLikePromotedHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  return looksLikeContentsEntryHeading(block, blockIndex, blocks) ||
-    looksLikeInlineNarrativeHeading(block, blockIndex, blocks) ||
-    looksLikeLegalMetadataHeading(block, blockIndex, blocks) ||
-    looksLikeFormPromptHeading(block, blockIndex, blocks) ||
-    looksLikeLeafletTitleHeading(block, blockIndex, blocks) ||
-    looksLikeMetricSectionHeading(block, blockIndex, blocks) ||
-    looksLikeRepeatedFieldGroupHeading(block, blockIndex, blocks) ||
-    looksLikeTableHeaderLabel(block, blocks);
-}
-
-function looksLikeContentsEntryHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 80 || countLabelMarkers(normalized) > 0 || /[.!?]$/.test(normalized)) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 6 || !looksLikeTitleCaseHeading(normalized)) {
-    return false;
-  }
-
-  return blocks
-    .slice(Math.max(0, blockIndex - 8), blockIndex)
-    .some((candidate) => /\bcontents\b/iu.test(normalizeBlockText(candidate.text)));
-}
-
-function looksLikeInlineNarrativeHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (blockIndex === 0 || blockIndex >= blocks.length - 1) {
-    return false;
-  }
-
-  const normalized = normalizeBlockText(block.text);
-  if (
-    normalized.length === 0 ||
-    normalized.length > 48 ||
-    looksLikeDateLine(normalized) ||
-    looksLikePaginationLine(normalized) ||
-    looksLikeProductionMetadata(normalized) ||
-    looksLikeNumberedBodyParagraph(normalized) ||
-    looksLikeStandaloneQuestionHeading(normalized)
-  ) {
-    return false;
-  }
-
-  if (
-    !/^[\p{Lu}][\p{L}'’.-]*(?:\s+[\p{Lu}][\p{L}'’.-]*){1,4}[.:]$/u.test(normalized) &&
-    !/^[\p{Lu}][\p{L}'’.-]*(?:\s+[\p{Lu}][\p{L}'’.-]*){1,4}\.$/u.test(normalized)
-  ) {
-    return false;
-  }
-
-  const previousBlock = blocks[blockIndex - 1];
-  const nextBlock = blocks[blockIndex + 1];
-  if (!previousBlock || !nextBlock) {
-    return false;
-  }
-
-  const previousText = normalizeBlockText(previousBlock.text);
-  const nextText = normalizeBlockText(nextBlock.text);
-  if (
-    previousText.length < 24 ||
-    nextText.length < 24 ||
-    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) ||
-    looksLikeHeadingLikeText(nextText, nextBlock.fontSize) ||
-    !startsLikeSentence(nextText)
-  ) {
-    return false;
-  }
-
-  return true;
-}
-
-function looksLikeLegalMetadataHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 160 || /[.!?]$/.test(normalized)) {
-    return false;
-  }
-
-  const compact = normalized.toLowerCase().replaceAll(/\s+/g, "");
-  const hasLegalMetadataLabel = /\b(?:citation number|neutral citation|claim number|claim no\.?|case number|case no\.?)\b/iu.test(
-    normalized,
-  ) ||
-    compact.includes("neutralcitationnumber") ||
-    compact.includes("claimnumber") ||
-    compact.includes("casenumber");
-  if (!hasLegalMetadataLabel) {
-    return false;
-  }
-
-  return hasHeadingNeighbor(blockIndex, blocks) || /\[\d{4}\]/u.test(normalized);
-}
-
-function looksLikeFormPromptHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 96) {
-    return false;
-  }
-
-  const trimmedPrompt = normalized.replace(/^[*•]\s*/u, "");
-  if (!trimmedPrompt.endsWith(":") || /[.!?]$/.test(trimmedPrompt.slice(0, -1)) || countLabelMarkers(trimmedPrompt) !== 1) {
-    return false;
-  }
-
-  if (looksLikeDateLine(trimmedPrompt) || looksLikePaginationLine(trimmedPrompt) || looksLikeProductionMetadata(trimmedPrompt)) {
-    return false;
-  }
-
-  const promptText = trimmedPrompt.slice(0, -1).trim();
-  const words = promptText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 10) {
-    return false;
-  }
-
-  const hasPromptCue = normalized.startsWith("*") || normalized.startsWith("•") || promptText.includes("(") ||
-    /^\d+(?:\.\d+)*[.)]?\s+/u.test(promptText);
-  const hasHeadingContext = hasHeadingNeighbor(blockIndex, blocks);
-  if (!hasPromptCue && !hasHeadingContext) {
-    return false;
-  }
-
-  if (!hasPromptCue && !looksLikeTitleCaseHeading(promptText) && !looksLikeSectionHeading(promptText)) {
-    return false;
-  }
-
-  return hasHeadingContext || (hasPromptCue && isEarlyPageHeadingContext(blockIndex, blocks));
-}
-
-function looksLikeMetricSectionHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 64 || /[.!?]$/.test(normalized)) {
-    return false;
-  }
-
-  if (!/^\d{4}\s+/u.test(normalized) || !looksLikeTitleCaseHeading(normalized)) {
-    return false;
-  }
-
-  return blocks
-    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
-    .some((candidate, candidateIndex) => {
-      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
-      if (originalIndex === blockIndex) {
-        return false;
+    const headerBottom = Math.min(...row.blocks.map((block) => block.anchor?.y ?? 0));
+    const below = blocks
+      .filter((block) => (block.anchor?.y ?? Number.POSITIVE_INFINITY) < headerBottom - 2)
+      .toSorted(compareLineOrder);
+    const selected: OrderedLayoutBlock[] = [];
+    let evidenceCount = 0;
+    for (const block of below) {
+      if (looksLikeSentence(block.text) && evidenceCount >= 2) {
+        break;
       }
-
-      return looksLikeMetricValueText(candidate.text) || looksLikeHeadingLikeText(candidate.text, candidate.fontSize);
-    });
-}
-
-function looksLikeMetricValueText(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  return /\d/u.test(normalized) && /(?:[%$€£¥]|(?:\b(?:kw|mw|gw|kwh|mwh|gwh|twh)\b))/iu.test(normalized);
-}
-
-function looksLikeRepeatedFieldGroupHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 120 || countLabelMarkers(normalized) < 2 || /[.!?]$/.test(normalized)) {
-    return false;
-  }
-
-  if (!looksLikeTitleCaseHeading(normalized)) {
-    return false;
-  }
-
-  const stem = normalizeHeadingStem(normalized);
-  if (stem.length === 0) {
-    return false;
-  }
-
-  return blocks
-    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
-    .some((candidate, candidateIndex) => {
-      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
-      if (originalIndex === blockIndex) {
-        return false;
+      const structured = containsNumericEvidence(block.text) || looksLikeCompactCellText(block.text);
+      if (structured) {
+        selected.push(block);
+        if (containsNumericEvidence(block.text)) evidenceCount += 1;
+      } else if (selected.length > 0 && evidenceCount > 0) {
+        selected.push(block);
       }
+    }
+    if (evidenceCount >= 2) {
+      return { blocks: [...row.blocks, ...selected], headers: row.blocks };
+    }
+  }
 
-      const candidateText = normalizeBlockText(candidate.text);
-      return normalizeHeadingStem(candidateText) === stem &&
-        (looksLikeSectionHeading(candidateText) || looksLikeHeadingLikeText(candidateText, candidate.fontSize));
-    });
+  for (let index = 0; index < blocks.length; index += 1) {
+    const candidate = blocks[index];
+    if (!candidate || !looksLikeCompactHeaderText(candidate.text)) {
+      continue;
+    }
+    const following = blocks.slice(index + 1, Math.min(blocks.length, index + 20));
+    const data = following.filter((block) => containsNumericEvidence(block.text));
+    if (data.length < 2) {
+      continue;
+    }
+    const lastIndex = blocks.indexOf(data.at(-1) as OrderedLayoutBlock);
+    return { blocks: blocks.slice(index, lastIndex + 1), headers: [candidate] };
+  }
+  return undefined;
 }
 
-function normalizeHeadingStem(text: string): string {
-  return normalizeBlockText(text)
-    .toLowerCase()
-    .replace(/^\d+(?:\.\d+)*[.)]?\s+/u, "")
-    .replace(/\b\d+\b/gu, " ")
-    .replace(/[:*]/gu, " ")
-    .replaceAll(/\s+/g, " ")
-    .trim();
+function rowLooksLikeHeader(row: VisualRow): boolean {
+  return row.blocks.length >= 2 &&
+    row.blocks.every((block) => !looksLikeSentence(block.text) && normalizeText(block.text).length <= 100) &&
+    row.blocks.filter((block) => !containsNumericEvidence(block.text)).length >= Math.ceil(row.blocks.length * 0.6);
 }
 
-function looksLikeLeafletTitleHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (
-    normalized.length < 24 ||
-    normalized.length > 160 ||
-    (!isEarlyPageHeadingContext(blockIndex, blocks) && !hasLeafletProductionMetadataLeadIn(blockIndex, blocks))
-  ) {
-    return false;
-  }
-
-  if (!normalized.includes(":") || looksLikeProductionMetadata(normalized) || looksLikeDateLine(normalized)) {
-    return false;
-  }
-
-  const labelText = normalized.slice(0, normalized.indexOf(":")).trim();
-  if (/\./u.test(labelText) || labelText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word)).length > 3) {
-    return false;
-  }
-
-  const hasDosePattern = /\b\d+(?:[.,]\d+)?\s*(?:mg|mcg|g|ml)(?:\/(?:ml|l|g))?\b/iu.test(normalized);
-  const hasInstructionTitle = /^[\p{Lu}\s&/'’().-]+:/u.test(normalized) && /[\p{Ll}]/u.test(normalized);
-  return hasDosePattern && hasInstructionTitle;
+function looksLikeCompactHeaderText(text: string): boolean {
+  const normalized = normalizeText(text);
+  const words = normalized.split(/\s+/u).filter(hasLetterOrNumber);
+  return normalized.length >= 8 && normalized.length <= 120 && words.length >= 3 && words.length <= 12 &&
+    !looksLikeSentence(normalized) && !containsNumericEvidence(normalized);
 }
 
-function hasLeafletProductionMetadataLeadIn(
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (blockIndex < 3 || blockIndex > 10) {
-    return false;
-  }
-
-  const precedingBlocks = blocks.slice(0, blockIndex);
-  const metadataSignalCount = precedingBlocks.filter((block) => {
-    const normalized = normalizeBlockText(block.text);
-    return looksLikeProductionMetadata(normalized) ||
-      /^(?:\d+-?diecut|non printing colours:?|min\.\s*pt\.\s*size:|pr\.\s*name:)/iu.test(normalized);
-  }).length;
-
-  return metadataSignalCount >= 3 &&
-    precedingBlocks.every((block) => normalizeBlockText(block.text).length <= 140);
+function looksLikeCompactCellText(text: string): boolean {
+  const normalized = normalizeText(text);
+  return normalized.length > 0 && normalized.length <= 100 && !looksLikeSentence(normalized);
 }
 
-function looksLikeDocumentRetentionNotice(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length < 36 || normalized.length > 220) {
-    return false;
+function inferFormEvidence(
+  page: GroupedLayoutPage,
+  tableBlockIds: ReadonlySet<string>,
+): FormEvidence {
+  const candidates = page.blocks.filter((block) =>
+    !tableBlockIds.has(block.id) && labelMarkerCount(block.text) > 0 && normalizeText(block.text).length <= 180
+  );
+  const fieldRows = clusterVisualRows(page.blocks.filter((block) => !tableBlockIds.has(block.id)))
+    .filter((row) => row.blocks.length >= 2 && row.blocks.every((block) =>
+      normalizeText(block.text).length > 0 && normalizeText(block.text).length <= 80 && !containsNumericEvidence(block.text)
+    ));
+  if (candidates.length < 2 && fieldRows.length < 2) {
+    return {};
   }
-
-  const hasRetentionCue = /\b(?:conserver|conservez|keep|preserve|retain)\b/iu.test(normalized);
-  const hasReferenceCue = /\b(?:available|disponible|refer|reportez[-\s]?vous|rubrique|section|see)\b/iu.test(normalized);
-  const hasDocumentCue = /\b(?:bulletin|document|paie|payslip|record|statement)\b/iu.test(normalized);
-  return hasDocumentCue && (hasRetentionCue || hasReferenceCue);
+  const selected = new Set([
+    ...candidates.map((block) => block.id),
+    ...fieldRows.flatMap((row) => row.blocks.map((block) => block.id)),
+  ]);
+  for (const label of candidates) {
+    const neighbor = page.blocks
+      .filter((block) => !selected.has(block.id) && !tableBlockIds.has(block.id))
+      .filter((block) => sameVisualRow(label, block) || looksLikeStackedFieldValue(label, block))
+      .toSorted((left, right) => fieldNeighborDistance(label, left) - fieldNeighborDistance(label, right))[0];
+    if (neighbor !== undefined) selected.add(neighbor.id);
+  }
+  const blocks = page.blocks.filter((block) => selected.has(block.id));
+  const blockIds = blocks.map((block) => block.id);
+  const runIds = dedupeStrings(blocks.flatMap((block) => block.runIds));
+  const bbox = mergeBoundingBoxes(blocks.flatMap((block) => block.bbox === undefined ? [] : [block.bbox]));
+  const confidence = Math.min(0.72, 0.5 + candidates.length * 0.045);
+  return {
+    region: {
+      id: `region-form-${String(page.pageNumber)}-${blockIds[0] ?? "1"}`,
+      pageNumber: page.pageNumber,
+      kind: "form-like",
+      blockIds,
+      confidence,
+      ...(bbox !== undefined ? { bbox } : {}),
+      inferences: [{
+        kind: "region",
+        status: "inferred",
+        method: "field-cluster",
+        confidence,
+        reason: "Repeated compact labels and nearby value evidence support a form-like region.",
+        evidenceRunIds: runIds,
+        evidenceBlockIds: blockIds,
+      }],
+    },
+  };
 }
 
-function looksLikeSimpleFieldLabelBody(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (
-    normalized.length === 0 ||
-    normalized.length > 48 ||
-    looksLikeDateLine(normalized) ||
-    looksLikePaginationLine(normalized) ||
-    looksLikeProductionMetadata(normalized)
-  ) {
-    return false;
-  }
-
-  const trimmedLabel = normalized.replace(/^[*•]\s*/u, "");
-  if (
-    countLabelMarkers(trimmedLabel) !== 1 ||
-    /[.!?]$/u.test(trimmedLabel.slice(0, -1)) ||
-    /^\d+(?:\.\d+)*[.)]?\s+/u.test(trimmedLabel)
-  ) {
-    return false;
-  }
-
-  const labelText = trimmedLabel.slice(0, -1).trim();
-  const words = labelText.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 3) {
-    return false;
-  }
-
-  return blocks
-    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
-    .some((candidate, candidateIndex) => {
-      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
-      if (originalIndex === blockIndex) {
-        return false;
-      }
-
-      return looksLikeShortFieldLabel(candidate.text, candidate.fontSize);
-    });
+function inferBodyFontSize(blocks: readonly OrderedLayoutBlock[]): number {
+  const candidates = blocks
+    .filter((block) => block.fontSize !== undefined)
+    .toSorted((left, right) => normalizeText(right.text).length - normalizeText(left.text).length)
+    .slice(0, Math.max(1, Math.ceil(blocks.length / 2)));
+  return median(candidates.flatMap((block) => block.fontSize === undefined ? [] : [block.fontSize])) ?? 12;
 }
 
-function looksLikeFieldLabelBody(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 120 || /[.!?]$/.test(normalized)) {
-    return false;
-  }
+function sameVisualRow(left: OrderedLayoutBlock, right: OrderedLayoutBlock): boolean {
+  if (!left.anchor || !right.anchor) return false;
+  const tolerance = Math.max(4, Math.max(left.fontSize ?? 12, right.fontSize ?? 12) * 0.5);
+  return Math.abs(left.anchor.y - right.anchor.y) <= tolerance;
+}
 
-  if (looksLikeSectionHeading(normalized) || looksLikeStandaloneQuestionHeading(normalized)) {
-    return false;
-  }
+function looksLikeStackedFieldValue(label: OrderedLayoutBlock, value: OrderedLayoutBlock): boolean {
+  if (!label.anchor || !value.anchor || labelMarkerCount(value.text) > 0) return false;
+  const text = normalizeText(value.text);
+  if (text.length === 0 || text.length > 96 || value.readingOrder <= label.readingOrder) return false;
+  const fontSize = Math.max(label.fontSize ?? 12, value.fontSize ?? 12);
+  const verticalGap = label.anchor.y - value.anchor.y;
+  return Math.abs(label.anchor.x - value.anchor.x) <= Math.max(12, fontSize) &&
+    verticalGap > 0 && verticalGap <= Math.max(40, fontSize * 3.5);
+}
 
-  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized)) {
-    return false;
-  }
+function fieldNeighborDistance(label: OrderedLayoutBlock, value: OrderedLayoutBlock): number {
+  if (!label.anchor || !value.anchor) return Number.POSITIVE_INFINITY;
+  return Math.abs(label.anchor.x - value.anchor.x) + Math.abs(label.anchor.y - value.anchor.y);
+}
 
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  const colonCount = countLabelMarkers(normalized);
-  const containsLowercase = /[\p{Ll}]/u.test(normalized);
-  const hasFieldContext = blocks
-    .slice(Math.max(0, blockIndex - 2), Math.min(blocks.length, blockIndex + 3))
-    .some((candidate, candidateIndex) => {
-      const originalIndex = Math.max(0, blockIndex - 2) + candidateIndex;
-      if (originalIndex === blockIndex) {
-        return false;
-      }
-      const candidateText = normalizeBlockText(candidate.text);
-      return looksLikeShortFieldLabel(candidateText, candidate.fontSize);
-    });
+function containsNumericEvidence(text: string): boolean {
+  const normalized = normalizeText(text);
+  const numericTokens = normalized.match(/(?:^|\s)[(+-]?(?:\d[\d.,]*|[.,]\d+)(?:[%)]|\s|$)/gu) ?? [];
+  return numericTokens.length >= 2 ||
+    /[$€£¥]\s*\d|\d\s*(?:%|[$€£¥]|mm|cm|kg|kw|kwh)\b/iu.test(normalized) ||
+    /^\d{2,}\s+\S/u.test(normalized);
+}
 
-  if (!containsLowercase && !hasFieldContext) {
-    return false;
-  }
+function looksLikeListItem(text: string): boolean {
+  return /^(?:[-*•‣▪◦]|\d+[.)]|[A-Za-z][.)])\s+/u.test(normalizeText(text));
+}
 
-  const hasTitleContext = blocks
-    .slice(Math.max(0, blockIndex - 2), blockIndex)
-    .some((candidate) => (candidate.fontSize ?? 0) >= 18 || looksLikeHeading(candidate.text, candidate.fontSize));
-  const isBodyLabelZone = blockIndex > 4 || hasTitleContext;
-  if (!isBodyLabelZone) {
-    return false;
-  }
+function labelMarkerCount(text: string): number {
+  return (normalizeText(text).match(/:/gu) ?? []).length;
+}
 
-  if (/^[-*•]\s+/u.test(normalized) && words.length <= 4) {
-    return false;
-  }
+function looksLikeSentence(text: string): boolean {
+  const normalized = normalizeText(text);
+  const words = normalized.split(/\s+/u).filter(hasLetterOrNumber);
+  return words.length >= 8 && (/[.!?]["')\]]*$/u.test(normalized) || /[,;]\s/u.test(normalized));
+}
 
-  if (colonCount >= 2) {
+function endsSentence(text: string): boolean {
+  return /[.!?]["')\]]*$/u.test(normalizeText(text));
+}
+
+function beginsSentence(text: string): boolean {
+  return /^["'([{]*[\p{Lu}\p{Lt}]/u.test(normalizeText(text));
+}
+
+function isShortSentenceTail(text: string): boolean {
+  const normalized = normalizeText(text);
+  return normalized.length <= 12 && endsSentence(normalized);
+}
+
+function sameTextColumn(left: LayoutBlockSeed, right: LayoutBlockSeed): boolean {
+  if (!left.anchor || !right.anchor) {
     return true;
   }
-
-  if (colonCount === 1) {
-    return words.length <= 8 && (block.fontSize ?? 12) <= 12;
-  }
-
-  if ((block.fontSize ?? 12) > 12 || words.length < 2 || words.length > 8) {
-    return false;
-  }
-
-  if (/\d/u.test(normalized)) {
-    return false;
-  }
-
-  return hasFieldContext && words.every((word) => isTitleCaseWord(word) || isConnectorWord(word));
+  const fontSize = Math.max(left.fontSize ?? 12, right.fontSize ?? 12);
+  return Math.abs(left.anchor.x - right.anchor.x) <= Math.max(18, fontSize * 1.6);
 }
 
-function looksLikeFieldValueBody(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 160 || /^[*•-]\s*/u.test(normalized)) {
-    return false;
-  }
-
-  if (
-    looksLikeSectionHeading(normalized) ||
-    looksLikeStandaloneQuestionHeading(normalized) ||
-    looksLikeDateLine(normalized) ||
-    looksLikePaginationLine(normalized)
-  ) {
-    return false;
-  }
-
-  if (looksLikeProductionMetadata(normalized)) {
-    return false;
-  }
-
-  if (countLabelMarkers(normalized) > 0) {
-    return false;
-  }
-
-  const labelNeighbor = findNearbyFieldLabelNeighbor(block, blockIndex, blocks);
-  if (!labelNeighbor) {
-    return false;
-  }
-
-  const fontSize = block.fontSize ?? labelNeighbor.fontSize ?? 12;
-  if (fontSize > 14) {
-    return false;
-  }
-
-  if (block.anchor && labelNeighbor.anchor) {
-    const verticalGap = Math.abs(block.anchor.y - labelNeighbor.anchor.y);
-    if (verticalGap > Math.max(36, fontSize * 3.2)) {
-      return false;
-    }
-  }
-
-  if (!/[\p{L}\p{N}]/u.test(normalized)) {
-    return false;
-  }
-
-  return !looksLikeHeading(normalized, block.fontSize) || /[:]/u.test(normalizeBlockText(labelNeighbor.text)) || /[\p{Ll}\p{Nd}-]/u.test(normalized);
-}
-
-function findNearbyFieldLabelNeighbor(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): PdfLayoutBlock | undefined {
-  const fontSize = block.fontSize ?? 12;
-  const labelCandidates = blocks.filter((candidate, candidateIndex) => {
-    if (candidateIndex === blockIndex) {
-      return false;
-    }
-
-    const candidateText = normalizeBlockText(candidate.text);
-    if (!(looksLikeShortFieldLabel(candidateText, candidate.fontSize) || looksLikeFieldLikeClusterText(candidateText, candidate.fontSize))) {
-      return false;
-    }
-
-    if (!block.anchor || !candidate.anchor) {
-      return Math.abs(candidateIndex - blockIndex) <= 2;
-    }
-
-    const verticalGap = Math.abs(block.anchor.y - candidate.anchor.y);
-    if (verticalGap > Math.max(36, fontSize * 3.2)) {
-      return false;
-    }
-
-    if (candidate.anchor.x > block.anchor.x + Math.max(28, fontSize * 2.4)) {
-      return false;
-    }
-
-    return true;
-  });
-  if (labelCandidates.length === 0) {
-    return undefined;
-  }
-
-  return [...labelCandidates].sort((left, right) => compareFieldLabelCandidates(block, left, right))[0];
-}
-
-function compareFieldLabelCandidates(
-  block: PdfLayoutBlock,
-  left: PdfLayoutBlock,
-  right: PdfLayoutBlock,
-): number {
-  if (!block.anchor || !left.anchor || !right.anchor) {
+function verticalGap(left: LayoutBlockSeed, right: LayoutBlockSeed): number {
+  if (!left.anchor || !right.anchor) {
     return 0;
   }
-
-  const leftVerticalGap = Math.abs(block.anchor.y - left.anchor.y);
-  const rightVerticalGap = Math.abs(block.anchor.y - right.anchor.y);
-  if (leftVerticalGap !== rightVerticalGap) {
-    return leftVerticalGap - rightVerticalGap;
-  }
-
-  return Math.abs(block.anchor.x - left.anchor.x) - Math.abs(block.anchor.x - right.anchor.x);
+  return Math.abs(left.anchor.y - right.anchor.y);
 }
 
-function looksLikeLeadingMetadataLabel(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (blockIndex > 1) {
-    return false;
-  }
-
-  const normalized = normalizeBlockText(block.text);
-  if (!normalized.endsWith(":") || countLabelMarkers(normalized) !== 1) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 2) {
-    return false;
-  }
-
-  return blocks
-    .slice(blockIndex + 1, blockIndex + 4)
-    .some((candidate) => (candidate.fontSize ?? 0) >= 18 || looksLikeHeading(candidate.text, candidate.fontSize));
+function pageWritingMode(page: PdfObservedPage): PdfWritingMode | undefined {
+  const modes = page.runs.flatMap((run) => run.writingMode === undefined ? [] : [run.writingMode]);
+  return modes.length >= Math.ceil(page.runs.length * 0.6) && modes.every((mode) => mode === "vertical")
+    ? "vertical"
+    : undefined;
 }
 
-function looksLikeCoverTitleHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 140 || !isEarlyPageHeadingContext(blockIndex, blocks)) {
-    return false;
-  }
-
-  if (
-    /^[-*•]\s+/u.test(normalized) ||
-    !/\p{L}/u.test(normalized) ||
-    looksLikeDateLine(normalized) ||
-    looksLikeProductionMetadata(normalized) ||
-    looksLikeNumberedBodyParagraph(normalized)
-  ) {
-    return false;
-  }
-
-  if (countLabelMarkers(normalized) >= 2) {
-    return false;
-  }
-
-  if (countLabelMarkers(normalized) === 1 && normalized.split(/\s+/u).length <= 2) {
-    return false;
-  }
-
-  if (looksLikeTitleCaseHeading(normalized)) {
-    return true;
-  }
-
-  if (/^[\p{Lu}\p{N}\s&/'’().:-]+$/u.test(normalized) && normalized.length <= 120) {
-    return true;
-  }
-
-  return normalized.includes(":") && !/[.!?]$/.test(normalized) && normalized.length <= 96;
-}
-
-function looksLikeTableRowDescriptor(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-  mode: "any" | "pre-heading" = "any",
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 220 || !block.anchor) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  const numberedRowLabel = /^\d+\s+/u.test(normalized) && !/^\d+\.\d+/u.test(normalized);
-  const uppercaseRowLabel = looksLikeUppercaseTableRowLabel(normalized, words);
-  const weakSingleWordRowLabel = words.length === 1 && /[\p{Ll}]/u.test(normalized);
-  const looksLikeRowLabel =
-    (mode === "any" &&
-      (numberedRowLabel || uppercaseRowLabel || weakSingleWordRowLabel)) ||
-    (mode === "pre-heading" && (numberedRowLabel || uppercaseRowLabel || weakSingleWordRowLabel));
-  if (!looksLikeRowLabel) {
-    return false;
-  }
-
-  const fontSize = block.fontSize ?? 12;
-  const rowTolerance = Math.max(10, fontSize * 0.9);
-  const dataNeighbors = blocks.filter((candidate, candidateIndex) => {
-    if (candidateIndex === blockIndex || candidate.anchor === undefined) {
-      return false;
-    }
-
-    if (Math.abs(candidate.anchor.y - block.anchor!.y) > rowTolerance) {
-      return false;
-    }
-
-    if (Math.abs(candidate.anchor.x - block.anchor!.x) < Math.max(12, fontSize * 1.2)) {
-      return false;
-    }
-
-    return uppercaseRowLabel ? looksLikeCompactTabularDataText(candidate.text) : looksLikeTabularDataText(candidate.text);
-  });
-
-  if (weakSingleWordRowLabel && !numberedRowLabel && !uppercaseRowLabel) {
-    const hasLeftNeighbor = dataNeighbors.some((candidate) => candidate.anchor && candidate.anchor.x < block.anchor!.x);
-    const hasRightNeighbor = dataNeighbors.some((candidate) => candidate.anchor && candidate.anchor.x > block.anchor!.x);
-    return dataNeighbors.length >= 2 && hasLeftNeighbor && hasRightNeighbor;
-  }
-
-  return dataNeighbors.length > 0;
-}
-
-function looksLikeUppercaseTableRowLabel(normalized: string, words: readonly string[]): boolean {
-  if (words.length === 0 || words.length > 5 || normalized.length > 80 || countLabelMarkers(normalized) > 0) {
-    return false;
-  }
-
-  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized)) {
-    return false;
-  }
-
-  const letters = Array.from(normalized).filter((character) => /\p{L}/u.test(character));
-  if (letters.length === 0 || letters.some((character) => character !== character.toUpperCase())) {
-    return false;
-  }
-
-  return /^[*_\s\p{Lu}\p{Lt}\p{N}&/'’().+-]+$/u.test(normalized);
-}
-
-function looksLikeCompactTabularDataText(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0 || normalized.length > 64 || /[.!?][\s)]*$/u.test(normalized)) {
-    return false;
-  }
-
-  const hasLetter = /\p{L}/u.test(normalized);
-  if (/[$€£¥]?\d/u.test(normalized) && (!hasLetter || !startsLikeSentence(normalized))) {
-    return true;
-  }
-
-  return /^(?:completed|failed|paid|pending|received|rejected|total)$/iu.test(normalized);
-}
-
-function looksLikeNumberedSectionHeadingBeforeBody(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (
-    !block.anchor ||
-    !looksLikeSectionHeading(normalized) ||
-    normalized.length > 64 ||
-    countLabelMarkers(normalized) > 0
-  ) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 6) {
-    return false;
-  }
-
-  const fontSize = block.fontSize ?? 12;
-  return blocks
-    .slice(blockIndex + 1, Math.min(blocks.length, blockIndex + 5))
-    .some((candidate) => {
-      const candidateText = normalizeBlockText(candidate.text);
-      if (!candidate.anchor || candidateText.length < 40 || !startsLikeSentence(candidateText)) {
-        return false;
-      }
-
-      const verticalGap = block.anchor!.y - candidate.anchor.y;
-      if (verticalGap <= Math.max(4, fontSize * 0.35) || verticalGap > Math.max(72, fontSize * 7)) {
-        return false;
-      }
-
-      const horizontalDrift = Math.abs(block.anchor!.x - candidate.anchor.x);
-      if (horizontalDrift > Math.max(20, fontSize * 2)) {
-        return false;
-      }
-
-      return !looksLikeHeadingLikeText(candidateText, candidate.fontSize) && looksLikeNarrativeBodyText(candidateText);
-    });
-}
-
-function looksLikeNarrativeBodyText(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (!/^[\p{Lu}\p{Lt}]/u.test(normalized) || !/[\p{Ll}]/u.test(normalized)) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  return words.length >= 8 &&
-    /\b(?:a|an|and|as|for|in|of|on|that|the|to|which|with)\b/iu.test(normalized);
-}
-
-function looksLikeTableHeaderLabel(
-  block: PdfLayoutBlock,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (!block.anchor) {
-    return false;
-  }
-
-  const anchor = block.anchor;
-  const normalized = normalizeBlockText(block.text);
-  if (!looksLikeShortTabularHeaderText(normalized)) {
-    return false;
-  }
-
-  const fontSize = block.fontSize ?? 12;
-  const rowTolerance = Math.max(10, fontSize * 0.9);
-  const columnTolerance = Math.max(16, fontSize * 1.8);
-  const sameRowHeaderCount = blocks.filter((candidate) => {
-    if (!candidate.anchor || candidate.id === block.id) {
-      return false;
-    }
-
-    return Math.abs(candidate.anchor.y - anchor.y) <= rowTolerance &&
-      Math.abs(candidate.anchor.x - anchor.x) >= columnTolerance &&
-      looksLikeShortTabularHeaderText(normalizeBlockText(candidate.text));
-  }).length;
-  if (sameRowHeaderCount < 2) {
-    return false;
-  }
-
-  return blocks.some((candidate) => {
-    if (!candidate.anchor || candidate.id === block.id) {
-      return false;
-    }
-
-    const verticalGap = Math.abs(candidate.anchor.y - anchor.y);
-    if (verticalGap <= rowTolerance || verticalGap > Math.max(84, fontSize * 10)) {
-      return false;
-    }
-
-    return looksLikeTabularDataText(candidate.text);
-  });
-}
-
-function looksLikeShortTabularHeaderText(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0 || normalized.length > 48 || countLabelMarkers(normalized) > 0) {
-    return false;
-  }
-
-  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized) || /[.!?]$/.test(normalized)) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 4) {
-    return false;
-  }
-
-  if (!/\p{L}/u.test(normalized)) {
-    return false;
-  }
-
-  return /^[\p{Lu}\p{Lt}\p{N}][\p{L}\p{N}\s/'’().-]*$/u.test(normalized);
-}
-
-function looksLikeTabularDataText(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0) {
-    return false;
-  }
-
-  return /[$€£¥]?\d/u.test(normalized) ||
-    /\b(?:completed|failed|paid|pending|received|rejected|total)\b/iu.test(normalized) ||
-    /\b[A-Z]{3}\b/u.test(normalized) ||
-    /\d{1,2}[-/]\p{L}{3,9}[-/]\d{2,4}/u.test(normalized);
-}
-
-function looksLikeHeading(text: string, fontSize: number | undefined): boolean {
-  const normalized = text.replaceAll(/\s+/g, " ").trim();
-  if (normalized.length === 0 || normalized.length > 100) {
-    return false;
-  }
-
-  if (/^\d+(?:\.\d+)*\s+\p{Lu}/u.test(normalized)) {
-    return true;
-  }
-
-  if (
-    normalized.length >= 3 &&
-    normalized.length <= 48 &&
-    /\p{Lu}/u.test(normalized) &&
-    /^[\p{Lu}\p{N}][\p{Lu}\p{N}\s&/'’().:-]*$/u.test(normalized)
-  ) {
-    return true;
-  }
-
-  if (fontSize !== undefined && fontSize >= 16) {
-    return true;
-  }
-
-  if (looksLikeTitleCaseHeading(normalized)) {
-    return true;
-  }
-
-  if (/[.!?]$/.test(normalized)) {
-    return false;
-  }
-
-  const letters = Array.from(normalized).filter((character) => /\p{L}/u.test(character));
-  if (letters.length === 0) {
-    return false;
-  }
-
-  const uppercaseRatio = letters.filter((character) => character === character.toUpperCase()).length / letters.length;
-  return uppercaseRatio > 0.6 || normalized === normalized.toUpperCase();
-}
-
-function looksLikeHeadingLikeText(text: string, fontSize: number | undefined): boolean {
-  return looksLikeHeading(text, fontSize) || looksLikeSectionHeading(text) || looksLikeStandaloneQuestionHeading(text);
-}
-
-function looksLikeSectionHeading(text: string): boolean {
-  const normalized = text.replaceAll(/\s+/g, " ").trim();
-  if (normalized.length === 0 || normalized.length > 160) {
-    return false;
-  }
-
-  if (looksLikeNumberedQuestionHeading(normalized)) {
-    return true;
-  }
-
-  if (looksLikeNumberedBodyParagraph(normalized)) {
-    return false;
-  }
-
-  if (!/^\d+(?:\.\d+)*[.)]?\s+/u.test(normalized)) {
-    return false;
-  }
-
-  if (/[?]$/.test(normalized)) {
-    return true;
-  }
-
-  if (/^\d+(?:\.\d+)*[.)]?\s+\p{Lu}/u.test(normalized) && !/[.!?]$/.test(normalized)) {
-    return true;
-  }
-
-  return false;
-}
-
-function looksLikeStandaloneQuestionHeading(text: string): boolean {
-  const normalized = normalizeBlockText(text);
-  if (normalized.length === 0 || normalized.length > 120 || !normalized.endsWith("?")) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u);
-  const firstLetter = Array.from(normalized).find((character) => /\p{L}/u.test(character));
-  return words.length <= 14 &&
-    words.length >= 2 &&
-    firstLetter !== undefined &&
-    firstLetter === firstLetter.toUpperCase() &&
-    !/[,;:]$/.test(normalized);
-}
-
-function looksLikeFrontMatterHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 120) {
-    return false;
-  }
-
-  if (!isEarlyPageHeadingContext(blockIndex, blocks) && !hasHeadingNeighbor(blockIndex, blocks)) {
-    return false;
-  }
-
-  if (looksLikeDateLine(normalized)) {
-    return true;
-  }
-
-  if (looksLikeStandaloneQuestionHeading(normalized)) {
-    return true;
-  }
-
-  if (looksLikeTitleCaseHeading(normalized)) {
-    return true;
-  }
-
-  return /\b(?:abstract|acknowledg(?:e)?ments|appendix|chapter|contents|foreword|introduction|keywords?|part|preface)\b/iu.test(normalized) &&
-    !/[.!]$/.test(normalized);
-}
-
-function shouldTreatRepeatedHeaderAsHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (blockIndex !== 0) {
-    return false;
-  }
-
-  if (looksLikeRepeatedCompactFormTitle(block, blockIndex, blocks)) {
-    return true;
-  }
-
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || normalized.length > 48) {
-    return false;
-  }
-
-  const nextBlock = blocks[blockIndex + 1];
-  return nextBlock !== undefined &&
-    !looksLikeProductionMetadata(nextBlock.text) &&
-    (
-      looksLikeSectionHeading(normalized) ||
-      looksLikeStandaloneQuestionHeading(normalized) ||
-      /\b(?:abstract|acknowledg(?:e)?ments|appendix|contents|foreword|index|introduction|notes?|preface)\b/iu.test(normalized)
-  );
-}
-
-function shouldTreatRepeatedTableBoundaryAsHeading(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (blockIndex !== 0 && blockIndex !== blocks.length - 1) {
-    return false;
-  }
-
-  const normalized = normalizeBlockText(block.text);
-  if (normalized.length === 0 || countContractAwardHeaderSignals(normalized) === 0) {
-    return false;
-  }
-
-  const pageText = blocks.map((candidate) => candidate.text).join(" ");
-  const contractHeaderSignals = countContractAwardHeaderSignals(pageText);
-  const contractRowCount = blocks.filter((candidate) => looksLikeContractAwardDataBlock(candidate.text)).length;
-  if (contractHeaderSignals >= 4 && contractRowCount >= 2) {
-    return true;
-  }
-
-  const headerCount = blocks.filter((candidate) => looksLikeTableHeaderLabel(candidate, blocks)).length;
-  const dataCount = blocks.filter((candidate, candidateIndex) =>
-    looksLikeTableRowDescriptor(candidate, candidateIndex, blocks) ||
-    looksLikeTabularDataText(candidate.text)
-  ).length;
-  return headerCount >= 3 && dataCount >= 2;
-}
-
-function shouldTreatRepeatedBoundaryAsBody(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (!hasCompactFormBoundaryContext(blockIndex, blocks)) {
-    return false;
-  }
-
-  if (looksLikeRepeatedCompactFormTitle(block, blockIndex, blocks)) {
-    return false;
-  }
-
-  const normalized = normalizeBlockText(block.text);
-  if (blockIndex === 0) {
-    return looksLikeFormBoundaryMetadata(normalized) ||
-      looksLikeShortFieldLabel(normalized, block.fontSize) ||
-      looksLikeFieldLikeClusterText(normalized, block.fontSize);
-  }
-
-  if (blockIndex === blocks.length - 1) {
-    return looksLikeFormFooterFieldClusterText(normalized) ||
-      looksLikeShortFieldLabel(normalized, block.fontSize) ||
-      looksLikeFieldLikeClusterText(normalized, block.fontSize);
-  }
-
-  return false;
-}
-
-function looksLikeRepeatedCompactFormTitle(
-  block: PdfLayoutBlock,
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  return blockIndex === 0 &&
-    (block.fontSize ?? 0) >= 16 &&
-    countLabelMarkers(normalizeBlockText(block.text)) === 0 &&
-    hasCompactFormBoundaryContext(blockIndex, blocks) &&
-    looksLikeCoverTitleHeading(block, blockIndex, blocks);
-}
-
-function hasCompactFormBoundaryContext(
-  blockIndex: number,
-  blocks: readonly PdfLayoutBlock[],
-): boolean {
-  if (blockIndex !== 0 && blockIndex !== blocks.length - 1) {
-    return false;
-  }
-
-  let fieldLabelCount = 0;
-  let promptCount = 0;
-  for (const block of blocks) {
-    const normalized = normalizeBlockText(block.text);
-    if (looksLikeShortFieldLabel(normalized, block.fontSize) || looksLikeFieldLikeClusterText(normalized, block.fontSize)) {
-      fieldLabelCount += 1;
-    }
-
-    if (looksLikeNumberedListPrompt(normalized)) {
-      promptCount += 1;
-    }
-  }
-
-  const firstBlock = blocks[0];
-  const lastBlock = blocks.at(-1);
-  const hasBoundaryMetadata = firstBlock !== undefined && looksLikeFormBoundaryMetadata(normalizeBlockText(firstBlock.text));
-  const hasFooterFieldCluster = lastBlock !== undefined && looksLikeFormFooterFieldClusterText(normalizeBlockText(lastBlock.text));
-
-  return fieldLabelCount >= 1 && (promptCount >= 1 || hasBoundaryMetadata || hasFooterFieldCluster);
-}
-
-function looksLikeFormBoundaryMetadata(text: string): boolean {
-  return /^(?:source:|created:|optimized\b|pdfcpu:|pr\. name:|testdata\/)/iu.test(text);
-}
-
-function looksLikeFormFooterFieldClusterText(text: string): boolean {
-  if (countLabelMarkers(text) === 0 || /[.!?]$/u.test(text)) {
-    return false;
-  }
-
-  const normalized = text.toLowerCase();
-  const hasOption = [...FORM_OPTION_TEXTS].some((option) => normalized.includes(option));
-  if (!hasOption) {
-    return false;
-  }
-
-  return /[\p{L}\p{N}][\p{L}\p{N}\s&/'’().-]{0,32}:/u.test(text);
-}
-
-function isEarlyPageHeadingContext(blockIndex: number, blocks: readonly PdfLayoutBlock[]): boolean {
-  if (blockIndex <= 3) {
-    return true;
-  }
-
-  const precedingBlocks = blocks.slice(0, blockIndex);
-  return blockIndex <= 5 && precedingBlocks.every((block) => normalizeBlockText(block.text).length <= 120);
-}
-
-function hasHeadingNeighbor(blockIndex: number, blocks: readonly PdfLayoutBlock[]): boolean {
-  const previousBlock = blockIndex > 0 ? blocks[blockIndex - 1] : undefined;
-  const nextBlock = blockIndex + 1 < blocks.length ? blocks[blockIndex + 1] : undefined;
-
-  return [previousBlock, nextBlock].some((candidate) =>
-    candidate !== undefined &&
-    looksLikeHeadingLikeText(candidate.text, candidate.fontSize)
-  );
-}
-
-function looksLikeDateLine(text: string): boolean {
-  return /^(?:\p{L}{3,12}\s+\d{1,2},\s+\d{4}|\d{1,2}[./-]\d{1,2}[./-]\d{2,4})$/u.test(text);
-}
-
-function looksLikePaginationLine(text: string): boolean {
-  return /\bpage\s+\d+\s+of\s+\d+\b/iu.test(text);
-}
-
-function looksLikeShortFieldLabel(text: string, fontSize: number | undefined): boolean {
-  const normalized = normalizeBlockText(text);
-  if (countLabelMarkers(normalized) === 0) {
-    return false;
-  }
-
-  if (looksLikeDateLine(normalized) || looksLikePaginationLine(normalized) || /[.!?]$/.test(normalized)) {
-    return false;
-  }
-
-  const words = normalized.split(/\s+/u).filter((word) => /\p{L}|\p{N}/u.test(word));
-  if (words.length === 0 || words.length > 4) {
-    return false;
-  }
-
-  return (fontSize ?? 12) <= 12;
-}
-
-function looksLikeTitleCaseHeading(text: string): boolean {
-  if (text.length === 0 || text.length > 96 || /[.!]$/.test(text) || /\b(?:https?:\/\/|www\.|@)\b/iu.test(text)) {
-    return false;
-  }
-
-  const words = text.split(/\s+/u);
-  if (words.length === 0 || words.length > 14) {
-    return false;
-  }
-
-  const lexicalWords = words.filter((word) => /\p{L}/u.test(word));
-  if (lexicalWords.length === 0) {
-    return false;
-  }
-
-  const titleLikeWords = lexicalWords.filter((word) => isTitleCaseWord(word) || isConnectorWord(word));
-  return titleLikeWords.length / lexicalWords.length >= 0.8 && lexicalWords.some((word) => isTitleCaseWord(word));
-}
-
-function isTitleCaseWord(word: string): boolean {
-  const normalized = word.replaceAll(/^[("'[]+|[)"'\].,:;!?]+$/gu, "");
-  return normalized.length > 0 && /^[\p{Lu}\p{Lt}\p{N}][\p{L}\p{N}'’/-]*$/u.test(normalized);
-}
-
-function isConnectorWord(word: string): boolean {
-  const normalized = word.replaceAll(/^[("'[]+|[)"'\].,:;!?]+$/gu, "");
-  return /^(?:a|an|and|as|at|by|de|for|from|in|into|of|on|or|the|to|und|von|with)$/iu.test(normalized);
-}
-
-function isSameLineBlockContinuation(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  const fontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  const baselineGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const forwardAdvance = currentBlock.anchor.x - previousBlock.anchor.x;
-  if (hasLargeInlineGap(previousBlock.anchor, currentBlock.anchor, previousBlock.bbox, fontSize)) {
-    return false;
-  }
-
-  return baselineGap <= Math.max(1.5, fontSize * 0.18) && forwardAdvance > Math.max(6, fontSize * 0.55);
-}
-
-function isHeadingContinuation(
-  previousBlock: GroupedBlockSeed,
-  currentBlock: GroupedBlockSeed,
-  writingMode: PdfWritingMode | undefined,
-): boolean {
-  if (writingMode === "vertical" || !previousBlock.anchor || !currentBlock.anchor) {
-    return false;
-  }
-
-  const previousText = normalizeBlockText(previousBlock.text);
-  const currentText = normalizeBlockText(currentBlock.text);
-  const previousFontSize = previousBlock.fontSize ?? currentBlock.fontSize ?? 12;
-  const currentFontSize = currentBlock.fontSize ?? previousBlock.fontSize ?? 12;
-  const verticalGap = Math.abs(previousBlock.anchor.y - currentBlock.anchor.y);
-  const horizontalShift = Math.abs(previousBlock.anchor.x - currentBlock.anchor.x);
-
-  if (Math.abs(previousFontSize - currentFontSize) > 1) {
-    return false;
-  }
-
-  if (verticalGap > Math.max(26, currentFontSize * 1.8)) {
-    return false;
-  }
-
-  if (horizontalShift > Math.max(80, currentFontSize * 6)) {
-    return false;
-  }
-
-  if (/[.!?]$/.test(previousText) || /[.!?]$/.test(currentText)) {
-    return false;
-  }
-
-  if (previousText.length > 80 || currentText.length > 80) {
-    return false;
-  }
-
-  return looksLikeHeading(previousText, previousBlock.fontSize) && currentText.length > 0;
-}
-
-function continuesHeadingBlock(
-  blocks: readonly PdfLayoutBlock[],
-  blockIndex: number,
-): boolean {
-  if (blockIndex === 0) {
-    return false;
-  }
-
-  const previousBlock = blocks[blockIndex - 1];
-  const currentBlock = blocks[blockIndex];
-  if (!previousBlock || !currentBlock) {
-    return false;
-  }
-
-  return isHeadingContinuation(previousBlock, currentBlock, currentBlock.writingMode) &&
-    looksLikeHeading(previousBlock.text, previousBlock.fontSize);
-}
-
-function dedupeKnownLimits(values: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {
-  return Array.from(new Set(values));
-}
-
-function serializeLayoutPages(pages: readonly PdfLayoutPage[]): string {
+function serializePages(pages: readonly PdfLayoutPage[]): string {
   return pages
-    .map((page) => serializeLayoutBlocks(page.blocks))
+    .map((page) => serializeBlocks(page.blocks))
     .filter((text) => text.length > 0)
     .join("\n\n");
 }
 
-function serializeObservationPages(pages: readonly GroupedLayoutPage[]): string {
-  return pages
-    .map((page) => serializeObservationBlocks(page.blocks))
-    .filter((text) => text.length > 0)
-    .join("\n\n");
-}
-
-function serializeObservationBlocks(blocks: readonly GroupedLayoutBlock[]): string {
-  let text = "";
-  let previousBlock: GroupedLayoutBlock | undefined;
-
+function serializeBlocks(blocks: readonly PdfLayoutBlock[]): string {
+  let output = "";
+  let previous: PdfLayoutBlock | undefined;
   for (const block of blocks) {
-    const normalizedBlockText = formatObservationBlockText(previousBlock, block);
-    if (normalizedBlockText.length === 0) {
-      continue;
-    }
-
-    const separator = previousBlock === undefined
-      ? ""
-      : (shouldOmitObservationSeparator(previousBlock, block)
+    const text = normalizeText(block.text);
+    if (text.length === 0) continue;
+    if (output.length === 0) {
+      output = text;
+    } else {
+      const removeLineWrapHyphen = previous !== undefined && shouldRemoveLineWrapHyphen(previous, block);
+      if (removeLineWrapHyphen) output = output.slice(0, -1);
+      const separator = removeLineWrapHyphen
+        ? ""
+        : block.startsParagraph || block.role === "heading" || block.role === "list" || previous?.role === "heading"
+        ? "\n\n"
+        : previous !== undefined && (previous.text.endsWith("-") || /^[,.;:!?]/u.test(text))
           ? ""
-          : (shouldSplitObservationAfterHeading(previousBlock, block) || block.startsParagraph ? "\n\n" : " "));
-    text += `${separator}${normalizedBlockText}`;
-    previousBlock = block;
-  }
-
-  return text;
-}
-
-function serializeLayoutBlocks(blocks: readonly PdfLayoutBlock[]): string {
-  let text = "";
-  let emittedBlockCount = 0;
-
-  for (const block of blocks) {
-    if (block.role === "header" || block.role === "footer") {
-      continue;
+          : " ";
+      output += `${separator}${text}`;
     }
-
-    const normalizedBlockText = normalizeBlockText(block.text);
-    if (normalizedBlockText.length === 0) {
-      continue;
-    }
-    const separator = emittedBlockCount === 0 ? "" : (block.startsParagraph ? "\n\n" : " ");
-    text += `${separator}${normalizedBlockText}`;
-    emittedBlockCount += 1;
+    previous = block;
   }
-
-  return text;
+  return output.trim();
 }
 
-function formatObservationBlockText(
-  previousBlock: GroupedLayoutBlock | undefined,
-  block: GroupedLayoutBlock,
-): string {
-  const normalizedBlockText = normalizeObservationBlockText(block.text, block.hasGeneratorPathTrace === true);
-  if (
-    previousBlock !== undefined &&
-    looksLikeHeadingLikeText(normalizeBlockText(previousBlock.text), previousBlock.fontSize) &&
-    /^\d+[.)]\s+/u.test(normalizedBlockText) &&
-    !looksLikeNumberedQuestionHeading(normalizedBlockText) &&
-    !looksLikeNumberedListPrompt(normalizedBlockText)
-  ) {
-    return normalizedBlockText.replace(/^(?<label>\d+[.)])\s+/u, "$<label>\n\n");
-  }
-
-  return normalizedBlockText;
-}
-
-function shouldOmitObservationSeparator(previousBlock: GroupedLayoutBlock, block: GroupedLayoutBlock): boolean {
-  const previousText = normalizeBlockText(previousBlock.text);
-  const currentText = normalizeBlockText(block.text);
-  return /guide$/iu.test(previousText) && /^this guide\b/iu.test(currentText);
-}
-
-function normalizeObservationBlockText(text: string, hasGeneratorPathTrace: boolean): string {
-  void hasGeneratorPathTrace;
-  return normalizeBlockText(text);
-}
-
-function shouldSplitObservationAfterHeading(previousBlock: PdfLayoutBlock, block: PdfLayoutBlock): boolean {
-  const previousText = normalizeBlockText(previousBlock.text);
-  const currentText = normalizeBlockText(block.text);
-  if (shouldKeepHeadingLeadInParagraph(previousBlock, block, previousText, currentText, block.writingMode)) {
+function shouldRemoveLineWrapHyphen(previous: PdfLayoutBlock, current: PdfLayoutBlock): boolean {
+  if (!/\p{L}{2,}-$/u.test(normalizeText(previous.text)) || !/^\p{Ll}/u.test(normalizeText(current.text))) {
     return false;
   }
-
-  return block.startsParagraph === false &&
-    looksLikeHeadingLikeText(previousText, previousBlock.fontSize) &&
-    looksLikeHeadingLikeText(currentText, block.fontSize) === false &&
-    previousText.length >= 8 &&
-    previousText.length <= 40 &&
-    currentText.length >= 80 &&
-    /[:.]$/u.test(previousText) === false;
+  if (previous.anchor === undefined || current.anchor === undefined) return false;
+  const fontSize = Math.max(previous.fontSize ?? 12, current.fontSize ?? 12);
+  return current.anchor.y < previous.anchor.y &&
+    previous.anchor.y - current.anchor.y <= Math.max(24, fontSize * 2.4) &&
+    Math.abs(current.anchor.x - previous.anchor.x) <= Math.max(36, fontSize * 4);
 }
 
-function normalizeBlockText(text: string): string {
+function mergeBoundingBoxes(boxes: readonly PdfBoundingBox[]): PdfBoundingBox | undefined {
+  if (boxes.length === 0) return undefined;
+  const left = Math.min(...boxes.map((box) => box.x));
+  const top = Math.min(...boxes.map((box) => box.y));
+  const right = Math.max(...boxes.map((box) => box.x + box.width));
+  const bottom = Math.max(...boxes.map((box) => box.y + box.height));
+  return { x: left, y: top, width: right - left, height: bottom - top };
+}
+
+function hasAnchor<T extends { readonly anchor?: PdfPoint }>(value: T): value is T & { readonly anchor: PdfPoint } {
+  return value.anchor !== undefined;
+}
+
+function hasLetterOrNumber(value: string): boolean {
+  return /[\p{L}\p{N}]/u.test(value);
+}
+
+function normalizeText(text: string): string {
   return text.replaceAll(/\s+/g, " ").trim();
 }
 
-function endsWithHyphenatedContinuation(text: string): boolean {
-  return /[-\u2010-\u2015]$/u.test(text);
+function median(values: readonly number[]): number | undefined {
+  if (values.length === 0) return undefined;
+  const sorted = [...values].toSorted((left, right) => left - right);
+  const middle = Math.floor(sorted.length / 2);
+  return sorted.length % 2 === 0
+    ? ((sorted[middle - 1] ?? 0) + (sorted[middle] ?? 0)) / 2
+    : sorted[middle];
 }
 
-function startsWithContinuation(text: string): boolean {
-  return /^[\p{Ll}\p{Nd}(]/u.test(text);
+function average(values: readonly number[]): number {
+  return values.length === 0 ? 0 : values.reduce((sum, value) => sum + value, 0) / values.length;
 }
 
-function startsLikeSentence(text: string): boolean {
-  return /^[\p{Lu}\p{Lt}\p{Lo}\p{N}\[]/u.test(text);
+function dedupeStrings(values: readonly string[]): readonly string[] {
+  return [...new Set(values)];
+}
+
+function dedupeKnownLimits(values: readonly PdfKnownLimitCode[]): readonly PdfKnownLimitCode[] {
+  return [...new Set(values)];
 }

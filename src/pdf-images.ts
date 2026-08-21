@@ -1,4 +1,5 @@
 import { parsePdfContentStreams, type PdfInlineImage } from "./pdf-content.ts";
+import { resolvePageContentReferences, type PdfDocumentModel } from "./pdf-document-model.ts";
 import { formatPdfValue } from "./pdf-value-format.ts";
 import {
   type PdfDictionaryValue,
@@ -13,7 +14,6 @@ import {
 import { decodePdfStreamBytes } from "./stream-decode.ts";
 
 import type { PdfObservedDocument } from "./contracts.ts";
-import type { PdfDocumentModel } from "./pdf-document-model.ts";
 import type { PdfObjectStore } from "./pdf-object-store.ts";
 import type {
   PdfImageOptions,
@@ -79,7 +79,7 @@ export async function extractPdfImages(
       continue;
     }
     const contentStreams = [];
-    for (const contentStreamRef of page.contents) {
+    for (const contentStreamRef of await resolvePageContentReferences(store, page)) {
       const decoded = await store.decodeStream(contentStreamRef);
       if (decoded !== undefined) {
         contentStreams.push({ bytes: decoded.bytes, contentStreamRef });

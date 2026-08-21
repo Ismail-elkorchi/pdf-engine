@@ -155,6 +155,26 @@ export function buildPdfWithNativeFeatures(): Uint8Array {
   ], "/Info 40 0 R");
 }
 
+export function buildPdfWithMultipleDirectActions(): Uint8Array {
+  const content = "BT\n/F1 12 Tf\n(Action Inventory) Tj\nET";
+  return buildPdfObjects([
+    {
+      objectNumber: 1,
+      body: "<< /Type /Catalog /Pages 2 0 R /OpenAction << /S /JavaScript /JS (first) /Next [<< /S /JavaScript /JS (second) >> << /S /Launch /F (manual.txt) >>] >> >>",
+    },
+    { objectNumber: 2, body: "<< /Type /Pages /Kids [4 0 R] /Count 1 >>" },
+    { objectNumber: 3, body: "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>" },
+    {
+      objectNumber: 4,
+      body: "<< /Type /Page /Parent 2 0 R /Resources << /Font << /F1 3 0 R >> >> /MediaBox [0 0 612 792] /Contents 5 0 R >>",
+    },
+    {
+      objectNumber: 5,
+      body: `<< /Length ${String(textEncoder.encode(content).byteLength)} >>\nstream\n${content}\nendstream`,
+    },
+  ]);
+}
+
 export function buildPdfWithInvalidSignature(): Uint8Array {
   const content = "BT\n/F1 12 Tf\n(Unsigned content) Tj\nET";
   return buildPdfObjects([

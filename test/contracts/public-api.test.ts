@@ -6,6 +6,7 @@ import {
   buildPdfWithImageResource,
   buildPdfWithCyclicPageBranch,
   buildPdfWithInvalidSignature,
+  buildPdfWithMultipleDirectActions,
   buildPdfWithNativeFeatures,
   buildPdfWithPageContents,
   buildPdfWithPageSpecs,
@@ -128,6 +129,25 @@ test("native feature catalogs and accessibility content remain typed and searcha
   await engine.dispose();
 });
 
+test("direct security-relevant actions receive distinct deterministic identifiers", async () => {
+  const engine = createPdfEngine();
+  const document = valueOf(await engine.open({
+    source: { kind: "bytes", bytes: buildPdfWithMultipleDirectActions() },
+    policy: {
+      javascriptActions: "report",
+      launchActions: "report",
+    },
+  }));
+
+  const first = valueOf(await document.features()).activeContent;
+  const second = valueOf(await document.features()).activeContent;
+
+  assert.equal(first, second);
+  assert.deepEqual(first.map((item) => item.kind), ["javascript", "javascript", "launch"]);
+  assert.equal(new Set(first.map((item) => item.id)).size, first.length);
+  await engine.dispose();
+});
+
 test("signature verification rejects byte ranges that do not cover the document", async () => {
   const engine = createPdfEngine();
   const document = valueOf(await engine.open({
@@ -163,6 +183,36 @@ test("bytes, Blob, and random-access sources have equivalent semantics", async (
     texts.push(valueOf(await document.extract()).extractedText);
   }
   assert.deepEqual(texts, ["Source Equivalence", "Source Equivalence", "Source Equivalence"]);
+  await engine.dispose();
+});
+
+test("page-scoped extraction does not read unrelated random-access streams", async () => {
+  const largeUnrelatedText = "x".repeat(2_000_000);
+  const bytes = buildPdfWithPageContents([
+    "BT\n/F1 12 Tf\n(Page One) Tj\nET",
+    `BT\n/F1 12 Tf\n(${largeUnrelatedText}) Tj\nET`,
+    "BT\n/F1 12 Tf\n(Page Three) Tj\nET",
+  ]);
+  let bytesRead = 0;
+  const engine = createPdfEngine();
+  const document = valueOf(await engine.open({
+    source: {
+      kind: "random-access",
+      byteLength: bytes.byteLength,
+      read: async ({ offset, length }) => {
+        bytesRead += length;
+        return Uint8Array.from(bytes.subarray(offset, offset + length));
+      },
+    },
+  }));
+
+  const observation = valueOf(await document.extract({
+    pages: { kind: "numbers", pages: [1] },
+  }));
+
+  assert.equal(observation.extractedText, "Page One");
+  assert.deepEqual(observation.pages.map((page) => page.pageNumber), [1]);
+  assert.ok(bytesRead < bytes.byteLength / 4, `read ${String(bytesRead)} of ${String(bytes.byteLength)} bytes`);
   await engine.dispose();
 });
 
