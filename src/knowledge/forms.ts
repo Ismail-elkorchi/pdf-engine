@@ -5,18 +5,16 @@ import type {
   PdfObservedTextRun,
 } from "../contracts.ts";
 import type {
-  AnchoredLayoutBlock,
   ProjectedTableCandidate,
   ProjectedTableRowSeed,
 } from "./projection-types.ts";
 
 const FIELD_VALUE_MIN_ROWS = 2;
 const FIELD_LABEL_MIN_ROWS = 4;
-const FIELD_LABEL_MAX_X_SPAN = 240;
-const FORM_OPTION_TEXTS = new Set(["female", "male", "non-binary", "verified"]);
+const FIELD_LABEL_COLUMN_TOLERANCE = 72;
 
 export function projectFieldValueFormTable(page: PdfLayoutPage): ProjectedTableCandidate | undefined {
-  const blocks = page.blocks.filter((block) => block.role !== "header" && block.role !== "footer");
+  const blocks = page.blocks;
   if (blocks.length < 3) {
     return undefined;
   }
@@ -85,6 +83,7 @@ export function projectFieldLabelFormTable(
   }
 
   const seenLabels = new Set<string>();
+  const inlineValueBlockIds = collectInlineValueBlockIds(page.blocks);
   const rows: ProjectedTableRowSeed[] = [
     {
       cells: [
@@ -98,14 +97,18 @@ export function projectFieldLabelFormTable(
   ];
   const canReuseHeadingFieldLabels = !hasFieldValueTable;
 
-  for (const run of observationPage.runs) {
+  const orderedRuns = [...observationPage.runs].sort((left, right) =>
+    (runToBlock.get(left.id)?.readingOrder ?? Number.POSITIVE_INFINITY) -
+    (runToBlock.get(right.id)?.readingOrder ?? Number.POSITIVE_INFINITY)
+  );
+  for (const run of orderedRuns) {
     const block = runToBlock.get(run.id);
     if (
       !block ||
       block.id === headerBlock.id ||
+      inlineValueBlockIds.has(block.id) ||
       block.role === "header" ||
-      (block.role === "heading" && !(canReuseHeadingFieldLabels && looksLikeCompactHeadingFieldLabel(block.text))) ||
-      (block.role === "footer" && !looksLikeFormFooterFieldCluster(block.text))
+      (block.role === "heading" && !(canReuseHeadingFieldLabels && looksLikeCompactHeadingFieldLabel(block.text)))
     ) {
       continue;
     }
@@ -127,22 +130,9 @@ export function projectFieldLabelFormTable(
     });
   }
 
-  const projectedRows = selectFieldLabelProjectionRows(rows);
+  const projectedRows = selectSpatiallyCoherentProjectionRows(selectFieldLabelProjectionRows(rows));
   if (projectedRows.length - 1 < FIELD_LABEL_MIN_ROWS) {
     return undefined;
-  }
-
-  const labelAnchors = projectedRows
-    .slice(1)
-    .flatMap((row) => row.cells)
-    .flatMap((cell) => cell.blocks)
-    .filter((block): block is AnchoredLayoutBlock => block.anchor !== undefined)
-    .map((block) => block.anchor.x);
-  if (labelAnchors.length > 0) {
-    const xSpan = Math.max(...labelAnchors) - Math.min(...labelAnchors);
-    if (xSpan > FIELD_LABEL_MAX_X_SPAN) {
-      return undefined;
-    }
   }
 
   const headerText = normalizeCellText(headerBlock.text);
@@ -154,6 +144,59 @@ export function projectFieldLabelFormTable(
     confidence: Number(Math.min(0.76, 0.48 + (projectedRows.length - 1) * 0.03).toFixed(2)),
     rows: projectedRows,
   };
+}
+
+function selectSpatiallyCoherentProjectionRows(
+  rows: readonly ProjectedTableRowSeed[],
+): readonly ProjectedTableRowSeed[] {
+  const header = rows[0];
+  if (header === undefined) return [];
+  const body = rows.slice(1);
+  const anchored = body.flatMap((row) => row.cells.flatMap((cell) =>
+    cell.blocks.flatMap((block) => block.anchor === undefined ? [] : [{ row, block }])
+  ));
+  if (anchored.length < FIELD_LABEL_MIN_ROWS) return rows;
+  if (hasRepeatedHorizontalFieldBands(anchored)) return rows;
+
+  const clusters = anchored.map(({ block }) => {
+    const x = block.anchor?.x;
+    return x === undefined
+      ? []
+      : anchored.filter((candidate) =>
+        candidate.block.anchor !== undefined && Math.abs(candidate.block.anchor.x - x) <= FIELD_LABEL_COLUMN_TOLERANCE
+      );
+  });
+  const primary = clusters.toSorted((left, right) => right.length - left.length)[0] ?? [];
+  if (new Set(primary.map((candidate) => candidate.row)).size < FIELD_LABEL_MIN_ROWS) {
+    return [header];
+  }
+  const primaryRows = new Set(primary.map((candidate) => candidate.row));
+  const primaryYs = primary.flatMap((candidate) =>
+    candidate.block.anchor === undefined ? [] : [candidate.block.anchor.y]
+  );
+  return [
+    header,
+    ...body.filter((row) => primaryRows.has(row) || row.cells.some((cell) => cell.blocks.some((block) => {
+      const anchor = block.anchor;
+      if (anchor === undefined) return false;
+      return primaryYs.some((y) => Math.abs(anchor.y - y) <= Math.max(5, (block.fontSize ?? 12) * 0.6));
+    }))),
+  ];
+}
+
+function hasRepeatedHorizontalFieldBands(
+  anchored: readonly { readonly row: ProjectedTableRowSeed; readonly block: PdfLayoutBlock }[],
+): boolean {
+  const bands: { y: number; rows: Set<ProjectedTableRowSeed> }[] = [];
+  for (const candidate of anchored) {
+    const anchor = candidate.block.anchor;
+    if (anchor === undefined) continue;
+    const tolerance = Math.max(5, (candidate.block.fontSize ?? 12) * 0.6);
+    const band = bands.find((value) => Math.abs(value.y - anchor.y) <= tolerance);
+    if (band === undefined) bands.push({ y: anchor.y, rows: new Set([candidate.row]) });
+    else band.rows.add(candidate.row);
+  }
+  return bands.filter((band) => band.rows.size >= 2).length >= 2;
 }
 
 function selectFieldLabelProjectionRows(rows: readonly ProjectedTableRowSeed[]): readonly ProjectedTableRowSeed[] {
@@ -171,7 +214,7 @@ function selectFieldLabelProjectionRows(rows: readonly ProjectedTableRowSeed[]):
       ...bodyRows.filter((row) =>
         row.cells.some((cell) =>
           normalizeCellText(cell.text).endsWith(":") ||
-          looksLikeSupplementalFieldLabel(normalizeCellText(cell.text))
+          looksLikeSupplementalFieldLabel(row, explicitLabelRows)
         )
       ),
     ];
@@ -180,18 +223,33 @@ function selectFieldLabelProjectionRows(rows: readonly ProjectedTableRowSeed[]):
   return rows;
 }
 
-function looksLikeSupplementalFieldLabel(text: string): boolean {
-  const normalizedText = normalizeCellText(text);
+function looksLikeSupplementalFieldLabel(
+  row: ProjectedTableRowSeed,
+  explicitLabelRows: readonly ProjectedTableRowSeed[],
+): boolean {
+  const normalizedText = normalizeCellText(row.cells[0]?.text ?? "");
   if (normalizedText.length === 0 || normalizedText.length > 64 || /[.!?:]$/u.test(normalizedText) || /\d/u.test(normalizedText)) {
     return false;
   }
 
   const words = normalizedText.split(/\s+/u).filter((word) => /\p{L}/u.test(word));
-  if (words.length < 2 || words.length > 8) {
+  if (words.length === 0 || words.length > 8) {
     return false;
   }
-
-  return /^(?:accept|acknowledge|agree|authorize|certify|confirm|consent|verify)\b/iu.test(normalizedText);
+  const anchors = row.cells.flatMap((cell) => cell.blocks.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.x]));
+  const labelAnchors = explicitLabelRows.flatMap((labelRow) =>
+    labelRow.cells.flatMap((cell) => cell.blocks.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.x]))
+  );
+  const candidateYs = row.cells.flatMap((cell) =>
+    cell.blocks.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.y])
+  );
+  const labelYs = explicitLabelRows.flatMap((labelRow) =>
+    labelRow.cells.flatMap((cell) => cell.blocks.flatMap((block) => block.anchor === undefined ? [] : [block.anchor.y]))
+  );
+  const followsLabelBand = candidateYs.length > 0 && labelYs.length > 0 &&
+    Math.min(...labelYs) - Math.max(...candidateYs) >= 30;
+  return followsLabelBand &&
+    anchors.some((anchor) => labelAnchors.some((labelAnchor) => Math.abs(anchor - labelAnchor) <= 48));
 }
 
 function parseInlineFieldValueRow(
@@ -297,7 +355,7 @@ function selectFormHeaderBlock(blocks: readonly PdfLayoutBlock[]): PdfLayoutBloc
     if (
       looksLikeNumericCell(normalizedText) ||
       looksLikePageMarkerText(normalizedText) ||
-      looksLikeFormMetadataText(normalizedText) ||
+      looksLikeTechnicalMetadataText(normalizedText) ||
       normalizedText.split(/\s+/u).filter((word) => /\p{L}/u.test(word)).length < 2 ||
       ((block.fontSize ?? 0) < 18 && normalizeStandaloneFormFieldLabel(normalizedText) !== undefined)
     ) {
@@ -324,15 +382,10 @@ function normalizeStandaloneFormFieldLabel(text: string): string | undefined {
   }
 
   if (
-    looksLikeFormMetadataText(normalizedText) ||
+    looksLikeTechnicalMetadataText(normalizedText) ||
     looksLikePageMarkerText(normalizedText) ||
     looksLikeNumericCell(normalizedText)
   ) {
-    return undefined;
-  }
-
-  const lowerText = normalizedText.toLowerCase();
-  if (FORM_OPTION_TEXTS.has(lowerText)) {
     return undefined;
   }
 
@@ -372,37 +425,66 @@ function looksLikeNumberedFormPromptLabel(text: string): boolean {
 function looksLikeCompactHeadingFieldLabel(text: string): boolean {
   const normalizedText = normalizeCellText(text);
   if (
-    !normalizedText.endsWith(":") ||
+    normalizedText.length === 0 ||
     normalizedText.length > 32 ||
     looksLikeNumberedFormPromptLabel(normalizedText) ||
-    looksLikeFormMetadataText(normalizedText) ||
-    looksLikePageMarkerText(normalizedText)
+    looksLikeTechnicalMetadataText(normalizedText) ||
+    looksLikePageMarkerText(normalizedText) ||
+    /[.!?]$/u.test(normalizedText)
   ) {
     return false;
   }
 
-  const words = normalizedText
-    .slice(0, -1)
+  const labelText = normalizedText.endsWith(":") ? normalizedText.slice(0, -1) : normalizedText;
+  const words = labelText
     .split(/\s+/u)
     .filter((word) => /\p{L}|\p{N}/u.test(word));
   return words.length >= 1 && words.length <= 3;
 }
 
-function looksLikeFormFooterFieldCluster(text: string): boolean {
-  const lines = text
-    .split(/\n+/u)
-    .map((line) => normalizeCellText(line))
-    .filter((line) => line.length > 0);
-  if (lines.length < 2) {
-    return false;
-  }
-
-  return lines.some((line) => parseFieldLabel(line) !== undefined) &&
-    lines.some((line) => FORM_OPTION_TEXTS.has(line.toLowerCase()));
+function looksLikeTechnicalMetadataText(text: string): boolean {
+  const normalized = normalizeCellText(text);
+  return /\bv?\d+\.\d+\.\d+\b/iu.test(normalized) ||
+    /\b\d{4}-\d{2}-\d{2}(?:[T\s]\d{2}:\d{2})?\b/u.test(normalized) ||
+    /(?:^|\s)(?:[\w.-]+\/){2,}[\w.-]+(?:$|\s)/u.test(normalized);
 }
 
-function looksLikeFormMetadataText(text: string): boolean {
-  return /^(?:created:|optimized\b|pdfcpu:|pr\. name:|source:|testdata\/)/iu.test(text);
+function collectInlineValueBlockIds(blocks: readonly PdfLayoutBlock[]): ReadonlySet<string> {
+  const labels = blocks.filter((block) => parseFieldLabel(block.text) !== undefined && block.anchor !== undefined);
+  const valueBlockIds = new Set<string>();
+  for (const block of blocks) {
+    const blockAnchor = block.anchor;
+    if (blockAnchor === undefined || parseFieldLabel(block.text) !== undefined) continue;
+    const sameRowLabel = labels.find((label) => {
+      if (label.anchor === undefined) return false;
+      const fontSize = Math.max(label.fontSize ?? 12, block.fontSize ?? 12);
+      return blockAnchor.x > label.anchor.x + Math.max(8, fontSize * 0.6) &&
+        Math.abs(blockAnchor.y - label.anchor.y) <= Math.max(5, fontSize * 0.6);
+    });
+    if (sameRowLabel !== undefined) valueBlockIds.add(block.id);
+  }
+  const compactRows: PdfLayoutBlock[][] = [];
+  for (const block of blocks.filter((candidate) => candidate.anchor !== undefined)) {
+    const anchor = block.anchor;
+    if (anchor === undefined) continue;
+    const row = compactRows.find((candidate) => {
+      const candidateAnchor = candidate[0]?.anchor;
+      return candidateAnchor !== undefined &&
+        Math.abs(candidateAnchor.y - anchor.y) <= Math.max(5, (block.fontSize ?? 12) * 0.6);
+    });
+    if (row === undefined) compactRows.push([block]);
+    else row.push(block);
+  }
+  for (const row of compactRows) {
+    if (
+      row.length >= 2 &&
+      row.every((block) => parseFieldLabel(block.text) === undefined) &&
+      row.every((block) => /^\p{L}[\p{L}\p{M}'’/-]{0,19}$/u.test(normalizeCellText(block.text)))
+    ) {
+      row.forEach((block) => valueBlockIds.add(block.id));
+    }
+  }
+  return valueBlockIds;
 }
 
 function looksLikePageMarkerText(text: string): boolean {

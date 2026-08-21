@@ -98,8 +98,7 @@ test("layout places a late-emitted table header above its rows using page geomet
 
   const texts = layout.pages[0]?.blocks.map((block) => block.text) ?? [];
   assert.deepEqual(texts.slice(0, 2), ["Demo Table", "Qty Description Price Amount"]);
-  assert.ok(texts[2]?.includes("1 Mouse 115.00"));
-  assert.ok(texts[2]?.includes("3 Unicorn 250000.00"));
+  assert.deepEqual(texts.slice(2), ["1 Mouse 115.00", "3 Unicorn 250000.00"]);
 });
 
 test("layout preserves a paragraph break after a short sentence-ending tail line", () => {
@@ -223,7 +222,7 @@ test("layout separates repeated page boundaries from body flow without dropping 
   assert.deepEqual(secondPageBlocks.map((block) => block.role), ["header", "body", "footer"]);
   assert.equal(firstPageBlocks[0]?.text, "Project Header");
   assert.equal(firstPageBlocks[2]?.text, "Confidential Footer");
-  assert.doesNotMatch(layout.extractedText, /Project Header|Confidential Footer/u);
+  assert.match(layout.extractedText, /Project Header|Confidential Footer/u);
   assert.match(layout.extractedText, /First page body paragraph/u);
   assert.match(layout.extractedText, /Second page body paragraph/u);
   assert.ok(
@@ -235,7 +234,7 @@ test("layout separates repeated page boundaries from body flow without dropping 
   );
 });
 
-test("layout keeps repeated table header boundaries out of footer role", () => {
+test("layout keeps repeated compact table boundaries out of footer role", () => {
   const layout = buildLayoutDocument({
     kind: "pdf-observation",
     strategy: "content-stream-interpreter",
@@ -246,13 +245,13 @@ test("layout keeps repeated table header boundaries out of footer role", () => {
       resolutionMethod: "page-tree",
       glyphs: [],
       runs: [
-        run(`run-p${String(pageNumber)}-contractor`, 0, "Contractor/Suppliers /Consultant", 84, 150, 10, pageNumber),
-        run(`run-p${String(pageNumber)}-method`, 1, "Method of Procurement", 96, 132, 10, pageNumber),
-        run(`run-p${String(pageNumber)}-amount`, 2, "Contract Amount", 108, 114, 10, pageNumber),
-        run(`run-p${String(pageNumber)}-remarks`, 3, "Estimated completion date Remarks", 120, 96, 10, pageNumber),
-        run(`run-p${String(pageNumber)}-row-1`, 4, "24 Procurement of traffic signals", 132, 76, 10, pageNumber),
-        run(`run-p${String(pageNumber)}-row-2`, 5, "23 Procurement of software licenses", 144, 56, 10, pageNumber),
-        run(`run-p${String(pageNumber)}-serial`, 6, "Serial No. Contract Description", 156, 36, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-party`, 0, "Supplier", 84, 150, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-method`, 1, "Selection method", 96, 132, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-amount`, 2, "Amount", 108, 114, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-remarks`, 3, "Status", 120, 96, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-row-1`, 4, `${String(20 + pageNumber)} Traffic signals ${String(38_000 + pageNumber)}.83`, 132, 76, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-row-2`, 5, `${String(30 + pageNumber)} Software licenses ${String(98_000 + pageNumber)}.82`, 144, 56, 10, pageNumber),
+        run(`run-p${String(pageNumber)}-serial`, 6, "Item No. Description", 156, 36, 10, pageNumber),
       ],
       marks: [],
     })),
@@ -260,7 +259,7 @@ test("layout keeps repeated table header boundaries out of footer role", () => {
 
   assert.ok(
     layout.pages.every((page) => {
-      const repeatedHeader = page.blocks.find((block) => block.text === "Serial No. Contract Description");
+      const repeatedHeader = page.blocks.find((block) => block.text === "Item No. Description");
       return repeatedHeader?.role === "heading" &&
         repeatedHeader.inferences?.some((inference) =>
           inference.kind === "structural-role" &&
@@ -268,7 +267,7 @@ test("layout keeps repeated table header boundaries out of footer role", () => {
         );
     }),
   );
-  assert.match(layout.extractedText, /Serial No\. Contract Description/u);
+  assert.match(layout.extractedText, /Item No\. Description/u);
   assert.doesNotMatch(layout.pages.map((page) => page.blocks.at(-1)?.role).join(" "), /footer/u);
 });
 
@@ -293,7 +292,7 @@ test("layout emits a provenance-backed table region from anchored header and row
   assert.ok(tableRegion?.bbox);
   assert.ok(tableRegion?.inferences?.some((inference) =>
     inference.kind === "region" &&
-    inference.method === "measurement-table" &&
+    inference.method === "geometry-table" &&
     inference.status === "inferred" &&
     inference.evidenceRunIds.includes("run-header-specimen") &&
     inference.evidenceRunIds.includes("run-row-gamma")
@@ -406,7 +405,7 @@ test("layout keeps uppercase table row labels as body evidence", () => {
   ));
 });
 
-test("layout preserves ledger row boundaries and separates retention notices", () => {
+test("layout preserves compact row boundaries without hiding narrative evidence", () => {
   const layout = buildLayoutDocument(createObservation([
     run("run-header-code", 0, "Rub", 72, 720),
     run("run-header-label", 1, "Label", 160, 720),
@@ -425,13 +424,13 @@ test("layout preserves ledger row boundaries and separates retention notices", (
   const overtimeRow = layout.pages[0]?.blocks.find((block) => block.text === "Hrs overtime 25%");
   const totalRow = layout.pages[0]?.blocks.find((block) => block.text === "***TOTAL PAY***");
 
-  assert.equal(retentionNotice?.role, "footer");
-  assert.equal(referenceNotice?.role, "footer");
+  assert.equal(retentionNotice?.role, "body");
+  assert.equal(referenceNotice?.role, "body");
   assert.equal(baseRow?.startsParagraph, true);
   assert.equal(overtimeRow?.startsParagraph, true);
   assert.equal(totalRow?.startsParagraph, true);
   assert.match(layout.extractedText, /BASE SALARY\n\nHrs overtime 25%/u);
-  assert.doesNotMatch(layout.extractedText, /retain this statement|available online/u);
+  assert.match(layout.extractedText, /retain this statement|available online/u);
 });
 
 test("layout keeps uppercase section labels as headings beside narrative text", () => {
@@ -574,36 +573,34 @@ test("layout orders compact form field labels by geometry when producer order is
       block.text === "First Name: Last Name: Birth Date:" &&
       block.inferences?.some((inference) =>
         inference.kind === "reading-order" &&
-        inference.method === "geometry-form-order" &&
+        inference.method === "geometry-line-order" &&
         inference.status === "inferred"
       )
     ),
   );
 });
 
-test("layout orders compact form field labels by semantic sequence when anchors are local", () => {
+test("layout orders vertical field groups by page geometry", () => {
   const layout = buildLayoutDocument(createObservation([
-    run("run-title", 0, "Registration Form", 0, 6, 18, 1, "vertical"),
-    run("run-prompt", 1, "1) Please tell us about yourself:", 0, -16, 12, 1, "vertical"),
-    run("run-choice-prompt", 2, "2) Select the matching option:", 0, -16, 12, 1, "vertical"),
-    run("run-city", 3, "City: Preferred City:", 0, 8, 12, 1, "vertical"),
-    run("run-name-date", 4, "First Name: Last Name: Birth Date:", 0, -14, 10, 1, "vertical"),
-    run("run-gender", 5, "female male non-binary Gender:", 0, -13, 10, 1, "vertical"),
+    run("run-title", 0, "Registration Form", 340, 0, 18, 1, "vertical"),
+    run("run-field-a", 1, "Field A:", 300, 0, 12, 1, "vertical"),
+    run("run-field-b", 2, "Field B:", 200, 0, 12, 1, "vertical"),
+    run("run-field-c", 3, "Field C:", 100, 0, 12, 1, "vertical"),
   ]));
 
-  const firstNameIndex = layout.extractedText.indexOf("First Name:");
-  const genderIndex = layout.extractedText.indexOf("Gender:");
-  const cityIndex = layout.extractedText.indexOf("City:");
+  const fieldAIndex = layout.extractedText.indexOf("Field A:");
+  const fieldBIndex = layout.extractedText.indexOf("Field B:");
+  const fieldCIndex = layout.extractedText.indexOf("Field C:");
 
-  assert.ok(firstNameIndex >= 0);
-  assert.ok(genderIndex > firstNameIndex);
-  assert.ok(cityIndex > genderIndex);
+  assert.ok(fieldAIndex >= 0);
+  assert.ok(fieldBIndex > fieldAIndex);
+  assert.ok(fieldCIndex > fieldBIndex);
   assert.ok(
     layout.pages[0]?.blocks.some((block) =>
-      block.text === "First Name: Last Name: Birth Date:" &&
+      block.text === "Field A:" &&
       block.inferences?.some((inference) =>
         inference.kind === "reading-order" &&
-        inference.method === "semantic-form-order" &&
+        inference.method === "geometry-line-order" &&
         inference.status === "inferred"
       )
     ),

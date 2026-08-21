@@ -17,6 +17,7 @@ import {
   pdfReferenceKey,
 } from "./pdf-values.ts";
 
+import type { PdfByteSequence, PdfSourceData } from "./pdf-source.ts";
 import type { PdfStandardPasswordSecurityHandler } from "./pdf-standard-security.ts";
 
 interface PdfFreeXrefEntry {
@@ -74,7 +75,6 @@ export interface PdfObjectStoreOpenResult {
 }
 
 export class PdfObjectStore {
-  readonly bytes: Uint8Array;
   readonly parser: PdfSyntaxParser;
   readonly budget: PdfBudgetTracker;
   readonly version: string;
@@ -84,8 +84,10 @@ export class PdfObjectStore {
   readonly root: PdfReference;
   readonly encrypt: PdfReference | undefined;
   readonly documentId: Uint8Array | undefined;
+  readonly #data: PdfSourceData;
   readonly #xrefRepaired: boolean;
   readonly #entries: ReadonlyMap<string, PdfXrefEntry>;
+  readonly #objectBoundaries: readonly number[];
   readonly #objectCache = new Map<string, PdfIndirectObject>();
   readonly #streamCache = new Map<string, PdfDecodedStream>();
   readonly #encodedStreamCache = new Map<string, Uint8Array>();
@@ -93,7 +95,7 @@ export class PdfObjectStore {
   #securityHandler: PdfStandardPasswordSecurityHandler | undefined;
 
   private constructor(input: {
-    readonly bytes: Uint8Array;
+    readonly data: PdfSourceData;
     readonly parser: PdfSyntaxParser;
     readonly budget: PdfBudgetTracker;
     readonly version: string;
@@ -106,13 +108,20 @@ export class PdfObjectStore {
     readonly documentId?: Uint8Array;
     readonly repaired: boolean;
   }) {
-    this.bytes = input.bytes;
+    this.#data = input.data;
     this.parser = input.parser;
     this.budget = input.budget;
     this.version = input.version;
     this.startXref = input.startXref;
     this.sections = input.sections;
     this.#entries = input.entries;
+    this.#objectBoundaries = [
+      ...new Set([
+        ...input.sections.map((section) => section.offset),
+        ...[...input.entries.values()].flatMap((entry) => entry.kind === "uncompressed" ? [entry.offset] : []),
+        input.data.byteLength,
+      ]),
+    ].toSorted((left, right) => left - right);
     this.trailer = input.trailer;
     this.root = input.root;
     this.encrypt = input.encrypt;
@@ -121,10 +130,11 @@ export class PdfObjectStore {
   }
 
   static async open(
-    bytes: Uint8Array,
+    data: PdfSourceData,
     budget: PdfBudgetTracker,
     repairMode: "strict" | "safe",
   ): Promise<PdfObjectStoreOpenResult> {
+    const bytes = data.bytes;
     const parser = new PdfSyntaxParser(bytes, budget, repairMode === "safe");
     const version = readPdfVersion(bytes);
     const startXref = readStartXref(parser, bytes);
@@ -134,11 +144,12 @@ export class PdfObjectStore {
       if (startXref === undefined) {
         throw new PdfSyntaxError("Missing startxref", bytes.byteLength);
       }
-      pendingSections = await readXrefChain(parser, budget, startXref);
+      pendingSections = await readXrefChain(parser, budget, startXref, data);
     } catch (error: unknown) {
       if (repairMode === "strict") {
         throw error;
       }
+      await data.materialize();
       pendingSections = [repairXref(parser, bytes)];
       repaired = true;
     }
@@ -162,7 +173,7 @@ export class PdfObjectStore {
     const documentId = readDocumentId(trailer);
     return {
       store: new PdfObjectStore({
-        bytes,
+        data,
         parser,
         budget,
         version,
@@ -181,6 +192,10 @@ export class PdfObjectStore {
 
   get objectCount(): number {
     return [...this.#entries.values()].filter((entry) => entry.kind !== "free").length;
+  }
+
+  get byteLength(): number {
+    return this.#data.byteLength;
   }
 
   get repaired(): boolean {
@@ -222,9 +237,13 @@ export class PdfObjectStore {
     if (entry === undefined || entry.kind === "free") {
       return undefined;
     }
-    const parsed = entry.kind === "uncompressed"
-      ? this.parser.parseIndirectObject(entry.offset, entry.revision).object
-      : await this.#getCompressedObject(entry);
+    let parsed: PdfIndirectObject;
+    if (entry.kind === "uncompressed") {
+      await this.#ensureObjectLoaded(entry.offset);
+      parsed = this.parser.parseIndirectObject(entry.offset, entry.revision).object;
+    } else {
+      parsed = await this.#getCompressedObject(entry);
+    }
     const object = entry.kind === "uncompressed" && this.#securityHandler !== undefined
       ? await decryptIndirectObject(parsed, this.#securityHandler, this.budget)
       : parsed;
@@ -239,12 +258,64 @@ export class PdfObjectStore {
     return object;
   }
 
+  async #ensureObjectLoaded(offset: number): Promise<void> {
+    const end = this.#objectEnd(offset);
+    await this.#data.ensure(offset, Math.max(0, end - offset));
+  }
+
+  #objectEnd(offset: number): number {
+    return this.#objectBoundaries.find((boundary) => boundary > offset) ?? this.byteLength;
+  }
+
   async require(ref: PdfReference): Promise<PdfIndirectObject> {
     const object = await this.get(ref);
     if (object === undefined) {
       throw new PdfSyntaxError(`Missing indirect object ${String(ref.objectNumber)} ${String(ref.generationNumber)}`, 0);
     }
     return object;
+  }
+
+  async isArrayObject(ref: PdfReference): Promise<boolean> {
+    const entry = this.#entries.get(pdfReferenceKey(ref));
+    if (entry === undefined || entry.kind === "free") {
+      return false;
+    }
+    if (entry.kind === "compressed") {
+      return (await this.get(ref))?.value.kind === "array";
+    }
+
+    const end = this.#objectEnd(entry.offset);
+    let length = Math.min(256, end - entry.offset);
+    while (true) {
+      await this.#data.ensure(entry.offset, length);
+      try {
+        let cursor = this.parser.skipWhitespace(entry.offset);
+        const objectNumber = this.parser.readUnsignedInteger(cursor);
+        if (objectNumber === undefined) {
+          throw new PdfSyntaxError("Expected an indirect object number", cursor);
+        }
+        cursor = this.parser.skipWhitespace(objectNumber.nextOffset);
+        const generationNumber = this.parser.readUnsignedInteger(cursor);
+        if (generationNumber === undefined) {
+          throw new PdfSyntaxError("Expected an indirect object generation number", cursor);
+        }
+        cursor = this.parser.skipWhitespace(generationNumber.nextOffset);
+        if (!this.parser.matchesKeyword(cursor, "obj")) {
+          throw new PdfSyntaxError("Expected the obj keyword", cursor);
+        }
+        const valueOffset = this.parser.skipWhitespace(cursor + 3);
+        const valueByte = this.parser.byteAt(valueOffset);
+        if (valueByte === undefined) {
+          throw new PdfSyntaxError("Expected an indirect object value", valueOffset);
+        }
+        return valueByte === 0x5b;
+      } catch (error: unknown) {
+        if (entry.offset + length >= end) {
+          throw error;
+        }
+        length = Math.min(end - entry.offset, Math.max(length + 1, length * 2));
+      }
+    }
   }
 
   async resolve(value: PdfValue | undefined): Promise<PdfValue | undefined> {
@@ -441,6 +512,7 @@ async function readXrefChain(
   parser: PdfSyntaxParser,
   budget: PdfBudgetTracker,
   startXref: number,
+  data: PdfSourceData,
 ): Promise<readonly PendingXrefSection[]> {
   const sections: PendingXrefSection[] = [];
   const visited = new Set<number>();
@@ -450,18 +522,40 @@ async function readXrefChain(
       throw new PdfSyntaxError("Cross-reference chain contains a cycle", offset);
     }
     visited.add(offset);
-    const section = parser.matchesKeyword(parser.skipWhitespace(offset), "xref")
-      ? readClassicXrefSection(parser, offset)
-      : await readXrefStreamSection(parser, budget, offset);
+    const section = await readXrefSection(parser, budget, data, offset);
     sections.push(section);
     const hybridOffset = pdfAsInteger(pdfDictionaryGet(section.trailer, "XRefStm"));
     if (hybridOffset !== undefined && !visited.has(hybridOffset)) {
       visited.add(hybridOffset);
-      sections.push(await readXrefStreamSection(parser, budget, hybridOffset));
+      sections.push(await readXrefSection(parser, budget, data, hybridOffset, true));
     }
     offset = pdfAsInteger(pdfDictionaryGet(section.trailer, "Prev"));
   }
   return sections;
+}
+
+async function readXrefSection(
+  parser: PdfSyntaxParser,
+  budget: PdfBudgetTracker,
+  data: PdfSourceData,
+  offset: number,
+  requireStream: boolean = false,
+): Promise<PendingXrefSection> {
+  let length = Math.min(1_048_576, data.byteLength - offset);
+  while (true) {
+    await data.ensure(offset, length);
+    try {
+      if (!requireStream && parser.matchesKeyword(parser.skipWhitespace(offset), "xref")) {
+        return readClassicXrefSection(parser, offset);
+      }
+      return await readXrefStreamSection(parser, budget, offset);
+    } catch (error: unknown) {
+      if (offset + length >= data.byteLength) {
+        throw error;
+      }
+      length = Math.min(data.byteLength - offset, Math.max(length + 1, length * 2));
+    }
+  }
 }
 
 function readClassicXrefSection(parser: PdfSyntaxParser, offset: number): PendingXrefSection {
@@ -565,12 +659,12 @@ async function readXrefStreamSection(
   return { offset, kind: "stream", trailer: object.value, entries };
 }
 
-function repairXref(parser: PdfSyntaxParser, bytes: Uint8Array): PendingXrefSection {
+function repairXref(parser: PdfSyntaxParser, bytes: PdfByteSequence): PendingXrefSection {
   const entries: PendingXrefEntry[] = [];
   let cursor = 0;
   let latestTrailer: PdfDictionaryValue | undefined;
   while (cursor < bytes.byteLength) {
-    if (!isDigitByte(bytes[cursor]) || !isBoundaryByte(bytes[cursor - 1])) {
+    if (!isDigitByte(bytes.byteAt(cursor)) || !isBoundaryByte(bytes.byteAt(cursor - 1))) {
       cursor += 1;
       continue;
     }
@@ -663,21 +757,21 @@ function finalizeSections(pending: readonly PendingXrefSection[]): readonly PdfX
   }));
 }
 
-function readPdfVersion(bytes: Uint8Array): string {
+function readPdfVersion(bytes: PdfByteSequence): string {
   const limit = Math.min(1024, bytes.byteLength - 8);
   for (let offset = 0; offset <= limit; offset += 1) {
     if (
-      bytes[offset] === 0x25 && bytes[offset + 1] === 0x50 && bytes[offset + 2] === 0x44 &&
-      bytes[offset + 3] === 0x46 && bytes[offset + 4] === 0x2d && isDigitByte(bytes[offset + 5]) &&
-      bytes[offset + 6] === 0x2e && isDigitByte(bytes[offset + 7])
+      bytes.byteAt(offset) === 0x25 && bytes.byteAt(offset + 1) === 0x50 && bytes.byteAt(offset + 2) === 0x44 &&
+      bytes.byteAt(offset + 3) === 0x46 && bytes.byteAt(offset + 4) === 0x2d && isDigitByte(bytes.byteAt(offset + 5)) &&
+      bytes.byteAt(offset + 6) === 0x2e && isDigitByte(bytes.byteAt(offset + 7))
     ) {
-      return `${String.fromCharCode(bytes[offset + 5] ?? 0)}.${String.fromCharCode(bytes[offset + 7] ?? 0)}`;
+      return `${String.fromCharCode(bytes.byteAt(offset + 5) ?? 0)}.${String.fromCharCode(bytes.byteAt(offset + 7) ?? 0)}`;
     }
   }
   throw new PdfSyntaxError("Input has no PDF header", 0);
 }
 
-function readStartXref(parser: PdfSyntaxParser, bytes: Uint8Array): number | undefined {
+function readStartXref(parser: PdfSyntaxParser, bytes: PdfByteSequence): number | undefined {
   const marker = parser.findLastKeyword("startxref");
   if (marker < 0) {
     return undefined;

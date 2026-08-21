@@ -542,6 +542,28 @@ test("knowledge projects inline field-value rows without field-label duplication
   assert.equal(form.fields[0]?.citations[1]?.sourceSpan?.text, "Ada Lovelace");
 });
 
+test("knowledge keeps stacked field values despite incidental page-boundary roles", () => {
+  const layout = createSinglePageLayout([
+    createLayoutBlock({ id: "stacked-label-a", readingOrder: 0, text: "Language:", role: "heading", x: 72, y: 760 }),
+    createLayoutBlock({ id: "stacked-value-a", readingOrder: 1, text: "English", role: "header", x: 72, y: 746 }),
+    createLayoutBlock({ id: "stacked-label-b", readingOrder: 2, text: "Greeting:", x: 72, y: 718 }),
+    createLayoutBlock({ id: "stacked-value-b", readingOrder: 3, text: "Hello World", x: 72, y: 704 }),
+    createLayoutBlock({ id: "stacked-label-c", readingOrder: 4, text: "Farewell:", x: 72, y: 676 }),
+    createLayoutBlock({ id: "stacked-value-c", readingOrder: 5, text: "Goodbye", role: "footer", x: 72, y: 662 }),
+  ]);
+
+  const knowledge = buildKnowledgeDocument(layout);
+
+  assert.deepEqual(
+    knowledge.forms[0]?.fields.map((field) => [field.name, field.value]),
+    [
+      ["Language", "English"],
+      ["Greeting", "Hello World"],
+      ["Farewell", "Goodbye"],
+    ],
+  );
+});
+
 test("knowledge scopes form projection to interpreted layout form-like regions before page-wide fallback", () => {
   const formBlockIds = ["fv-name", "fv-team", "fv-priority"];
   const blocks = [
@@ -699,50 +721,6 @@ test("knowledge projects field-label forms only when labels are spatially cohere
   assert.deepEqual(knowledge.forms[0]?.fields[0]?.blockIds, ["field-block-2"]);
 });
 
-test("knowledge projects contract award sequences with separated contractor and amount evidence", () => {
-  const runs = [
-    createObservedRun({ id: "award-h1", contentOrder: 0, text: "Serial No.", fontSize: 11 }),
-    createObservedRun({ id: "award-h2", contentOrder: 1, text: "Contract Description", fontSize: 11 }),
-    createObservedRun({ id: "award-h3", contentOrder: 2, text: "Contractor", fontSize: 11 }),
-    createObservedRun({ id: "award-h4", contentOrder: 3, text: "Amount", fontSize: 11 }),
-    createObservedRun({ id: "award-h5", contentOrder: 4, text: "Remarks", fontSize: 11 }),
-    createObservedRun({ id: "award-r1a", contentOrder: 5, text: "1 Purchase of laptops", fontSize: 10 }),
-    createObservedRun({ id: "award-r1b", contentOrder: 6, text: "AC/PC/2026", fontSize: 10 }),
-    createObservedRun({ id: "award-r1c", contentOrder: 7, text: "Nova Limited", fontSize: 10 }),
-    createObservedRun({ id: "award-r1d", contentOrder: 8, text: "1,200 GHS Completed", fontSize: 10 }),
-    createObservedRun({ id: "award-r2a", contentOrder: 9, text: "2 Printer maintenance", fontSize: 10 }),
-    createObservedRun({ id: "award-r2b", contentOrder: 10, text: "AC/PM/2026", fontSize: 10 }),
-    createObservedRun({ id: "award-r2c", contentOrder: 11, text: "Orion Services", fontSize: 10 }),
-    createObservedRun({ id: "award-r2d", contentOrder: 12, text: "900.00 GHS Ongoing", fontSize: 10 }),
-  ];
-  const layout = createSinglePageLayout(
-    runs.map((run, index) =>
-      createLayoutBlock({
-        id: `award-block-${String(index + 1)}`,
-        readingOrder: index,
-        text: run.text,
-        runIds: [run.id],
-      })
-    ),
-  );
-
-  const knowledge = buildKnowledgeDocument(layout, createSinglePageObservation(runs));
-
-  assert.equal(knowledge.tables.length, 1);
-  const [table] = knowledge.tables;
-  assert.ok(table);
-  assert.equal(table.heuristic, "contract-award-sequence");
-  assert.deepEqual(table.headers, ["Serial No.", "Contract Description", "Contractor", "Amount", "Remarks"]);
-  assert.deepEqual(
-    table.cells.filter((cell) => cell.rowIndex === 1).map((cell) => cell.text),
-    ["1", "Purchase of laptops", "Nova Limited", "1,200 GHS", "Completed"],
-  );
-  const tableChunkIndex = knowledge.chunks.findIndex((chunk) => chunk.text.includes("Serial No. | Contract Description"));
-  const laterChunkIndex = knowledge.chunks.findIndex((chunk) => chunk.text.includes("2 Printer maintenance"));
-  assert.notEqual(tableChunkIndex, -1);
-  assert.ok(laterChunkIndex === -1 || tableChunkIndex <= laterChunkIndex);
-});
-
 test("knowledge hard-fails unresolvable citation anchors", () => {
   const layout = createCompactRowRunLayout([
     "Sample Measurements",
@@ -871,7 +849,7 @@ test("knowledge hard-fails stale source spans and table-cell overreach", () => {
         id: "table-split-header",
         pageNumber: 1,
         headers: ["Serial No."],
-        heuristic: "contract-award-sequence",
+        heuristic: "row-sequence",
         blockIds: ["block-1"],
         confidence: 0.9,
         cells: [

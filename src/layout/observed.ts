@@ -2770,7 +2770,16 @@ function decodeHexTextOperand(
     };
   }
 
+  const embeddedDecodedText = embeddedFontMapping
+    ? decodePdfCidHexTextWithEmbeddedFont(hexToken, embeddedFontMapping)
+    : undefined;
   const collectionDecodedText = decodePdfCidHexTextWithKnownCollectionMap(hexToken, cidCollection);
+  if (
+    embeddedDecodedText &&
+    (!collectionDecodedText || embeddedDecodedText.mappedUnitCount >= collectionDecodedText.mappedUnitCount)
+  ) {
+    return embeddedDecodedText;
+  }
   if (collectionDecodedText) {
     return {
       text: collectionDecodedText.text,
@@ -2781,11 +2790,7 @@ function decodeHexTextOperand(
     };
   }
 
-  if (!embeddedFontMapping) {
-    return undefined;
-  }
-
-  return decodePdfCidHexTextWithEmbeddedFont(hexToken, embeddedFontMapping);
+  return embeddedDecodedText;
 }
 
 function resolveSingleByteFontEncodingForFont(

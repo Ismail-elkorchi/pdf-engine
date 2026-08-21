@@ -84,6 +84,8 @@ export type PdfRepairState = "clean" | "recovered";
  * Stable implementation-limit codes that the current engine can expose without hiding known gaps.
  */
 export type PdfKnownLimitCode =
+  | "native-text-unicode-mapping-incomplete"
+  | "native-text-encoding-incomplete"
   | "layout-block-heuristic"
   | "layout-role-heuristic"
   | "layout-reading-order-heuristic"
@@ -1119,8 +1121,7 @@ export type PdfKnowledgeTableHeuristic =
   | "row-sequence"
   | "stacked-header-sequence"
   | "field-value-form"
-  | "field-label-form"
-  | "contract-award-sequence";
+  | "field-label-form";
 
 /**
  * One provenance record attached to a knowledge chunk or table cell.

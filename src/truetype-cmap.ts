@@ -7,15 +7,17 @@ interface CmapEncodingRecord {
   readonly platformId: number;
   readonly encodingId: number;
   readonly subtableOffset: number;
+  readonly tableEnd: number;
   readonly format: number;
 }
+
+const MAX_CMAP_MAPPINGS = 262_144;
 
 /**
  * Builds a glyph-id to Unicode map from an embedded TrueType/OpenType font program.
  *
- * The current shell only needs enough coverage to recover common `FontFile2` text when a PDF
- * omits `ToUnicode`. The parser therefore supports the `cmap` table formats most commonly used
- * by searchable PDF fonts: format 4 and format 12.
+ * Supports byte, trimmed-table, segmented, and grouped Unicode mappings used by searchable
+ * PDF fonts when `ToUnicode` is absent.
  *
  * @param fontBytes Embedded font program bytes from `FontFile2`.
  * @returns A glyph-id keyed Unicode map when a supported `cmap` table is available.
@@ -70,11 +72,16 @@ function readSfntTableDirectory(view: DataView): Map<string, SfntTableRecord> {
 function parseCmapTable(view: DataView, cmapRecord: SfntTableRecord): ReadonlyMap<number, string> | undefined {
   const version = readUint16(view, cmapRecord.offset);
   const numTables = readUint16(view, cmapRecord.offset + 2);
-  if (version !== 0 || numTables === undefined) {
+  if (
+    version !== 0 || numTables === undefined ||
+    4 + numTables * 8 > cmapRecord.length
+  ) {
     return undefined;
   }
 
   const encodingRecords: CmapEncodingRecord[] = [];
+  const subtableStart = 4 + numTables * 8;
+  const tableEnd = cmapRecord.offset + cmapRecord.length;
   for (let index = 0; index < numTables; index += 1) {
     const recordOffset = cmapRecord.offset + 4 + index * 8;
     const platformId = readUint16(view, recordOffset);
@@ -84,6 +91,9 @@ function parseCmapTable(view: DataView, cmapRecord: SfntTableRecord): ReadonlyMa
       continue;
     }
 
+    if (subtableOffset < subtableStart || subtableOffset > cmapRecord.length - 2) {
+      continue;
+    }
     const absoluteOffset = cmapRecord.offset + subtableOffset;
     const format = readUint16(view, absoluteOffset);
     if (format === undefined) {
@@ -94,6 +104,7 @@ function parseCmapTable(view: DataView, cmapRecord: SfntTableRecord): ReadonlyMa
       platformId,
       encodingId,
       subtableOffset: absoluteOffset,
+      tableEnd,
       format,
     });
   }
@@ -101,13 +112,7 @@ function parseCmapTable(view: DataView, cmapRecord: SfntTableRecord): ReadonlyMa
   const glyphUnicodeByGlyphId = new Map<number, string>();
   const sortedRecords = encodingRecords.sort(compareEncodingRecords);
   for (const record of sortedRecords) {
-    if (record.format === 12) {
-      mergeGlyphUnicodeMap(glyphUnicodeByGlyphId, parseFormat12Subtable(view, record.subtableOffset));
-      continue;
-    }
-    if (record.format === 4) {
-      mergeGlyphUnicodeMap(glyphUnicodeByGlyphId, parseFormat4Subtable(view, record.subtableOffset));
-    }
+    mergeGlyphUnicodeMap(glyphUnicodeByGlyphId, parseCmapSubtable(view, record));
   }
 
   return glyphUnicodeByGlyphId.size > 0 ? glyphUnicodeByGlyphId : undefined;
@@ -118,7 +123,14 @@ function compareEncodingRecords(left: CmapEncodingRecord, right: CmapEncodingRec
 }
 
 function scoreEncodingRecord(record: CmapEncodingRecord): number {
-  const formatScore = record.format === 12 ? 40 : record.format === 4 ? 20 : 0;
+  const formatScore = new Map<number, number>([
+    [12, 60],
+    [10, 50],
+    [4, 40],
+    [6, 30],
+    [0, 20],
+    [13, 10],
+  ]).get(record.format) ?? 0;
 
   if (record.platformId === 0) {
     return formatScore + 10;
@@ -131,6 +143,87 @@ function scoreEncodingRecord(record: CmapEncodingRecord): number {
   }
 
   return formatScore;
+}
+
+function parseCmapSubtable(
+  view: DataView,
+  record: CmapEncodingRecord,
+): ReadonlyMap<number, string> | undefined {
+  switch (record.format) {
+    case 0:
+      return parseFormat0Subtable(view, record.subtableOffset, record.tableEnd);
+    case 4:
+      return parseFormat4Subtable(view, record.subtableOffset, record.tableEnd);
+    case 6:
+      return parseFormat6Subtable(view, record.subtableOffset, record.tableEnd);
+    case 10:
+      return parseFormat10Subtable(view, record.subtableOffset, record.tableEnd);
+    case 12:
+      return parseFormat12Subtable(view, record.subtableOffset, record.tableEnd);
+    case 13:
+      return parseFormat13Subtable(view, record.subtableOffset, record.tableEnd);
+    default:
+      return undefined;
+  }
+}
+
+function parseFormat0Subtable(view: DataView, offset: number, tableEnd: number): ReadonlyMap<number, string> | undefined {
+  const length = readUint16(view, offset + 2);
+  if (length === undefined || length < 262 || !isRangeWithinTable(view, offset, length, tableEnd)) {
+    return undefined;
+  }
+
+  const glyphUnicodeByGlyphId = new Map<number, string>();
+  for (let codePoint = 0; codePoint < 256; codePoint += 1) {
+    const glyphId = view.getUint8(offset + 6 + codePoint);
+    addGlyphMapping(glyphUnicodeByGlyphId, glyphId, codePoint);
+  }
+  return nonEmptyMap(glyphUnicodeByGlyphId);
+}
+
+function parseFormat6Subtable(view: DataView, offset: number, tableEnd: number): ReadonlyMap<number, string> | undefined {
+  const length = readUint16(view, offset + 2);
+  const firstCode = readUint16(view, offset + 6);
+  const entryCount = readUint16(view, offset + 8);
+  if (
+    length === undefined || firstCode === undefined || entryCount === undefined ||
+    entryCount > MAX_CMAP_MAPPINGS || length < 10 + entryCount * 2 ||
+    !isRangeWithinTable(view, offset, length, tableEnd)
+  ) {
+    return undefined;
+  }
+
+  const glyphUnicodeByGlyphId = new Map<number, string>();
+  for (let index = 0; index < entryCount; index += 1) {
+    const glyphId = readUint16(view, offset + 10 + index * 2);
+    if (glyphId !== undefined) {
+      addGlyphMapping(glyphUnicodeByGlyphId, glyphId, firstCode + index);
+    }
+  }
+  return nonEmptyMap(glyphUnicodeByGlyphId);
+}
+
+function parseFormat10Subtable(view: DataView, offset: number, tableEnd: number): ReadonlyMap<number, string> | undefined {
+  const reserved = readUint16(view, offset + 2);
+  const length = readUint32(view, offset + 4);
+  const firstCode = readUint32(view, offset + 12);
+  const entryCount = readUint32(view, offset + 16);
+  if (
+    reserved !== 0 || length === undefined || firstCode === undefined || entryCount === undefined ||
+    entryCount > MAX_CMAP_MAPPINGS || length < 20 + entryCount * 2 ||
+    firstCode + entryCount > 0x110000 || !isRangeWithinTable(view, offset, length, tableEnd)
+  ) {
+    return undefined;
+  }
+
+  const glyphUnicodeByGlyphId = new Map<number, string>();
+  for (let index = 0; index < entryCount; index += 1) {
+    const glyphId = readUint16(view, offset + 20 + index * 2);
+    if (glyphId !== undefined) {
+      addGlyphMapping(glyphUnicodeByGlyphId, glyphId, firstCode + index);
+    }
+  }
+  return nonEmptyMap(glyphUnicodeByGlyphId);
 }
 
 function mergeGlyphUnicodeMap(
@@ -148,17 +241,16 @@ function mergeGlyphUnicodeMap(
   }
 }
 
-function parseFormat4Subtable(view: DataView, offset: number): ReadonlyMap<number, string> | undefined {
+function parseFormat4Subtable(view: DataView, offset: number, tableEnd: number): ReadonlyMap<number, string> | undefined {
   const length = readUint16(view, offset + 2);
   const segCountX2 = readUint16(view, offset + 6);
   if (length === undefined || segCountX2 === undefined || segCountX2 === 0 || segCountX2 % 2 !== 0) {
     return undefined;
   }
-  if (!isRangeWithinView(view, offset, length)) {
+  const segCount = segCountX2 / 2;
+  if (length < 16 + segCount * 8 || !isRangeWithinTable(view, offset, length, tableEnd)) {
     return undefined;
   }
-
-  const segCount = segCountX2 / 2;
   const endCodesOffset = offset + 14;
   const startCodesOffset = endCodesOffset + segCount * 2 + 2;
   const idDeltasOffset = startCodesOffset + segCount * 2;
@@ -166,6 +258,7 @@ function parseFormat4Subtable(view: DataView, offset: number): ReadonlyMap<numbe
   const glyphIdArrayOffset = idRangeOffsetsOffset + segCount * 2;
 
   const glyphUnicodeByGlyphId = new Map<number, string>();
+  let inspectedCodePoints = 0;
 
   for (let segmentIndex = 0; segmentIndex < segCount; segmentIndex += 1) {
     const endCode = readUint16(view, endCodesOffset + segmentIndex * 2);
@@ -178,6 +271,10 @@ function parseFormat4Subtable(view: DataView, offset: number): ReadonlyMap<numbe
     if (startCode === 0xffff && endCode === 0xffff) {
       continue;
     }
+    if (startCode > endCode || endCode - startCode + 1 > MAX_CMAP_MAPPINGS - inspectedCodePoints) {
+      return undefined;
+    }
+    inspectedCodePoints += endCode - startCode + 1;
 
     for (let codePoint = startCode; codePoint <= endCode; codePoint += 1) {
       const glyphId = readFormat4GlyphId(view, {
@@ -188,6 +285,7 @@ function parseFormat4Subtable(view: DataView, offset: number): ReadonlyMap<numbe
         idRangeOffset,
         idRangeOffsetsOffset,
         glyphIdArrayOffset,
+        subtableEnd: offset + length,
       });
       if (glyphId === undefined || glyphId === 0) {
         continue;
@@ -211,6 +309,7 @@ function readFormat4GlyphId(
     readonly idRangeOffset: number;
     readonly idRangeOffsetsOffset: number;
     readonly glyphIdArrayOffset: number;
+    readonly subtableEnd: number;
   },
 ): number | undefined {
   if (options.idRangeOffset === 0) {
@@ -219,7 +318,11 @@ function readFormat4GlyphId(
 
   const idRangeOffsetAddress = options.idRangeOffsetsOffset + options.segmentIndex * 2;
   const glyphIndexAddress = idRangeOffsetAddress + options.idRangeOffset + (options.codePoint - options.startCode) * 2;
-  if (glyphIndexAddress < options.glyphIdArrayOffset || !isRangeWithinView(view, glyphIndexAddress, 2)) {
+  if (
+    glyphIndexAddress < options.glyphIdArrayOffset ||
+    glyphIndexAddress + 2 > options.subtableEnd ||
+    !isRangeWithinView(view, glyphIndexAddress, 2)
+  ) {
     return undefined;
   }
 
@@ -231,14 +334,17 @@ function readFormat4GlyphId(
   return (glyphIndex + options.idDelta) & 0xffff;
 }
 
-function parseFormat12Subtable(view: DataView, offset: number): ReadonlyMap<number, string> | undefined {
+function parseFormat12Subtable(view: DataView, offset: number, tableEnd: number): ReadonlyMap<number, string> | undefined {
   const reserved = readUint16(view, offset + 2);
   const length = readUint32(view, offset + 4);
   const numGroups = readUint32(view, offset + 12);
   if (reserved !== 0 || length === undefined || numGroups === undefined) {
     return undefined;
   }
-  if (!isRangeWithinView(view, offset, length)) {
+  if (
+    numGroups > MAX_CMAP_MAPPINGS || length < 16 + numGroups * 12 ||
+    !isRangeWithinTable(view, offset, length, tableEnd)
+  ) {
     return undefined;
   }
 
@@ -251,18 +357,62 @@ function parseFormat12Subtable(view: DataView, offset: number): ReadonlyMap<numb
     const endCharCode = readUint32(view, groupOffset + 4);
     const startGlyphId = readUint32(view, groupOffset + 8);
     if (startCharCode === undefined || endCharCode === undefined || startGlyphId === undefined) {
-      continue;
+      return undefined;
+    }
+    if (
+      startCharCode > endCharCode || endCharCode > 0x10ffff ||
+      endCharCode - startCharCode + 1 > MAX_CMAP_MAPPINGS - glyphUnicodeByGlyphId.size
+    ) {
+      return undefined;
     }
 
     for (let codePoint = startCharCode; codePoint <= endCharCode; codePoint += 1) {
       const glyphId = startGlyphId + (codePoint - startCharCode);
-      if (!glyphUnicodeByGlyphId.has(glyphId)) {
-        glyphUnicodeByGlyphId.set(glyphId, String.fromCodePoint(codePoint));
-      }
+      addGlyphMapping(glyphUnicodeByGlyphId, glyphId, codePoint);
     }
   }
 
-  return glyphUnicodeByGlyphId.size > 0 ? glyphUnicodeByGlyphId : undefined;
+  return nonEmptyMap(glyphUnicodeByGlyphId);
+}
+
+function parseFormat13Subtable(view: DataView, offset: number, tableEnd: number): ReadonlyMap<number, string> | undefined {
+  const reserved = readUint16(view, offset + 2);
+  const length = readUint32(view, offset + 4);
+  const numGroups = readUint32(view, offset + 12);
+  if (
+    reserved !== 0 || length === undefined || numGroups === undefined ||
+    numGroups > MAX_CMAP_MAPPINGS || length < 16 + numGroups * 12 ||
+    !isRangeWithinTable(view, offset, length, tableEnd)
+  ) {
+    return undefined;
+  }
+
+  const glyphUnicodeByGlyphId = new Map<number, string>();
+  for (let groupIndex = 0; groupIndex < numGroups; groupIndex += 1) {
+    const groupOffset = offset + 16 + groupIndex * 12;
+    const startCharCode = readUint32(view, groupOffset);
+    const endCharCode = readUint32(view, groupOffset + 4);
+    const glyphId = readUint32(view, groupOffset + 8);
+    if (
+      startCharCode === undefined || endCharCode === undefined || glyphId === undefined ||
+      startCharCode > endCharCode || endCharCode > 0x10ffff
+    ) {
+      return undefined;
+    }
+    addGlyphMapping(glyphUnicodeByGlyphId, glyphId, startCharCode);
+  }
+  return nonEmptyMap(glyphUnicodeByGlyphId);
+}
+
+function addGlyphMapping(target: Map<number, string>, glyphId: number, codePoint: number): void {
+  if (glyphId === 0 || target.has(glyphId) || codePoint < 0 || codePoint > 0x10ffff) {
+    return;
+  }
+  target.set(glyphId, String.fromCodePoint(codePoint));
+}
+
+function nonEmptyMap(value: Map<number, string>): ReadonlyMap<number, string> | undefined {
+  return value.size > 0 ? value : undefined;
 }
 
 function readUint16(view: DataView, offset: number): number | undefined {
@@ -303,4 +453,8 @@ function readAscii(view: DataView, offset: number, length: number): string | und
 
 function isRangeWithinView(view: DataView, offset: number, length: number): boolean {
   return Number.isInteger(offset) && Number.isInteger(length) && offset >= 0 && length >= 0 && offset + length <= view.byteLength;
+}
+
+function isRangeWithinTable(view: DataView, offset: number, length: number, tableEnd: number): boolean {
+  return isRangeWithinView(view, offset, length) && offset + length <= tableEnd;
 }

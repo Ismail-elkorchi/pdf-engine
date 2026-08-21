@@ -5,7 +5,11 @@ import {
   type PdfContentOperator,
   type PdfContentStreamInput,
 } from "./pdf-content.ts";
-import { type PdfDocumentModel, type PdfPageModel } from "./pdf-document-model.ts";
+import {
+  resolvePageContentReferences,
+  type PdfDocumentModel,
+  type PdfPageModel,
+} from "./pdf-document-model.ts";
 import { PdfSyntaxParser } from "./pdf-syntax.ts";
 import { formatPdfValue } from "./pdf-value-format.ts";
 import {
@@ -162,18 +166,36 @@ export interface PdfDocumentAnalysis {
   readonly repairState: PdfRepairState;
 }
 
+export interface PdfDocumentAnalysisOptions {
+  readonly pageNumbers?: ReadonlySet<number>;
+}
+
 export async function buildPdfDocumentAnalysis(
   store: PdfObjectStore,
   model: PdfDocumentModel,
+  options: PdfDocumentAnalysisOptions = {},
 ): Promise<PdfDocumentAnalysis> {
+  const pages = options.pageNumbers === undefined
+    ? model.pages
+    : model.pages.filter((page) => options.pageNumbers?.has(page.pageNumber) === true);
+  const pageContentRefs = new Map<number, readonly PdfObjectRef[]>();
+  for (const page of pages) {
+    pageContentRefs.set(page.pageNumber, await resolvePageContentReferences(store, page));
+  }
+  const contentReferenceKeys = new Set(
+    [...pageContentRefs.values()].flatMap((refs) => refs.map(keyOfObjectRef)),
+  );
   const indirectObjects: ParsedIndirectObject[] = [];
-  for (const object of await store.all()) {
-    indirectObjects.push(await projectObject(store, object, model));
+  const objects = options.pageNumbers === undefined
+    ? await store.all()
+    : await collectPageAnalysisObjects(store, pages, pageContentRefs);
+  for (const object of objects) {
+    indirectObjects.push(await projectObject(store, object, contentReferenceKeys));
   }
   const objectIndex = new Map(indirectObjects.map((object) => [keyOfObjectRef(object.ref), object] as const));
   const pageEntries: ParsedPageEntry[] = [];
-  for (const page of model.pages) {
-    pageEntries.push(await projectPage(store, page));
+  for (const page of pages) {
+    pageEntries.push(await projectPage(store, page, pageContentRefs.get(page.pageNumber) ?? []));
   }
   const crossReferenceSections: PdfCrossReferenceSection[] = store.sections.map((section) => ({
     kind: section.kind === "stream" ? "xref-stream" : "classic",
@@ -195,9 +217,9 @@ export async function buildPdfDocumentAnalysis(
   return {
     budget: store.budget,
     scanText: "",
-    byteLength: store.bytes.byteLength,
+    byteLength: store.byteLength,
     isTruncated: false,
-    usedFullStructureScan: true,
+    usedFullStructureScan: options.pageNumbers === undefined,
     fileType: "pdf",
     pdfVersion: store.version,
     ...(store.startXref !== undefined ? { startXrefOffset: store.startXref } : {}),
@@ -214,7 +236,7 @@ export async function buildPdfDocumentAnalysis(
     expandedObjectStreams: store.sections.some((section) => section.entries.some((entry) => entry.kind === "compressed")),
     decodedXrefStreamEntries: true,
     pageCountEstimate: pageEntries.length,
-    objectCountEstimate: indirectObjects.length,
+    objectCountEstimate: store.objectCount,
     parseCoverage: {
       header: true,
       indirectObjects: indirectObjects.length > 0,
@@ -227,10 +249,90 @@ export async function buildPdfDocumentAnalysis(
   };
 }
 
+async function collectPageAnalysisObjects(
+  store: PdfObjectStore,
+  pages: readonly PdfPageModel[],
+  pageContentRefs: ReadonlyMap<number, readonly PdfObjectRef[]>,
+): Promise<readonly PdfIndirectObject[]> {
+  const objects = new Map<string, PdfIndirectObject>();
+  const queued = new Set<string>();
+  const pending: PdfObjectRef[] = [];
+  const enqueue = (ref: PdfObjectRef): void => {
+    const key = keyOfObjectRef(ref);
+    if (!queued.has(key)) {
+      queued.add(key);
+      pending.push(ref);
+    }
+  };
+
+  for (const page of pages) {
+    pageContentRefs.get(page.pageNumber)?.forEach(enqueue);
+    page.annotations.forEach(enqueue);
+    collectValueReferences(page.resources, enqueue);
+  }
+
+  const rootObject = await store.require(store.root);
+  objects.set(keyOfObjectRef(rootObject.ref), rootObject);
+  if (rootObject.value.kind === "dictionary") {
+    collectValueReferences(pdfDictionaryGet(rootObject.value, "OCProperties"), enqueue);
+  }
+
+  while (pending.length > 0) {
+    const ref = pending.shift();
+    if (ref === undefined) {
+      break;
+    }
+    const object = await store.get(ref);
+    if (object === undefined) {
+      continue;
+    }
+    objects.set(keyOfObjectRef(ref), object);
+    collectValueReferences(object.value, enqueue);
+  }
+
+  return [...objects.values()].toSorted((left, right) =>
+    left.source.start - right.source.start ||
+    left.ref.objectNumber - right.ref.objectNumber ||
+    left.ref.generationNumber - right.ref.generationNumber
+  );
+}
+
+function collectValueReferences(
+  value: PdfValue | undefined,
+  add: (ref: PdfObjectRef) => void,
+): void {
+  if (value === undefined) {
+    return;
+  }
+  switch (value.kind) {
+    case "reference":
+      add(value.value);
+      return;
+    case "array":
+      value.items.forEach((item) => collectValueReferences(item, add));
+      return;
+    case "dictionary":
+      for (const entry of value.entries) {
+        if (entry.key.value === "Parent" || entry.key.value === "P" || entry.key.value === "Kids") {
+          continue;
+        }
+        collectValueReferences(entry.value, add);
+      }
+      return;
+    case "boolean":
+    case "integer":
+    case "name":
+    case "null":
+    case "real":
+    case "string":
+      return;
+  }
+}
+
 async function projectObject(
   store: PdfObjectStore,
   object: PdfIndirectObject,
-  model: PdfDocumentModel,
+  contentReferenceKeys: ReadonlySet<string>,
 ): Promise<ParsedIndirectObject> {
   const dictionary = object.value.kind === "dictionary" ? object.value : undefined;
   const dictionaryEntries = dictionary === undefined
@@ -240,7 +342,8 @@ async function projectObject(
   let decodedBytes: Uint8Array | undefined;
   let filters: readonly string[] | undefined;
   let decodeState: "available" | "decoded" | "unsupported-filter" | "failed" | undefined;
-  if (object.stream !== undefined) {
+  const subtype = dictionary === undefined ? undefined : pdfAsName(pdfDictionaryGet(dictionary, "Subtype"));
+  if (object.stream !== undefined && subtype !== "Image") {
     try {
       const decoded = await store.decodeStream(object.ref);
       decodedBytes = decoded?.bytes;
@@ -250,7 +353,7 @@ async function projectObject(
       decodeState = error instanceof Error && error.message.includes("unsupported-filter") ? "unsupported-filter" : "failed";
     }
   }
-  const streamRole = classifyStreamRole(object, model);
+  const streamRole = classifyStreamRole(object, contentReferenceKeys);
   return {
     ref: object.ref,
     offset: object.source.start,
@@ -276,7 +379,11 @@ async function projectObject(
   };
 }
 
-async function projectPage(store: PdfObjectStore, page: PdfPageModel): Promise<ParsedPageEntry> {
+async function projectPage(
+  store: PdfObjectStore,
+  page: PdfPageModel,
+  contentStreamRefs: readonly PdfObjectRef[],
+): Promise<ParsedPageEntry> {
   const resources = page.resources;
   const fonts = resources === undefined ? undefined : await store.resolveDictionary(pdfDictionaryGet(resources, "Font"));
   const colorSpaces = resources === undefined ? undefined : await store.resolveDictionary(pdfDictionaryGet(resources, "ColorSpace"));
@@ -286,7 +393,7 @@ async function projectPage(store: PdfObjectStore, page: PdfPageModel): Promise<P
   return {
     pageNumber: page.pageNumber,
     pageRef: page.ref,
-    contentStreamRefs: page.contents,
+    contentStreamRefs,
     annotationRefs: page.annotations,
     fontBindings: fontBindings(fonts),
     colorSpaceBindings: valueBindings(colorSpaces),
@@ -713,8 +820,11 @@ function classifyMarkedContent(tag: string | undefined): ParsedMarkedContentKind
   return "other";
 }
 
-function classifyStreamRole(object: PdfIndirectObject, model: PdfDocumentModel): ParsedIndirectObject["streamRole"] {
-  if (model.pages.some((page) => page.contents.some((ref) => pdfReferenceKey(ref) === pdfReferenceKey(object.ref)))) {
+function classifyStreamRole(
+  object: PdfIndirectObject,
+  contentReferenceKeys: ReadonlySet<string>,
+): ParsedIndirectObject["streamRole"] {
+  if (contentReferenceKeys.has(pdfReferenceKey(object.ref))) {
     return "content";
   }
   if (object.value.kind !== "dictionary") {

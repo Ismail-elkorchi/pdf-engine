@@ -88,11 +88,7 @@ async function latestBunStable() {
 }
 
 async function latestGitHubRelease(owner, repository) {
-  const response = await fetch(`https://api.github.com/repos/${owner}/${repository}/releases/latest`, {
-    headers: {
-      'User-Agent': 'pdf-engine-runtime-staleness'
-    }
-  });
+  const response = await fetch(`https://api.github.com/repos/${owner}/${repository}/releases/latest`);
 
   if (!response.ok) {
     throw new Error(`${owner}/${repository} latest release fetch failed: ${response.status}`);
