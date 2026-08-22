@@ -17,21 +17,22 @@ The package does not display or modify PDFs. It never executes JavaScript, launc
 - detached CMS signature integrity checks and caller-supplied certificate trust policy with offline CRL evidence
 - explicit policy and resource budgets for bytes, pages, objects, nesting, decoded data, operators, image pixels, and caches
 
-## Install and build
+## Install
 
-The package is currently developed from source:
+Install from npm:
 
 ```bash
-npm ci
-npm run build
+npm install @ismail-elkorchi/pdf-engine
 ```
+
+For Deno, the same release is available as `jsr:@ismail-elkorchi/pdf-engine`.
 
 ## Open and read a document
 
 ```js
 import { readFile } from "node:fs/promises";
 
-import { createPdfEngine } from "./dist/index.js";
+import { createPdfEngine } from "@ismail-elkorchi/pdf-engine";
 
 const engine = createPdfEngine();
 

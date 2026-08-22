@@ -92,8 +92,7 @@ export type PdfKnownLimitCode =
   | "layout-region-heuristic"
   | "knowledge-chunk-heuristic"
   | "knowledge-markdown-heuristic"
-  | "table-projection-heuristic"
-  | "table-projection-not-implemented";
+  | "table-projection-heuristic";
 
 /**
  * Decode state for one recovered stream object.
@@ -1292,6 +1291,23 @@ export interface PdfKnowledgeForm {
 }
 
 /**
+ * One content item in knowledge reading order.
+ */
+export type PdfKnowledgeItem =
+  | {
+      /** Item discriminator. */
+      readonly kind: "chunk";
+      /** Textual knowledge chunk at this reading position. */
+      readonly chunk: PdfKnowledgeChunk;
+    }
+  | {
+      /** Item discriminator. */
+      readonly kind: "table";
+      /** Structured table at this reading position. */
+      readonly table: PdfKnowledgeTable;
+    };
+
+/**
  * Current knowledge-stage result for a document.
  */
 export interface PdfKnowledgeDocument {
@@ -1305,6 +1321,8 @@ export interface PdfKnowledgeDocument {
   readonly tables: readonly PdfKnowledgeTable[];
   /** Form projections when the current evidence is sufficient. */
   readonly forms: readonly PdfKnowledgeForm[];
+  /** Text chunks and tables in source reading order. */
+  readonly items: readonly PdfKnowledgeItem[];
   /** Markdown projection in knowledge-chunk order. */
   readonly markdown: string;
   /** Flattened text in knowledge-chunk order. */

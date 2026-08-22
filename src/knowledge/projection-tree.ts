@@ -1,11 +1,9 @@
 import type {
   PdfKnowledgeCitation,
   PdfKnowledgeChunk,
+  PdfKnowledgeItem,
   PdfKnowledgeTable,
 } from "../contracts.ts";
-import type {
-  KnowledgeProjectionItem,
-} from "./projection-types.ts";
 
 export type KnowledgeProjectionNode =
   | KnowledgeProjectionHeadingNode
@@ -48,7 +46,7 @@ export interface KnowledgeProjectionTableCellNode {
 }
 
 export function buildKnowledgeProjectionTree(
-  items: readonly KnowledgeProjectionItem[],
+  items: readonly PdfKnowledgeItem[],
 ): readonly KnowledgeProjectionNode[] {
   return items.flatMap((item) => {
     if (item.kind === "table") {

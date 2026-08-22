@@ -5,7 +5,7 @@
 | Version | Supported |
 | --- | --- |
 | `main` | development security fixes |
-| Published releases | none yet |
+| `0.1.x` | security fixes |
 
 ## Reporting a vulnerability
 
