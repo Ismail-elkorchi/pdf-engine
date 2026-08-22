@@ -32,13 +32,15 @@ export function buildKnowledgeDocument(
     chunks,
     tables,
     forms,
+    items: projectionItems,
     markdown: buildKnowledgeMarkdownFromProjectionItems(projectionItems),
     extractedText: chunks.map((chunk) => chunk.text).join("\n\n"),
-    knownLimits: dedupeKnownLimits(
-      tables.length === 0
-        ? [...layout.knownLimits, "knowledge-chunk-heuristic", "knowledge-markdown-heuristic", "table-projection-not-implemented"]
-        : [...layout.knownLimits, "knowledge-chunk-heuristic", "knowledge-markdown-heuristic", "table-projection-heuristic"],
-    ),
+    knownLimits: dedupeKnownLimits([
+      ...layout.knownLimits,
+      "knowledge-chunk-heuristic",
+      "knowledge-markdown-heuristic",
+      "table-projection-heuristic",
+    ]),
   };
 }
 

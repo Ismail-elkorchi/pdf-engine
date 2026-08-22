@@ -52,6 +52,7 @@ jobs:
         with:
           node-version: 24
           cache: npm
+          registry-url: https://registry.npmjs.org
 
       - name: Install dependencies
         run: npm ci
@@ -189,22 +190,28 @@ jobs:
           VERSION: ${{ steps.meta.outputs.version }}
         run: |
           set -euo pipefail
+
+          version_url="https://jsr.io/${PACKAGE_NAME}/${VERSION}_meta.json"
           set +e
-          jsr_info_output="$(npx -y jsr info "${PACKAGE_NAME}@${VERSION}" 2>&1)"
-          jsr_info_status=$?
+          http_status="$(curl --silent --show-error --location --output /tmp/jsr-version.json --write-out '%{http_code}' "${version_url}")"
+          curl_status=$?
           set -e
 
-          if [ ${jsr_info_status} -eq 0 ]; then
-            echo "::error::JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
-            echo "${jsr_info_output}"
+          if [ ${curl_status} -ne 0 ]; then
+            echo "::error::Unable to query JSR version metadata for ${PACKAGE_NAME}@${VERSION}"
             exit 1
           fi
 
-          if printf '%s' "${jsr_info_output}" | grep -Eqi '404|not found|Received 404'; then
+          if [ "${http_status}" = "200" ]; then
+            echo "::error::JSR version already exists: ${PACKAGE_NAME}@${VERSION}"
+            exit 1
+          fi
+
+          if [ "${http_status}" = "404" ]; then
             echo "JSR version does not exist yet: ${PACKAGE_NAME}@${VERSION}"
           else
-            echo "::error::Unable to verify JSR version state for ${PACKAGE_NAME}@${VERSION}"
-            echo "${jsr_info_output}"
+            echo "::error::Unexpected JSR response ${http_status} for ${PACKAGE_NAME}@${VERSION}"
+            cat /tmp/jsr-version.json
             exit 1
           fi
 
@@ -233,19 +240,12 @@ jobs:
           name: publish-${{ steps.meta.outputs.version }}
           path: publish-artifacts/
 
-      - name: Ensure tokenless npm auth for OIDC publish
-        if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_npm == 'true' }}
-        run: |
-          unset NODE_AUTH_TOKEN
-          npm config delete //registry.npmjs.org/:_authToken || true
-
-      - name: Publish npm (trusted publishing)
+      - name: Publish npm
         if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_npm == 'true' }}
         env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
           NPM_CONFIG_PROVENANCE: true
-        run: |
-          unset NODE_AUTH_TOKEN
-          npm publish --provenance --access public
+        run: npm publish --provenance --access public
 
       - name: Publish JSR
         if: ${{ steps.meta.outputs.dry_run != 'true' && steps.meta.outputs.publish_jsr == 'true' }}

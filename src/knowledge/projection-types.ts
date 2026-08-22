@@ -1,6 +1,6 @@
 import type {
   PdfKnowledgeChunk,
-  PdfKnowledgeTable,
+  PdfKnowledgeItem,
   PdfKnowledgeTableHeuristic,
   PdfLayoutBlock,
   PdfObservedTextRun,
@@ -39,18 +39,7 @@ export interface RowBand {
 
 export type AnchoredLayoutBlock = PdfLayoutBlock & { readonly anchor: PdfPoint };
 
-export type KnowledgeProjectionItem =
-  | {
-    readonly kind: "chunk";
-    readonly chunk: PdfKnowledgeChunk;
-  }
-  | {
-    readonly kind: "table";
-    readonly chunk?: PdfKnowledgeChunk;
-    readonly table: PdfKnowledgeTable;
-  };
-
 export interface KnowledgeChunkBuildResult {
   readonly chunks: readonly PdfKnowledgeChunk[];
-  readonly projectionItems: readonly KnowledgeProjectionItem[];
+  readonly projectionItems: readonly PdfKnowledgeItem[];
 }

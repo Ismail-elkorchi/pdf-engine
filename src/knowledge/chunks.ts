@@ -8,13 +8,13 @@ import type {
   PdfKnowledgeChunk,
   PdfKnowledgeChunkRole,
   PdfKnowledgeCitation,
+  PdfKnowledgeItem,
   PdfKnowledgeTable,
   PdfLayoutBlock,
   PdfLayoutDocument,
 } from "../contracts.ts";
 import type {
   KnowledgeChunkBuildResult,
-  KnowledgeProjectionItem,
 } from "./projection-types.ts";
 
 const DEFAULT_CHUNK_TARGET = 420;
@@ -40,7 +40,7 @@ export function buildKnowledgeChunksWithProjectionItems(
   tables: readonly PdfKnowledgeTable[],
 ): KnowledgeChunkBuildResult {
   const chunks: PdfKnowledgeChunk[] = [];
-  const projectionItems: KnowledgeProjectionItem[] = [];
+  const projectionItems: PdfKnowledgeItem[] = [];
   const tableProjectionBlockIds = new Set(tables.flatMap((table) => table.blockIds));
   let currentBlocks: PdfLayoutBlock[] = [];
   let currentProjectionBlocks: PdfLayoutBlock[] = [];

@@ -42,9 +42,12 @@ test("knowledge projects compact row-run tables with citation-backed cells", () 
     "table-projection-heuristic",
   ]);
   assert.equal(knowledge.tables.length, 1);
+  assert.deepEqual(knowledge.items.map((item) => item.kind), ["chunk", "table"]);
 
   const [table] = knowledge.tables;
   assert.ok(table);
+  assert.equal(knowledge.items[1]?.kind, "table");
+  assert.equal(knowledge.items[1]?.kind === "table" ? knowledge.items[1].table : undefined, table);
   assert.equal(table.heuristic, "row-sequence");
   assert.deepEqual(table.headers, ["Item", "Nominal Width", "Measured Width", "Result"]);
   assert.deepEqual(
@@ -197,19 +200,9 @@ test("knowledge markdown serializes typed table nodes instead of table chunk tex
     {
       kind: "table",
       table,
-      chunk: {
-        id: "chunk-corrupted-table",
-        text: "corrupted serialized table chunk",
-        role: "mixed",
-        pageNumbers: [1],
-        blockIds: ["block-field"],
-        runIds: ["run-field"],
-        citations: [],
-      },
     },
   ]);
 
-  assert.doesNotMatch(markdown, /corrupted serialized table chunk/u);
   assert.match(markdown, /\| Field \| Value \|/u);
   assert.match(markdown, /\| Requester \| Ada Lovelace \|/u);
 });
@@ -1107,7 +1100,7 @@ test("knowledge does not project compact row-run tables without consistent numer
   assert.deepEqual(knowledge.knownLimits, [
     "knowledge-chunk-heuristic",
     "knowledge-markdown-heuristic",
-    "table-projection-not-implemented",
+    "table-projection-heuristic",
   ]);
 });
 

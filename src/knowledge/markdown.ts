@@ -5,18 +5,15 @@ import {
 
 import type {
   PdfKnowledgeChunk,
+  PdfKnowledgeItem,
   PdfKnowledgeTable,
 } from "../contracts.ts";
 import type {
   KnowledgeProjectionNode,
   KnowledgeProjectionTableNode,
 } from "./projection-tree.ts";
-import type {
-  KnowledgeProjectionItem,
-} from "./projection-types.ts";
-
 export function buildKnowledgeMarkdownFromProjectionItems(
-  items: readonly KnowledgeProjectionItem[],
+  items: readonly PdfKnowledgeItem[],
 ): string {
   return serializeKnowledgeProjectionTree(buildKnowledgeProjectionTree(items));
 }
@@ -26,7 +23,7 @@ export function buildKnowledgeMarkdown(
   tables: readonly PdfKnowledgeTable[],
 ): string {
   const chunkTexts = new Set(chunks.map((chunk) => normalizeMultilineText(chunk.text)));
-  const tableItems: KnowledgeProjectionItem[] = tables
+  const tableItems: PdfKnowledgeItem[] = tables
     .filter((table) => !chunkTexts.has(normalizeMultilineText(serializeKnowledgeTable(table))))
     .map((table) => ({ kind: "table", table }));
   return buildKnowledgeMarkdownFromProjectionItems([
