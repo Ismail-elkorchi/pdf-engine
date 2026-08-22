@@ -2,26 +2,7 @@ changelog:
   exclude:
     labels:
       - skip-changelog
-      - chore
-      - internal
-      - dependencies
-      - github_actions
   categories:
-    - title: Features
+    - title: Changes
       labels:
-        - feature
-        - enhancement
-    - title: Fixes
-      labels:
-        - fix
-        - bug
-        - bugfix
-    - title: Security
-      labels:
-        - security
-    - title: Maintenance
-      labels:
-        - maintenance
-        - refactor
-        - docs
-        - documentation
+        - "*"
